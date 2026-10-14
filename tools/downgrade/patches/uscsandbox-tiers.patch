@@ -1,0 +1,59 @@
+License: this patch changes USCSandbox (https://github.com/nesrak1/USCSandbox), which has
+no license file of its own and reworks code from AssetRipper, under the GNU General Public
+License version 3. This patch is offered under the GNU General Public License version 3
+(GPL-3.0), like the code it modifies, and is not covered by the MIT license of the rest of
+this repository (see THIRD_PARTY_NOTICES).
+
+What it changes: Unity 2022 serializes a pass's player programs as one list per graphics tier,
+some empty (Crow Country's: [1, 1, 1, 0]). USCSandbox read the last list, so every pass came out
+without programs; it reads the first list that has programs, with that tier's parameter blob
+indices. Applied after uscsandbox-swizzle.patch. Lines before the first diff are a comment.
+
+diff --git a/USCSandbox/Processor/SerializedProgramInfo.cs b/USCSandbox/Processor/SerializedProgramInfo.cs
+index e0c16ad..29b9ebc 100644
+--- a/USCSandbox/Processor/SerializedProgramInfo.cs
++++ b/USCSandbox/Processor/SerializedProgramInfo.cs
+@@ -14,30 +14,31 @@ namespace USCSandbox.Processor
+         {
+             if (!field["m_PlayerSubPrograms"].IsDummy)
+             {
+-                var parameterBlobIndices = field["m_ParameterBlobIndices.Array"];
+-                if (parameterBlobIndices.Children.Count > 0)
++                // One list per graphics tier, some of them empty (Unity 2022: [1, 1, 1, 0]);
++                // the first that has programs, and its parameter blob indices.
++                var subProgramInfos = field["m_PlayerSubPrograms.Array"];
++                var tier = subProgramInfos.Children.FindIndex(t => t["Array"].Children.Count > 0);
++                if (tier >= 0)
+                 {
+-                    ParameterBlobIndices = parameterBlobIndices
+-                        .Last()["Array"]
+-                        .Select(i => i.AsUInt)
++                    SubProgramInfos = subProgramInfos[tier]["Array"]
++                        .Select(i => new SerializedSubProgramInfo(i))
+                         .ToList();
+                 }
+                 else
+                 {
+-                    ParameterBlobIndices = new List<uint>(0);
++                    SubProgramInfos = new List<SerializedSubProgramInfo>(0);
+                 }
+ 
+-                var subProgramInfos = field["m_PlayerSubPrograms.Array"];
+-                if (subProgramInfos.Children.Count > 0)
++                var parameterBlobIndices = field["m_ParameterBlobIndices.Array"];
++                if (tier >= 0 && tier < parameterBlobIndices.Children.Count)
+                 {
+-                    SubProgramInfos = subProgramInfos
+-                        .Last()["Array"]
+-                        .Select(i => new SerializedSubProgramInfo(i))
++                    ParameterBlobIndices = parameterBlobIndices[tier]["Array"]
++                        .Select(i => i.AsUInt)
+                         .ToList();
+                 }
+                 else
+                 {
+-                    SubProgramInfos = new List<SerializedSubProgramInfo>(0);
++                    ParameterBlobIndices = new List<uint>(0);
+                 }
+             }
+             else
