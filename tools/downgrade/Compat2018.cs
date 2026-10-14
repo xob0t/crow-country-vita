@@ -3,6 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using UnityEngine;
 
+// The editor's API updater then takes CrowCompat as up to date and leaves it alone, as it does the
+// rewritten assemblies (DowngradeAssemblies.MarkApiVersion); its check failed on CrowCompat every
+// time it changed (it could not resolve UnityEngine.CoreModule for RuntimeInitializeOnLoadMethod's enum).
+[assembly: UnityAPICompatibilityVersion("2018.2.19f1")]
+
 // Implementations of Unity 2022 APIs that Unity 2018.2 lacks. The assembly
 // downgrader redirects missing references here by naming convention:
 //   missing type  Namespace.Name        -> CrowCompat.Namespace_Name
@@ -16,8 +21,16 @@ using UnityEngine;
 //   Compat2018.cs        AssemblyAliases, TypeNames (the renamed assemblies; the save binder's cache)
 //   ApiShims.cs          Unity 2022 API that 2018.2 lacks (the naming convention above)
 //   TextCore.cs, Addressables.cs, Video.cs  the packages and engine modules the target lacks
+//   ProbeFiles.cs        the probe's flags and the player's log on the PS Vita (ux0:data/crow)
 //   Diag.cs              the measurement probe (-crow-* flags)
 //   CamEffect.cs         the camera's post-processing chain at half size on the PS Vita
+//   Quality.cs           lighting and shadow overrides from the probe's flags
+//   Window.cs            the game's fullscreen calls: kept windowed for test runs (-crow-windowed), none on the PS Vita
+//   Saves.cs             the save folder and persistentDataPath (ux0:data/CrowCountry on the PS Vita)
+//   RewiredPlatform.cs   the platform Rewired detects (PSVita on the PS Vita, not the build's Windows)
+//   Memory.cs            the memory probe (-crow-memory: allocator totals, free PS Vita memory, assets by type)
+//   Settings.cs          the game's console mode and Switch animation choice on the PS Vita (-crow-console, -crow-platform-anim)
+//   Loading.cs           load time: long frames per player loop step, MeshCombineStudio's combining time (-crow-load-trace, -crow-mcs-time)
 
 namespace CrowCompat
 {
@@ -47,17 +60,29 @@ namespace CrowCompat
     // instead of the game's, so such names are also looked up in every loaded assembly.
     public static class TypeNames
     {
+        // The PS Vita's CrowCompat (lookups also run on the loading thread, where Unity's API is off limits).
+#if CROW_VITA
+        const bool Vita = true;
+#else
+        const bool Vita = false;
+#endif
         public static Type GetType(string name) { return GetType(name, false, false); }
         public static Type GetType(string name, bool throwOnError) { return GetType(name, throwOnError, false); }
         // Names found are remembered: IL2CPP parses the name and searches its images every time.
+        // On every thread: PlayMaker looks its action and field types up on the loading thread, as
+        // each FSM is read (1-2 s of the PS Vita's title load went to these lookups uncached).
         static readonly Dictionary<string, Type> found = new Dictionary<string, Type>();
         static readonly Dictionary<string, Type> foundIgnoringCase = new Dictionary<string, Type>();
 
         public static Type GetType(string name, bool throwOnError, bool ignoreCase)
         {
-            Dictionary<string, Type> cache = name != null && MainThread.IsCurrent ? ignoreCase ? foundIgnoringCase : found : null;
+            Dictionary<string, Type> cache = name != null ? ignoreCase ? foundIgnoringCase : found : null;
             Type type;
-            if (cache != null && cache.TryGetValue(name, out type))
+            bool known = false;
+            if (cache != null)
+                lock (cache) known = cache.TryGetValue(name, out type);
+            else type = null;
+            if (known)
                 return type != null || !throwOnError ? type : Type.GetType(Rename(name), true, ignoreCase);
             string renamed = Rename(name);
             type = Type.GetType(renamed, false, ignoreCase);
@@ -68,11 +93,17 @@ namespace CrowCompat
             {
                 // A miss scans every assembly. The PS Vita's IL2CPP player never loads another
                 // one, so a miss there stays a miss; other players (Mono) could, so they keep asking.
-                if (cache != null && Application.platform == RuntimePlatform.PSP2) cache[name] = null;
+                if (cache != null && Vita) lock (cache) cache[name] = null;
                 return throwOnError ? Type.GetType(renamed, true, ignoreCase) : null;
             }
-            if (cache != null) cache[name] = type;
+            if (cache != null) lock (cache) cache[name] = type;
             return type;
+        }
+
+        // Replaces new BinaryFormatter(): the formatter starts with the alias binder.
+        public static System.Runtime.Serialization.Formatters.Binary.BinaryFormatter NewBinaryFormatter()
+        {
+            return new System.Runtime.Serialization.Formatters.Binary.BinaryFormatter { Binder = new AliasBinder(null) };
         }
 
         // Replaces BinaryFormatter.Binder assignments. When the game's binder cannot
@@ -81,12 +112,12 @@ namespace CrowCompat
         public static void SetBinder(System.Runtime.Serialization.Formatters.Binary.BinaryFormatter formatter,
                                      System.Runtime.Serialization.SerializationBinder binder)
         {
-            formatter.Binder = binder == null || binder is AliasBinder ? binder : new AliasBinder(binder);
+            formatter.Binder = binder is AliasBinder ? binder : new AliasBinder(binder);
         }
 
         sealed class AliasBinder : System.Runtime.Serialization.SerializationBinder
         {
-            readonly System.Runtime.Serialization.SerializationBinder inner;
+            readonly System.Runtime.Serialization.SerializationBinder inner;  // the game's, or null
             public AliasBinder(System.Runtime.Serialization.SerializationBinder inner) { this.inner = inner; }
 
             // -compat-log-binds logs each binding.
@@ -98,7 +129,7 @@ namespace CrowCompat
             public override Type BindToType(string assemblyName, string typeName)
             {
                 if (log || !MainThread.IsCurrent) return Bind(assemblyName, typeName);
-                string key = inner.GetType().FullName + "|" + assemblyName + "|" + typeName;
+                string key = (inner == null ? "" : inner.GetType().FullName) + "|" + assemblyName + "|" + typeName;
                 Type type;
                 if (!bindings.TryGetValue(key, out type)) bindings[key] = type = Bind(assemblyName, typeName);
                 return type;
@@ -106,7 +137,7 @@ namespace CrowCompat
 
             Type Bind(string assemblyName, string typeName)
             {
-                Type bound = inner.BindToType(assemblyName, typeName);
+                Type bound = inner == null ? null : inner.BindToType(assemblyName, typeName);
                 Type type = bound ?? Type.GetType(Rename(typeName) + ", " + RenameAssembly(assemblyName));
                 if (log) Debug.Log("BIND " + assemblyName + " | " + typeName + " -> " + (bound != null ? "game " : "alias ") +
                                    (type == null ? "null" : type.AssemblyQualifiedName));
@@ -116,7 +147,8 @@ namespace CrowCompat
             // Saves name the original assemblies, so they stay compatible with the source version.
             public override void BindToName(Type serializedType, out string assemblyName, out string typeName)
             {
-                inner.BindToName(serializedType, out assemblyName, out typeName);
+                assemblyName = typeName = null;
+                if (inner != null) inner.BindToName(serializedType, out assemblyName, out typeName);
                 if (assemblyName == null) assemblyName = Original(serializedType.Assembly.FullName);
                 if (typeName == null) typeName = Original(serializedType.FullName);
             }

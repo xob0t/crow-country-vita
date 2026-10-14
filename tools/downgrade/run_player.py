@@ -1,0 +1,140 @@
+"""Run a Windows player on a desktop of its own, so it never takes the screen, the keyboard or the
+mouse from whoever uses the PC: Unity's players bring their window to the front whatever the
+launcher asks, but a window on another desktop (CreateDesktop) cannot come in front of this one.
+The player runs windowed at 960x544 (-crow-windowed) and muted (-crow-mute). The project keeps
+runInBackground on. The player's log goes to <log> (through cmd's redirection,
+since a process on another desktop gets its standard handles from its command line).
+
+    uv run tools/downgrade/run_player.py <exe> <log> [--timeout s] -- <player arguments...>
+
+Exits with the player's exit code; a player still running after --timeout seconds is killed.
+"""
+
+import argparse
+import ctypes
+import ctypes.wintypes as wt
+import subprocess
+import sys
+from pathlib import Path
+
+kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+DESKTOP = 'crow-country-runs'
+GENERIC_ALL = 0x10000000
+CREATE_NO_WINDOW = 0x08000000
+WAIT_TIMEOUT = 0x102
+
+
+class StartupInfo(ctypes.Structure):
+    _fields_ = [
+        ('cb', wt.DWORD),
+        ('lpReserved', wt.LPWSTR),
+        ('lpDesktop', wt.LPWSTR),
+        ('lpTitle', wt.LPWSTR),
+        ('dwX', wt.DWORD),
+        ('dwY', wt.DWORD),
+        ('dwXSize', wt.DWORD),
+        ('dwYSize', wt.DWORD),
+        ('dwXCountChars', wt.DWORD),
+        ('dwYCountChars', wt.DWORD),
+        ('dwFillAttribute', wt.DWORD),
+        ('dwFlags', wt.DWORD),
+        ('wShowWindow', wt.WORD),
+        ('cbReserved2', wt.WORD),
+        ('lpReserved2', ctypes.c_void_p),
+        ('hStdInput', wt.HANDLE),
+        ('hStdOutput', wt.HANDLE),
+        ('hStdError', wt.HANDLE),
+    ]
+
+
+class ProcessInformation(ctypes.Structure):
+    _fields_ = [('hProcess', wt.HANDLE), ('hThread', wt.HANDLE), ('dwProcessId', wt.DWORD), ('dwThreadId', wt.DWORD)]
+
+
+user32.CreateDesktopW.restype = wt.HANDLE
+user32.CreateDesktopW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.c_void_p]
+kernel32.CreateProcessW.argtypes = [
+    wt.LPCWSTR,
+    wt.LPWSTR,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+    wt.BOOL,
+    wt.DWORD,
+    ctypes.c_void_p,
+    wt.LPCWSTR,
+    ctypes.POINTER(StartupInfo),
+    ctypes.POINTER(ProcessInformation),
+]
+kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
+kernel32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+kernel32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+
+
+def run(exe: Path, log: Path, arguments, timeout=None):
+    """Runs the player on DESKTOP; returns its exit code (1 if it was killed at the timeout)."""
+    desktop = user32.CreateDesktopW(DESKTOP, None, None, 0, GENERIC_ALL, None)
+    if not desktop:
+        raise OSError(ctypes.get_last_error(), 'CreateDesktop failed')
+    log.parent.mkdir(parents=True, exist_ok=True)
+    player = subprocess.list2cmdline(
+        [
+            str(exe.resolve()),
+            '-screen-fullscreen',
+            '0',
+            '-screen-width',
+            '960',
+            '-screen-height',
+            '544',
+            '-logFile',
+            '-',
+            '-crow-windowed',
+            '-crow-mute',
+            *arguments,
+        ]
+    )
+    command = f'cmd.exe /d /s /c "{player} > "{log.resolve()}" 2>&1"'
+    startup = StartupInfo()
+    startup.cb = ctypes.sizeof(StartupInfo)
+    startup.lpDesktop = DESKTOP
+    info = ProcessInformation()
+    if not kernel32.CreateProcessW(
+        None,
+        command,
+        None,
+        None,
+        False,
+        CREATE_NO_WINDOW,
+        None,
+        str(exe.parent),
+        ctypes.byref(startup),
+        ctypes.byref(info),
+    ):
+        raise OSError(ctypes.get_last_error(), 'CreateProcess failed')
+    try:
+        waited = kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF if timeout is None else int(timeout * 1000))
+        if waited == WAIT_TIMEOUT:
+            # cmd and the player: the player is cmd's child; taskkill takes the tree.
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(info.dwProcessId)], capture_output=True)
+            return 1
+        code = wt.DWORD()
+        kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
+        return code.value
+    finally:
+        kernel32.CloseHandle(info.hThread)
+        kernel32.CloseHandle(info.hProcess)
+
+
+def main():
+    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument('exe', type=Path)
+    parser.add_argument('log', type=Path)
+    parser.add_argument('--timeout', type=float, default=600)
+    args = parser.parse_args(sys.argv[1:split])
+    sys.exit(run(args.exe, args.log, sys.argv[split + 1 :], args.timeout))
+
+
+if __name__ == '__main__':
+    main()

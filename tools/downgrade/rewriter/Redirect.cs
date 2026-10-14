@@ -215,10 +215,15 @@ partial class DowngradeAssemblies
         return count;
     }
 
+    // Engine calls that go to CrowCompat Window, which keeps a test run's window a window
+    // (-crow-windowed): the game's fullscreen and resolution settings.
+    static readonly string[] ScreenCalls = { "set_fullScreen", "set_fullScreenMode", "SetResolution" };
+
     static int RedirectMembers(ModuleDefinition module)
     {
-        // Sites of each rule but the shims, for the NO MATCH check: Type.GetType.
-        var sites = new int[1];
+        // Sites of each rule but the shims, for the NO MATCH check: Type.GetType, Screen calls,
+        // BinaryFormatter, save paths.
+        var sites = new int[4];
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
         foreach (MethodDefinition method in type.Methods)
@@ -228,8 +233,56 @@ partial class DowngradeAssemblies
             {
                 var field = instruction.Operand as FieldReference;
                 if (field != null && IsMissing(field)) problems.Add(module.Name + ": field " + field.FullName);
+                // Save paths: CrowCountrySave's relative "Saves" folder, and persistentDataPath, which
+                // the PS Vita player leaves empty. See CrowCompat Saves.
+                var literal = instruction.Operand as string;
+                if (instruction.OpCode == OpCodes.Ldstr && (literal == "Saves" || literal == "Saves/") &&
+                    type.FullName == "com.sfbgames.playmaker.CrowCountrySave")
+                {
+                    string name = literal == "Saves" ? "Folder" : "Prefix";
+                    instruction.OpCode = OpCodes.Call;
+                    instruction.Operand = module.ImportReference(compat["CrowCompat.Saves"].Methods.First(m => m.Name == name));
+                    sites[3]++;
+                    count++;
+                    continue;
+                }
                 var called = instruction.Operand as MethodReference;
                 if (called == null) continue;
+                if (called.DeclaringType.FullName == "UnityEngine.Application" && called.Name == "get_persistentDataPath")
+                {
+                    instruction.Operand = module.ImportReference(compat["CrowCompat.Saves"].Methods.First(m => m.Name == "PersistentDataPath"));
+                    sites[3]++;
+                    count++;
+                    continue;
+                }
+                if (called.DeclaringType.FullName == "UnityEngine.Screen" && ScreenCalls.Contains(called.Name))
+                {
+                    MethodDefinition window = compat["CrowCompat.Window"].Methods.FirstOrDefault(m =>
+                        m.IsStatic && m.Name == called.Name && Matches(m, called, 0));
+                    if (window == null)
+                    {
+                        problems.Add(module.Name + ": no CrowCompat Window for " + called.FullName);
+                        continue;
+                    }
+                    instruction.OpCode = OpCodes.Call;
+                    instruction.Operand = module.ImportReference(window);
+                    sites[1]++;
+                    count++;
+                    continue;
+                }
+                // BinaryFormatter data the game ships or saved names Assembly-CSharp. Every formatter
+                // gets CrowCompat's alias binder (see TypeNames.NewBinaryFormatter), since IL2CPP
+                // never asks AssemblyResolve; a binder the game sets is wrapped in it.
+                if (called.DeclaringType.FullName == "System.Runtime.Serialization.Formatters.Binary.BinaryFormatter" &&
+                    ((instruction.OpCode == OpCodes.Newobj && called.Name == ".ctor" && called.Parameters.Count == 0) || called.Name == "set_Binder"))
+                {
+                    string name = called.Name == ".ctor" ? "NewBinaryFormatter" : "SetBinder";
+                    instruction.OpCode = OpCodes.Call;
+                    instruction.Operand = module.ImportReference(compat["CrowCompat.TypeNames"].Methods.First(m => m.Name == name));
+                    sites[2]++;
+                    count++;
+                    continue;
+                }
                 // Assembly-qualified names, e.g. in saves, still name the renamed assemblies;
                 // see Compat TypeNames. Mono can resolve them by event, IL2CPP cannot.
                 if (called.DeclaringType.FullName == "System.Type" && called.Name == "GetType" && called.Parameters.Count > 0 &&
@@ -258,7 +311,7 @@ partial class DowngradeAssemblies
                 count++;
             }
         }
-        string[] rules = { "Type.GetType" };
+        string[] rules = { "Type.GetType", "Screen fullscreen and resolution", "BinaryFormatter binder", "save paths" };
         for (int i = 0; i < sites.Length; i++) Count("redirect " + rules[i], sites[i]);
         return count;
     }

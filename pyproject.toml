@@ -5,6 +5,8 @@ description = "Translate Crow Country's PC build into a Unity 2018.2 project for
 license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
+    # FFmpeg's decoders, for the game's VP8 videos (video_rules.py).
+    "av>=19.0.1",
     "dnfile>=0.18.0",
     "lz4>=4.4.5",
     "numpy>=2.5.3",

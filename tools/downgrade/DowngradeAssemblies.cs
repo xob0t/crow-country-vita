@@ -22,6 +22,7 @@ using Mono.Cecil.Cil;
 //                           the IL helpers the passes share
 //   Runtime.cs              type layouts the target's Mono rejects (interfaces)
 //   Patches.cs              single game methods that call CrowCompat rules (the camera's post chain)
+//   ScriptCost.cs           per-frame PlayMaker and fade work skipped where it has no effect
 partial class DowngradeAssemblies
 {
     // Types that exist in the target under another name.
@@ -104,6 +105,19 @@ partial class DowngradeAssemblies
         new Pass("runtime", Scope.All, EmptyPointerConstrainedCalls),
         // Patches.cs
         new Pass("patches", Scope.Game, PatchCamEffect),
+        new Pass("patches", Scope.Game, PatchRewiredPlatform),
+        new Pass("patches", Scope.Game, PatchKeyboardOrController),
+        new Pass("patches", Scope.All, PatchGarbageCollectMesh),
+        new Pass("patches", Scope.All, PatchConsoleMode),
+        new Pass("patches", Scope.Game, PatchPlatformAnimation),
+        new Pass("patches", Scope.Game, PatchMaraLoader),
+        new Pass("patches", Scope.Game, PatchLoadSceneAction),
+        new Pass("patches", Scope.All, CacheTypeOf),
+        // ScriptCost.cs
+        new Pass("scriptcost", Scope.All, PatchFsmExecutionStack),
+        new Pass("scriptcost", Scope.All, PatchFsmLoopReset),
+        new Pass("scriptcost", Scope.All, PatchFsmDelayedEvents),
+        new Pass("scriptcost", Scope.Game, PatchFullScreenColour),
     };
 
     // Sites changed per rule (a pass, a row of a rule table, a game type a pass looks for),
@@ -279,6 +293,11 @@ partial class DowngradeAssemblies
         return name == "mscorlib" ? 0 : name == "System" ? 1 : name == "System.Core" ? 2 : 3;
     }
 
+    // Namespaces CrowCompat replaces on every target, even one that has them: UnityEngine.Video, which
+    // the PS Vita's player lacks, plays the game's videos as frame atlases (compat/Video.cs), and the
+    // Windows players do the same, to show what the PS Vita does.
+    static readonly string[] ReplacedNamespaces = { "UnityEngine.Video" };
+
     // The public types of a reference assembly. The module stays open (it is never disposed):
     // Cecil reads the indexed types' members from it later, on demand.
     static void Index(string file)
@@ -287,8 +306,13 @@ partial class DowngradeAssemblies
         try { module = ModuleDefinition.ReadModule(file); }
         catch (BadImageFormatException) { return; }
         foreach (TypeDefinition type in AllTypes(module.Types))
+        {
+            TypeDefinition top = type;
+            while (top.DeclaringType != null) top = top.DeclaringType;
+            if (ReplacedNamespaces.Contains(top.Namespace)) continue;
             if (type.IsPublic || type.IsNestedPublic || type.IsNestedFamily || type.IsNestedFamilyOrAssembly)
                 if (!target.ContainsKey(type.FullName)) target[type.FullName] = type;
+        }
     }
 
     static string Rewrite(AssemblyDefinition assembly)

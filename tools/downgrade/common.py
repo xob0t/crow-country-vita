@@ -2,8 +2,11 @@
 shader_rules.py) and the other tools. Tools that import pipeline also reach the names pipeline.py
 imports from here as pipeline.<name>."""
 
+import concurrent.futures
 import contextlib
+import functools
 import hashlib
+import json
 import os
 import re
 import subprocess
@@ -411,3 +414,70 @@ def stable_meta(kind, name, importer):
 def folder_meta(folder: Path):
     """{.meta path: content} of a generated folder."""
     return {meta_of(folder): stable_meta('folder', folder, 'DefaultImporter').encode()}
+
+
+def walk(folder: Path):
+    """{path relative to folder: (size, modification time in ns) of a file, or None for a folder} of
+    everything under folder. One directory listing per folder: on Windows a listing has every file's
+    size and time, so no file is opened or stat'ed (a second for the export's 185,000 paths, where
+    rglob with a stat of each took 13)."""
+    found, folders = {}, [Path()]
+    while folders:
+        relative = folders.pop()
+        with os.scandir(folder / relative) as entries:
+            for entry in entries:
+                path = relative / entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    found[path] = None
+                    folders.append(path)
+                else:
+                    stat = entry.stat(follow_symlinks=False)
+                    found[path] = (stat.st_size, stat.st_mtime_ns)
+    return found
+
+
+@functools.cache
+def listing(folder: Path):
+    """walk(folder), once per run: for folders that don't change while the tools run (the export)."""
+    return walk(folder)
+
+
+SCAN_CACHE = WORK / 'scan-cache'
+SCAN_THREADS = 16
+
+
+def scan(name: str, folder: Path, select, function, version=''):
+    """{relative path: function(path)} for the files under folder whose relative path select() accepts.
+    The results are kept in work/scan-cache/<name>.json under each file's size and modification time,
+    so a rerun reads only the files that changed. function's result must be JSON; version names what
+    else it depends on (a change discards the cache)."""
+    cache_path = SCAN_CACHE / f'{name}.json'
+    try:
+        cache = json.loads(cache_path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        cache = {}
+    entries = cache.get('files', {}) if cache.get('version') == version else {}
+    results, fresh, missing = {}, {}, []
+    for relative, stat in listing(folder).items():
+        if stat is None or not select(relative):
+            continue
+        key = relative.as_posix()
+        entry = entries.get(key)
+        if entry is None or entry[:2] != list(stat):
+            missing.append((relative, stat))
+            continue
+        fresh[key] = entry
+        results[relative] = entry[2]
+    # Reading many files is mostly waiting (on the disk, on the virus scanner opening each one), so
+    # SCAN_THREADS read at once.
+    with concurrent.futures.ThreadPoolExecutor(SCAN_THREADS) as pool:
+        values = pool.map(lambda item: function(folder / item[0]), missing)
+        for (relative, stat), value in zip(missing, values, strict=True):
+            fresh[relative.as_posix()] = [*stat, value]
+            results[relative] = value
+    if fresh != entries:
+        SCAN_CACHE.mkdir(parents=True, exist_ok=True)
+        part = cache_path.with_name(f'{cache_path.name}.{os.getpid()}.part')
+        part.write_text(json.dumps({'version': version, 'files': fresh}), encoding='utf-8')
+        part.replace(cache_path)  # whole, also with another run writing it at the same time
+    return results

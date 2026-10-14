@@ -278,10 +278,28 @@ DECOMPILER_FIXES = {
 }
 
 
+# Vertex inputs the target lays out differently, per shader: (the decompiled text, the target's).
+# - Unlit/UIPixelate snaps its image to the screen's 416x234 grid (com.sfbgames UIPixelate): the
+#   grid's offset in uv1.xy, the image's size in grid cells in uv1.zw, a Vector4 uv1 SFB's uGUI has.
+#   2018.2's UIVertex.uv1 is a Vector2, so CrowCompat's VertexHelper.SetUV1 puts zw in uv2
+#   (compat/ApiShims.cs), which the canvases pass (asset_rules.canvas_channel_overlay). Unread, zw
+#   were 0 and the shader drew the image unsnapped.
+VERTEX_INPUT_FIXES = {
+    'Unlit/UIPixelate': [
+        (
+            '                float4 texcoord1 : TEXCOORD1;\n            };\n            struct v2f\n',
+            '                float4 texcoord1 : TEXCOORD1;\n                float2 texcoord2 : TEXCOORD2;\n'
+            '            };\n            struct v2f\n',
+        ),
+        ('o.texcoord1 = v.texcoord1;', 'o.texcoord1 = float4(v.texcoord1.xy, v.texcoord2.xy);'),
+    ]
+}
+
+
 def fix_decompiler(name, text):
-    for old, new in DECOMPILER_FIXES.get(name, []):
+    for old, new in DECOMPILER_FIXES.get(name, []) + VERTEX_INPUT_FIXES.get(name, []):
         if text.count(old) != 1:
-            sys.exit(f'{name}: the decompiled text for a DECOMPILER_FIXES rule is not there once')
+            sys.exit(f'{name}: the decompiled text for a DECOMPILER_FIXES or VERTEX_INPUT_FIXES rule is not there once')
         text = text.replace(old, new)
     return text
 

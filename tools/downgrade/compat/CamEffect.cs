@@ -13,6 +13,11 @@ using UnityEngine;
 // spreads over the same part of the screen.
 //   -crow-post full|half  full is the original chain, half the Vita's; Windows players default to
 //                         full, the Vita to half.
+// The same Awake sets vSyncCount 1 (a frame every vertical blank, at most 60 fps). The PS Vita
+// draws its title at about 40 fps that way, frames of 16.7 and 33.3 ms in turn, and gameplay at
+// 15-25: there it takes vSyncCount 2, an even 30 fps where the frame fits in 33 ms and the same
+// rate as before where it doesn't (a 50 ms frame waits for the third blank either way).
+//   -crow-vsync <n>       vSyncCount after the game's (1 is the game's; Vita default 2)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -28,7 +33,7 @@ namespace CrowCompat
             {
                 if (half == null)
                 {
-                    string[] args = Environment.GetCommandLineArgs();
+                    string[] args = ProbeFiles.Args;
                     int index = Array.IndexOf(args, "-crow-post");
                     string value = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
                     half = value != null ? value == "half" : Application.platform == RuntimePlatform.PSP2;
@@ -37,9 +42,28 @@ namespace CrowCompat
             }
         }
 
+        static int? vsync;
+
+        public static int VSync
+        {
+            get
+            {
+                if (vsync == null)
+                {
+                    string[] args = ProbeFiles.Args;
+                    int index = Array.IndexOf(args, "-crow-vsync");
+                    int value;
+                    vsync = index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) ? value
+                        : Application.platform == RuntimePlatform.PSP2 ? 2 : -1;
+                }
+                return vsync.Value;
+            }
+        }
+
         // Called at the end of CrowCountryCamEffect.Awake (rewriter Patches.cs, PatchCamEffect).
         public static void AfterAwake(Component effect)
         {
+            if (Application.isPlaying && VSync >= 0) QualitySettings.vSyncCount = VSync;
             if (!Half) return;
             Type type = effect.GetType();
             FieldInfo size = type.GetField("camTargetSize", Fields);

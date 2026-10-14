@@ -287,6 +287,8 @@ def launch(args, flags):
         '-logFile',
         '-',
         '-crow-no-vsync',
+        '-crow-windowed',
+        '-crow-mute',
         *flags,
     ]
     mode = 'none' if args.cap >= 100 else 'duty'

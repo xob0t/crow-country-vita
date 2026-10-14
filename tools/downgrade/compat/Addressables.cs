@@ -5,10 +5,13 @@ using UnityEngine.SceneManagement;
 
 // Addressables, which the game loads its player prefab and its scenes through: the rewriter ships
 // neither Unity.Addressables nor Unity.ResourceManager (pipeline.ROOTS), so the game's calls come
-// here by the naming convention in Compat2018.cs. Assets load from Resources/Addressables/<key>,
-// where the pipeline moves the assets the game's catalog names; scenes are in the build settings
-// and load by name. A key that is in no catalog (the game asks for a BGM prefab its catalog
-// lacks) fails as it does in the PC game: the handle completes with a null result.
+// here by the naming convention in Compat2018.cs. The assets the game's catalog names are in an
+// AddressablesTable the build lists in the player's preloaded assets (DowngradeBuild), so they load
+// at startup with dependencies the build worked out. (From Resources, the PS Vita player spent 40 s
+// in one frame on the player prefab's dependencies, ResourceManager::FindDependencies.) Other keys
+// load from Resources/Addressables/<key>; scenes are in the build settings and load by name. A key
+// that is in no catalog (the game asks for a BGM prefab its catalog lacks) fails as it does in the
+// PC game: the handle completes with a null result.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -23,6 +26,15 @@ namespace CrowCompat
 
         public static UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<T> LoadAssetAsync<T>(object key)
         {
+            // The player prefab, which a build with the CrowMara scene leaves out (Loading.cs MaraScene),
+            // is done at once with no asset: MaraLoader takes the scene's instance.
+            UnityEngine.Object preloaded = null;
+            if (MaraScene.Serves(key) || AddressablesTable.Assets.TryGetValue(key.ToString(), out preloaded))
+            {
+                var loaded = new Operation<T>();
+                loaded.Watch(null, () => (T)(object)preloaded);
+                return new UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<T>(loaded);
+            }
             string path = Folder + key;
             var operation = new Operation<T>();
             operation.request = Resources.LoadAsync(path, typeof(T));
@@ -64,7 +76,7 @@ namespace CrowCompat
             public void Watch(AsyncOperation operation, Func<T> finish)
             {
                 this.finish = finish;
-                if (operation.isDone) Finish();
+                if (operation == null || operation.isDone) Finish();
                 else operation.completed += _ => Finish();
             }
 
@@ -102,6 +114,22 @@ namespace CrowCompat
             }
 
             public void Acquire() { references++; }
+        }
+    }
+
+    // The Addressables assets, keyed as the game's catalog keys them; the build creates one table and
+    // lists it in the player's preloaded assets, which load before the first scene.
+    public class AddressablesTable : ScriptableObject
+    {
+        public string[] keys = new string[0];
+        public UnityEngine.Object[] assets = new UnityEngine.Object[0];
+
+        internal static readonly Dictionary<string, UnityEngine.Object> Assets = new Dictionary<string, UnityEngine.Object>();
+
+        void OnEnable()
+        {
+            for (int i = 0; i < keys.Length && i < assets.Length; i++)
+                if (assets[i] != null) Assets[keys[i]] = assets[i];
         }
     }
 

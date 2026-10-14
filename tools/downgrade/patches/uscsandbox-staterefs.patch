@@ -1,0 +1,267 @@
+License: this patch changes USCSandbox (https://github.com/nesrak1/USCSandbox), which has
+no license file of its own and reworks code from AssetRipper, under the GNU General Public
+License version 3. This patch is offered under the GNU General Public License version 3
+(GPL-3.0), like the code it modifies, and is not covered by the MIT license of the rest of
+this repository (see THIRD_PARTY_NOTICES).
+
+What it changes: a pass state set from a material property ("ColorMask [_ColorMask]",
+"Stencil { Ref [_Stencil] }", "ZTest [unity_GUIZTestMode]", "Blend [_SrcBlend] [_DstBlend]") is
+stored as the property's name next to its default value. USCSandbox wrote the value, so the
+TextMeshPro shaders came out with "ColorMask 0" and drew nothing. It writes the reference.
+Applied after uscsandbox-swizzle.patch. Lines before the first diff are a comment.
+
+diff --git a/USCSandbox/Processor/ShaderProcessor.cs b/USCSandbox/Processor/ShaderProcessor.cs
+index 9b5dd3f..bded016 100644
+--- a/USCSandbox/Processor/ShaderProcessor.cs
++++ b/USCSandbox/Processor/ShaderProcessor.cs
+@@ -614,6 +614,25 @@ namespace USCSandbox.Processor
+             }
+         }
+ 
++        // A state set from a material property ("ColorMask [_ColorMask]", "Ref [_Stencil]") is stored
++        // as the property's name next to the property's default value. Written as that value, TMP's
++        // "ColorMask [_ColorMask]" (default 0 in the data) drew nothing; the reference is written instead.
++        // A state written as a value has the name "<noninit>".
++        private static string PropertyRef(AssetTypeValueField value)
++        {
++            var name = value["name"];
++            if (name.IsDummy || string.IsNullOrEmpty(name.AsString) || name.AsString == "<noninit>")
++            {
++                return null;
++            }
++            return $"[{name.AsString}]";
++        }
++
++        private static string StateValue(AssetTypeValueField value, object literal)
++        {
++            return PropertyRef(value) ?? Convert.ToString(literal, CultureInfo.InvariantCulture);
++        }
++
+         private void WritePassState(AssetTypeValueField state)
+         {
+             var name = state["m_Name"].AsString;
+@@ -638,6 +657,9 @@ namespace USCSandbox.Processor
+                 WritePassRtBlend(state["rtBlend0"], -1);
+             }
+ 
++            bool IsRef(string field) => PropertyRef(state[field]) != null;
++            string Value(string field, object literal) => StateValue(state[field], literal);
++
+             var alphaToMask = state["alphaToMask.val"].AsFloat;
+             var zClip = (ZClip)(int)state["zClip.val"].AsFloat;
+             var zTest = (ZTest)(int)state["zTest.val"].AsFloat;
+@@ -648,18 +670,6 @@ namespace USCSandbox.Processor
+             var stencilRef = state["stencilRef.val"].AsFloat;
+             var stencilReadMask = state["stencilReadMask.val"].AsFloat;
+             var stencilWriteMask = state["stencilWriteMask.val"].AsFloat;
+-            var stencilOpPass = (StencilOp)(int)state["stencilOp.pass.val"].AsFloat;
+-            var stencilOpFail = (StencilOp)(int)state["stencilOp.fail.val"].AsFloat;
+-            var stencilOpZfail = (StencilOp)(int)state["stencilOp.zFail.val"].AsFloat;
+-            var stencilOpComp = (StencilComp)(int)state["stencilOp.comp.val"].AsFloat;
+-            var stencilOpFrontPass = (StencilOp)(int)state["stencilOpFront.pass.val"].AsFloat;
+-            var stencilOpFrontFail = (StencilOp)(int)state["stencilOpFront.fail.val"].AsFloat;
+-            var stencilOpFrontZfail = (StencilOp)(int)state["stencilOpFront.zFail.val"].AsFloat;
+-            var stencilOpFrontComp = (StencilComp)(int)state["stencilOpFront.comp.val"].AsFloat;
+-            var stencilOpBackPass = (StencilOp)(int)state["stencilOpBack.pass.val"].AsFloat;
+-            var stencilOpBackFail = (StencilOp)(int)state["stencilOpBack.fail.val"].AsFloat;
+-            var stencilOpBackZfail = (StencilOp)(int)state["stencilOpBack.zFail.val"].AsFloat;
+-            var stencilOpBackComp = (StencilComp)(int)state["stencilOpBack.comp.val"].AsFloat;
+             var fogMode = (FogMode)(int)state["fogMode"].AsFloat;
+             var fogColorX = state["fogColor.x.val"].AsFloat;
+             var fogColorY = state["fogColor.y.val"].AsFloat;
+@@ -672,79 +682,82 @@ namespace USCSandbox.Processor
+             
+             var lighting = state["lighting"].AsBool;
+ 
+-            if (alphaToMask > 0f)
++            if (alphaToMask > 0f || IsRef("alphaToMask"))
+             {
+-                _sb.AppendLine("AlphaToMask On");
++                _sb.AppendLine($"AlphaToMask {PropertyRef(state["alphaToMask"]) ?? "On"}");
+             }
+-            if (zClip == ZClip.On)
++            if (zClip == ZClip.On || IsRef("zClip"))
+             {
+-                _sb.AppendLine("ZClip On");
++                _sb.AppendLine($"ZClip {Value("zClip", zClip)}");
+             }
+-            if (zTest != ZTest.None && zTest != ZTest.LEqual)
++            if ((zTest != ZTest.None && zTest != ZTest.LEqual) || IsRef("zTest"))
+             {
+-                _sb.AppendLine($"ZTest {zTest}");
++                _sb.AppendLine($"ZTest {Value("zTest", zTest)}");
+             }
+-            if (zWrite != ZWrite.On)
++            if (zWrite != ZWrite.On || IsRef("zWrite"))
+             {
+-                _sb.AppendLine($"ZWrite {zWrite}");
++                _sb.AppendLine($"ZWrite {Value("zWrite", zWrite)}");
+             }
+-            if (culling != CullMode.Back)
++            if (culling != CullMode.Back || IsRef("culling"))
+             {
+-                _sb.AppendLine($"Cull {culling}");
++                _sb.AppendLine($"Cull {Value("culling", culling)}");
+             }
+-            if (offsetFactor != 0f || offsetUnits != 0f)
++            if (offsetFactor != 0f || offsetUnits != 0f || IsRef("offsetFactor") || IsRef("offsetUnits"))
+             {
+-                _sb.AppendLine($"Offset {offsetFactor}, {offsetUnits}");
++                _sb.AppendLine($"Offset {Value("offsetFactor", offsetFactor)}, {Value("offsetUnits", offsetUnits)}");
+             }
+-            
+-            if (stencilRef != 0.0 || stencilReadMask != 255.0 || stencilWriteMask != 255.0
+-                || !(stencilOpPass == StencilOp.Keep && stencilOpFail == StencilOp.Keep && stencilOpZfail == StencilOp.Keep && stencilOpComp == StencilComp.Always)
+-                || !(stencilOpFrontPass == StencilOp.Keep && stencilOpFrontFail == StencilOp.Keep && stencilOpFrontZfail == StencilOp.Keep && stencilOpFrontComp == StencilComp.Always)
+-                || !(stencilOpBackPass == StencilOp.Keep && stencilOpBackFail == StencilOp.Keep && stencilOpBackZfail == StencilOp.Keep && stencilOpBackComp == StencilComp.Always))
++
++            // One set of stencil operations: "" (both faces), "Front" or "Back". Written when any of
++            // its four differs from the default or comes from a property.
++            bool StencilOpsSet(string prefix)
++            {
++                var pass = (StencilOp)(int)state[$"{prefix}.pass.val"].AsFloat;
++                var fail = (StencilOp)(int)state[$"{prefix}.fail.val"].AsFloat;
++                var zFail = (StencilOp)(int)state[$"{prefix}.zFail.val"].AsFloat;
++                var comp = (StencilComp)(int)state[$"{prefix}.comp.val"].AsFloat;
++                return pass != StencilOp.Keep || fail != StencilOp.Keep || zFail != StencilOp.Keep
++                    || (comp != StencilComp.Always && comp != StencilComp.Disabled)
++                    || IsRef($"{prefix}.pass") || IsRef($"{prefix}.fail") || IsRef($"{prefix}.zFail") || IsRef($"{prefix}.comp");
++            }
++            void WriteStencilOps(string prefix, string suffix)
++            {
++                _sb.AppendLine($"Comp{suffix} {Value($"{prefix}.comp", (StencilComp)(int)state[$"{prefix}.comp.val"].AsFloat)}");
++                _sb.AppendLine($"Pass{suffix} {Value($"{prefix}.pass", (StencilOp)(int)state[$"{prefix}.pass.val"].AsFloat)}");
++                _sb.AppendLine($"Fail{suffix} {Value($"{prefix}.fail", (StencilOp)(int)state[$"{prefix}.fail.val"].AsFloat)}");
++                _sb.AppendLine($"ZFail{suffix} {Value($"{prefix}.zFail", (StencilOp)(int)state[$"{prefix}.zFail.val"].AsFloat)}");
++            }
++
++            var stencilRefSet = stencilRef != 0.0 || IsRef("stencilRef");
++            var stencilReadMaskSet = stencilReadMask != 255.0 || IsRef("stencilReadMask");
++            var stencilWriteMaskSet = stencilWriteMask != 255.0 || IsRef("stencilWriteMask");
++            if (stencilRefSet || stencilReadMaskSet || stencilWriteMaskSet
++                || StencilOpsSet("stencilOp") || StencilOpsSet("stencilOpFront") || StencilOpsSet("stencilOpBack"))
+ 			{
+ 				_sb.AppendLine("Stencil {");
+                 _sb.Indent();
+-				if (stencilRef != 0.0)
++				if (stencilRefSet)
+ 				{
+-                    _sb.AppendLine($"Ref {stencilRef}");
++                    _sb.AppendLine($"Ref {Value("stencilRef", stencilRef)}");
+ 				}
+-				if (stencilReadMask != 255.0)
++				if (stencilReadMaskSet)
+ 				{
+-                    _sb.AppendLine($"ReadMask {stencilReadMask}");
++                    _sb.AppendLine($"ReadMask {Value("stencilReadMask", stencilReadMask)}");
+ 				}
+-				if (stencilWriteMask != 255.0)
++				if (stencilWriteMaskSet)
+ 				{
+-                    _sb.AppendLine($"WriteMask {stencilWriteMask}");
++                    _sb.AppendLine($"WriteMask {Value("stencilWriteMask", stencilWriteMask)}");
+ 				}
+-				if (stencilOpPass != StencilOp.Keep
+-                    || stencilOpFail != StencilOp.Keep
+-                    || stencilOpZfail != StencilOp.Keep
+-                    || (stencilOpComp != StencilComp.Always && stencilOpComp != StencilComp.Disabled))
++				if (StencilOpsSet("stencilOp"))
+ 				{
+-                    _sb.AppendLine($"Comp {stencilOpComp}");
+-                    _sb.AppendLine($"Pass {stencilOpPass}");
+-                    _sb.AppendLine($"Fail {stencilOpFail}");
+-                    _sb.AppendLine($"ZFail {stencilOpZfail}");
++                    WriteStencilOps("stencilOp", "");
+ 				}
+-				if (stencilOpFrontPass != StencilOp.Keep
+-                    || stencilOpFrontFail != StencilOp.Keep
+-                    || stencilOpFrontZfail != StencilOp.Keep
+-                    || (stencilOpFrontComp != StencilComp.Always && stencilOpFrontComp != StencilComp.Disabled))
++				if (StencilOpsSet("stencilOpFront"))
+ 				{
+-                    _sb.AppendLine($"CompFront {stencilOpFrontComp}");
+-                    _sb.AppendLine($"PassFront {stencilOpFrontPass}");
+-                    _sb.AppendLine($"FailFront {stencilOpFrontFail}");
+-                    _sb.AppendLine($"ZFailFront {stencilOpFrontZfail}");
++                    WriteStencilOps("stencilOpFront", "Front");
+ 				}
+-				if (stencilOpBackPass != StencilOp.Keep
+-                    || stencilOpBackFail != StencilOp.Keep
+-                    || stencilOpBackZfail != StencilOp.Keep
+-                    || (stencilOpBackComp != StencilComp.Always && stencilOpBackComp != StencilComp.Disabled))
++				if (StencilOpsSet("stencilOpBack"))
+ 				{
+-                    _sb.AppendLine($"CompBack {stencilOpBackComp}");
+-                    _sb.AppendLine($"PassBack {stencilOpBackPass}");
+-                    _sb.AppendLine($"FailBack {stencilOpBackFail}");
+-                    _sb.AppendLine($"ZFailBack {stencilOpBackZfail}");
++                    WriteStencilOps("stencilOpBack", "Back");
+ 				}
+ 				_sb.Unindent();
+ 				_sb.AppendLine("}");
+@@ -810,7 +823,13 @@ namespace USCSandbox.Processor
+             var blendOpAlpha = (BlendOp)(int)rtBlend["blendOpAlpha.val"].AsFloat;
+             var colMask = (ColorWriteMask)(int)rtBlend["colMask.val"].AsFloat;
+ 
+-            if (srcBlend != BlendMode.One || destBlend != BlendMode.Zero || srcBlendAlpha != BlendMode.One || destBlendAlpha != BlendMode.Zero)
++            bool IsRef(string field) => PropertyRef(rtBlend[field]) != null;
++            string Value(string field, object literal) => StateValue(rtBlend[field], literal);
++
++            var alphaBlendSet = srcBlendAlpha != BlendMode.One || destBlendAlpha != BlendMode.Zero
++                || IsRef("srcBlendAlpha") || IsRef("destBlendAlpha");
++            if (srcBlend != BlendMode.One || destBlend != BlendMode.Zero || alphaBlendSet
++                || IsRef("srcBlend") || IsRef("destBlend"))
+             {
+                 _sb.Append("");
+                 _sb.AppendNoIndent("Blend ");
+@@ -818,15 +837,16 @@ namespace USCSandbox.Processor
+                 {
+                     _sb.AppendNoIndent($"{index} ");
+                 }
+-                _sb.AppendNoIndent($"{srcBlend} {destBlend}");
+-                if (srcBlendAlpha != BlendMode.One || destBlendAlpha != BlendMode.Zero)
++                _sb.AppendNoIndent($"{Value("srcBlend", srcBlend)} {Value("destBlend", destBlend)}");
++                if (alphaBlendSet)
+                 {
+-                    _sb.AppendNoIndent($", {srcBlendAlpha} {destBlendAlpha}");
++                    _sb.AppendNoIndent($", {Value("srcBlendAlpha", srcBlendAlpha)} {Value("destBlendAlpha", destBlendAlpha)}");
+                 }
+                 _sb.AppendNoIndent("\n");
+             }
+ 
+-            if (blendOp != BlendOp.Add || blendOpAlpha != BlendOp.Add)
++            var blendOpAlphaSet = blendOpAlpha != BlendOp.Add || IsRef("blendOpAlpha");
++            if (blendOp != BlendOp.Add || blendOpAlphaSet || IsRef("blendOp"))
+             {
+                 _sb.Append("");
+                 _sb.AppendNoIndent("BlendOp ");
+@@ -834,19 +854,24 @@ namespace USCSandbox.Processor
+                 {
+                     _sb.AppendNoIndent($"{index} ");
+                 }
+-                _sb.AppendNoIndent($"{blendOp}");
+-                if (blendOpAlpha != BlendOp.Add)
++                _sb.AppendNoIndent(Value("blendOp", blendOp));
++                if (blendOpAlphaSet)
+                 {
+-                    _sb.AppendNoIndent($", {blendOpAlpha}");
++                    _sb.AppendNoIndent($", {Value("blendOpAlpha", blendOpAlpha)}");
+                 }
+                 _sb.AppendNoIndent("\n");
+             }
+ 
+-            if (colMask != ColorWriteMask.All)
++            var colMaskRef = PropertyRef(rtBlend["colMask"]);
++            if (colMask != ColorWriteMask.All || colMaskRef != null)
+             {
+                 _sb.Append("");
+                 _sb.AppendNoIndent("ColorMask ");
+-                if (colMask == ColorWriteMask.None)
++                if (colMaskRef != null)
++                {
++                    _sb.AppendNoIndent(colMaskRef);
++                }
++                else if (colMask == ColorWriteMask.None)
+                 {
+                     _sb.AppendNoIndent("0");
+                 }

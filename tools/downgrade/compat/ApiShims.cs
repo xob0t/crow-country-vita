@@ -278,7 +278,9 @@ namespace CrowCompat
     public static class UnityEngine_UI_VertexHelper
     {
         // SFB's uGUI sets every vertex's uv1 to a Vector4 (UIPixelate's pixel grid). 2018.2 keeps
-        // uv1 as a Vector2, so zw also go in the tangent, which the UIPixelate shader reads instead.
+        // uv1 as a Vector2, so zw go in uv2, which the UIPixelate shader reads (shader_rules
+        // VERTEX_INPUT_FIXES) and the canvases pass (asset_rules.canvas_channel_overlay). Not the
+        // tangent: canvases batch normals and tangents as directions, transformed with the element.
         static UIVertex vertex;
 
         public static void SetUV1(VertexHelper helper, Vector4 uv1)
@@ -287,7 +289,7 @@ namespace CrowCompat
             {
                 helper.PopulateUIVertex(ref vertex, i);
                 vertex.uv1 = new Vector2(uv1.x, uv1.y);
-                vertex.tangent = uv1;
+                vertex.uv2 = new Vector2(uv1.z, uv1.w);
                 helper.SetUIVertex(vertex, i);
             }
         }
