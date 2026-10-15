@@ -1,4 +1,4 @@
-/* CrowClock: a PS Vita native plugin (PRX) that sets the ARM clock. The 2018.2 player's start applies
+/* CrowClock: a PS Vita native plugin (PRX) that sets the ARM and GPU clocks. The 2018.2 player's start applies
    the project's power mode (scePowerSetConfigurationMode, mode C), which puts the CPU at 333 MHz;
    compat/Clock.cs calls CrowClockSetArm through [DllImport("CrowClock")] to raise it again. The SDK's
    libScePower_stub has no clock functions; build.py makes a stub library for their NIDs. */
@@ -9,6 +9,8 @@ SCE_MODULE_INFO(CrowClock, SCE_MODULE_ATTR_NONE, 1, 1);
 
 int scePowerSetArmClockFrequency(int mhz);
 int scePowerGetArmClockFrequency(void);
+int scePowerSetGpuClockFrequency(int mhz);
+int scePowerGetGpuClockFrequency(void);
 
 #define PRX_EXPORT __declspec(dllexport)
 
@@ -36,4 +38,16 @@ PRX_EXPORT int CrowClockSetArm(int mhz)
 PRX_EXPORT int CrowClockGetArm(void)
 {
 	return scePowerGetArmClockFrequency();
+}
+
+/* The GPU core clock: 41, 55, 111, 166 or 222 MHz (compat/Clock.cs). Returns the system's result. */
+PRX_EXPORT int CrowClockSetGpu(int mhz)
+{
+	return scePowerSetGpuClockFrequency(mhz);
+}
+
+/* The GPU core clock in MHz. */
+PRX_EXPORT int CrowClockGetGpu(void)
+{
+	return scePowerGetGpuClockFrequency();
 }

@@ -27,10 +27,13 @@ BIN = SDK / 'host_tools' / 'build' / 'bin'
 
 BASE_NAME = b'scePowerSetConfigurationMode'
 BASE_NID = 0x3CE187B6
-# The functions to import, by NID (vitasdk's db): name lengths must equal BASE_NAME's.
+# The functions to import, by NID (vitasdk's db, vita-headers db/360/ScePower.yml, user library ScePower):
+# name lengths must equal BASE_NAME's.
 FUNCTIONS = {
     b'scePowerSetArmClockFrequency': 0x74DB5AE5,
     b'scePowerGetArmClockFrequency': 0xABC6F88F,
+    b'scePowerSetGpuClockFrequency': 0x717DB06C,
+    b'scePowerGetGpuClockFrequency': 0x1B04A1D6,
 }
 
 
@@ -41,6 +44,8 @@ BRIDGE = r"""#include <stddef.h>
 SCE_MODULE_INFO(CrowClock_b, SCE_MODULE_ATTR_NONE, 1, 1);
 extern "C" int CrowClockSetArm();
 extern "C" int CrowClockGetArm();
+extern "C" int CrowClockSetGpu();
+extern "C" int CrowClockGetGpu();
 extern "C" int CrowThreadSelf();
 extern "C" int CrowThreadQuery();
 extern "C" int CrowThreadSet();
@@ -50,6 +55,8 @@ typedef int (*EXTERNFUNCTION)();
 static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_FunctionNames[] = {
   { "CrowClockSetArm", &CrowClockSetArm },
   { "CrowClockGetArm", &CrowClockGetArm },
+  { "CrowClockSetGpu", &CrowClockSetGpu },
+  { "CrowClockGetGpu", &CrowClockGetGpu },
   { "CrowThreadSelf", &CrowThreadSelf },
   { "CrowThreadQuery", &CrowThreadQuery },
   { "CrowThreadSet", &CrowThreadSet },

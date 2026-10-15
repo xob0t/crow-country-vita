@@ -508,6 +508,25 @@ namespace CrowCompat
             catch (Exception) { return 0; }
         }
 
+        // For Quality's -crow-loop-cpu: the calling thread's UID (0 without the plugin), and a
+        // thread's run time in microseconds (-1 on failure). Works without -crow-audio.
+        internal static int SelfAnyway()
+        {
+            if (Application.platform != RuntimePlatform.PSP2) return 0;
+            try { return CrowThreadSelf(); }
+            catch (Exception) { return 0; }
+        }
+
+        static readonly int[] runInfo = new int[10];
+        static readonly byte[] runName = new byte[32];
+
+        // Main thread only (shares its buffers).
+        internal static long RunMicros(int uid)
+        {
+            if (CrowThreadQuery(uid, runInfo, runName) < 0) return -1;
+            return (uint)runInfo[4] | ((long)runInfo[5] << 32);
+        }
+
         // Adds a thread, with a tag to show after its name (or null).
         internal static void Name(int uid, string tag)
         {

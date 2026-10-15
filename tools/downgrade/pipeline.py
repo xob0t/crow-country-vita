@@ -264,6 +264,7 @@ COMPAT_SOURCES = [
             'Loading',
             'ScriptCost',
             'Draws',
+            'Perf',
             'Clock',
             'Audio',
         )

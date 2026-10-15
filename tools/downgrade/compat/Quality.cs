@@ -19,12 +19,15 @@ using UnityEngine.SceneManagement;
 // And measurements:
 //   -crow-loop-profile <s>          every s seconds, the main thread's time per player loop step
 //                                   (CROW_LOOP lines; see LoopProfile)
+//   -crow-loop-cpu                  with it, on the PS Vita, the main thread's run time per frame too
+//                                   (cpu=; the rest of the frame it waits: for jobs, the render thread,
+//                                   the GPU)
 //   -crow-light-report <s>          every s seconds, the forward renderer's light passes as Unity
 //                                   assigns them, per light (CROW_LIGHTS, CROW_LIGHT; see LightReport)
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
 //                                   the changes (comma-separated: lights=vita, pixel=<n>,
-//                                   shadows=off|hard|all, distance=<m>, resolution=<0-3>) and save
-//                                   <path>-b.png of the same moment
+//                                   shadows=off|hard|all, distance=<m>, resolution=<0-3>, and
+//                                   Perf.cs's) and save <path>-b.png of the same moment
 //   -crow-census <s>                every s seconds, the enabled behaviours in loaded scenes by type
 //                                   (CROW_CENSUS), the most numerous first
 //   -crow-disable <Type,...>        every second, disable every behaviour of these types (by class
@@ -51,6 +54,7 @@ namespace CrowCompat
             if (report > 0) LightReport.Install(report);
             LightRules.Install(args);
             Draws.Install(args);
+            Perf.Install(args);
             int ab =Array.IndexOf(args, "-crow-ab");
             if (ab >= 0 && ab + 3 < args.Length) AB.Install(Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3]);
             float census = Number(args, "-crow-census", -1);
@@ -92,6 +96,7 @@ namespace CrowCompat
                 else if (pair[0] == "distance") shadowDistance = number;
                 else if (pair[0] == "resolution") shadowResolution = (int)number;
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
+                else if (!Perf.Change(pair[0], pair[1])) Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();
         }
@@ -326,10 +331,23 @@ namespace CrowCompat
         static long last, frameStart, worst;
         static int previous = -1, frames;
         static float every, lastReport;
+        // -crow-loop-cpu (PS Vita): the main thread's own run time from the kernel (CrowClock), read at
+        // each frame's start, so the frame splits into work and waiting. Per step it would mislead: the
+        // kernel adds a thread's run time when it leaves the CPU, not while it runs.
+        static int mainUid;
+        static long runTotal, lastRun;
+        static string flushLabel;
+
+        // -crow-cycle: report now (at the next frame start) under a label, and start a new window.
+        internal static void Flush(string label)
+        {
+            flushLabel = label ?? "";
+        }
 
         public static void Install(float seconds)
         {
             every = seconds;
+            if (Array.IndexOf(ProbeFiles.Args, "-crow-loop-cpu") >= 0) mainUid = Threads.SelfAnyway();
             PlayerLoopSystem root = PlayerLoop.GetDefaultPlayerLoop();
             PlayerLoopSystem[] phases = root.subSystemList;
             for (int p = 0; p < phases.Length; p++)
@@ -396,6 +414,12 @@ namespace CrowCompat
             previous = index;
             last = now;
             if (index != 0) return;
+            if (mainUid > 0)
+            {
+                long run = Threads.RunMicros(mainUid);
+                if (run >= 0 && lastRun > 0 && frameStart != 0) runTotal += run - lastRun;
+                lastRun = run;
+            }
             CameraEnd(now);
             if (frameStart != 0)
             {
@@ -404,11 +428,16 @@ namespace CrowCompat
             }
             frameStart = now;
             float time = Time.realtimeSinceStartup;
-            if (time - lastReport < every || frames == 0) return;
+            string label = flushLabel;
+            if (label == null && (time - lastReport < every || frames == 0)) return;
+            flushLabel = null;
+            if (frames == 0) return;
             double ms = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
             long total = ticks.Sum();
             var line = new StringBuilder("CROW_LOOP scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
+            if (label != null) line.Append(" cycle=").Append(label);
             line.Append(" frames=").Append(frames).Append(" frame=").Append((total * ms / frames).ToString("F1"));
+            if (mainUid > 0) line.Append(" cpu=").Append((runTotal / 1000.0 / frames).ToString("F1"));
             line.Append(" worst=").Append((worst * ms).ToString("F1"));
             foreach (int i in Enumerable.Range(0, ticks.Length).OrderByDescending(i => ticks[i]).Take(14))
             {
@@ -416,6 +445,7 @@ namespace CrowCompat
                 if (each < 0.01) break;
                 line.Append(' ').Append(labels[i]).Append('=').Append(each.ToString(each < 1 ? "F2" : "F1"));
             }
+            runTotal = 0;
             Debug.Log(line.ToString());
             line = new StringBuilder("CROW_CAMS");
             foreach (KeyValuePair<string, long[]> pair in cameras.OrderByDescending(p => p.Value[0] + p.Value[1] + p.Value[2]))

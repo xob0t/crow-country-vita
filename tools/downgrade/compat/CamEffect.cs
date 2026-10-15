@@ -18,6 +18,8 @@ using UnityEngine;
 // 15-25: there it takes vSyncCount 2, an even 30 fps where the frame fits in 33 ms and the same
 // rate as before where it doesn't (a 50 ms frame waits for the third blank either way).
 //   -crow-vsync <n>       vSyncCount after the game's (1 is the game's; Vita default 2)
+//   -crow-camera 624|550|416  with half, the camera's own picture (624x351, 550x351 or 416x234; the
+//                         PS Vita's default is 550, other players' 624)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -60,6 +62,61 @@ namespace CrowCompat
             }
         }
 
+        static int? cameraWidth;
+
+        // -crow-camera <width>: the camera's own picture: 624 (624x351, the game's Switch size), 550
+        // (550x351 at the same 16:9 view: the chain's first pass reads 550 columns, point-sampled, so
+        // it takes one in about 1.13 of a 624-wide picture anyway) or 416 (416x234, the size the last
+        // pass draws; it loses detail: the last pass reads 351 rows, bilinear, and thin lines break up).
+        // The PS Vita takes 550: Roadside at the GPU's 222 MHz 53.9 -> 51 ms a frame, its screenshots
+        // the same as 624's (416: 43 ms, but edges stair-step).
+        public static int CameraWidth
+        {
+            get
+            {
+                if (cameraWidth == null)
+                {
+                    string[] args = ProbeFiles.Args;
+                    int index = Array.IndexOf(args, "-crow-camera");
+                    int value;
+                    cameraWidth = index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) && Height(value) > 0 ? value
+                        : Application.platform == RuntimePlatform.PSP2 ? 550 : 624;
+                }
+                return cameraWidth.Value;
+            }
+        }
+
+        static readonly System.Collections.Generic.List<Component> effects = new System.Collections.Generic.List<Component>();
+
+        // -crow-ab and -crow-cycle's camera=<width>: every half-size effect's camera picture at that size.
+        internal static void SetCameraWidth(int width)
+        {
+            if (Height(width) == 0) return;
+            cameraWidth = width;
+            effects.RemoveAll(e => e == null);
+            foreach (Component effect in effects) CameraTarget(effect, effect.GetType());
+            Debug.Log("CROW_CAMERA picture " + width + " wide on " + effects.Count + " camera effects");
+        }
+
+        static void CameraTarget(Component effect, Type type)
+        {
+            FieldInfo field = type.GetField("camRenderTexture2", Fields);
+            var current = field == null ? null : field.GetValue(effect) as RenderTexture;
+            int width = CameraWidth;
+            if (current == null || current.width == width) return;
+            Replace(effect, type, "camRenderTexture2", new RenderTexture(width, Height(width), 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
+            // The camera's aspect follows its target; 550x351 keeps the 624x351 view.
+            var camera = effect.GetComponent<Camera>();
+            if (camera == null) return;
+            if (width * 351 != Height(width) * 624) camera.aspect = 624f / 351f;
+            else camera.ResetAspect();
+        }
+
+        static int Height(int width)
+        {
+            return width == 624 ? 351 : width == 550 ? 351 : width == 416 ? 234 : 0;
+        }
+
         // Called at the end of CrowCountryCamEffect.Awake (rewriter Patches.cs, PatchCamEffect).
         public static void AfterAwake(Component effect)
         {
@@ -69,6 +126,8 @@ namespace CrowCompat
             FieldInfo size = type.GetField("camTargetSize", Fields);
             // CamTargetSize.S1248x702 = 0, S624x351 = 1.
             if (Convert.ToInt32(size.GetValue(effect)) == 0) size.SetValue(effect, Enum.ToObject(size.FieldType, 1));
+            effects.Add(effect);
+            CameraTarget(effect, type);
             Replace(effect, type, "texB1248x702", new RenderTexture(624, 351, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
             RenderTexture blur = Replace(effect, type, "texC1248x702", new RenderTexture(624, 351, 0));
             foreach (string name in new[] { "crtPostProMaterial", "crtPostProAlphaMaterial" })
