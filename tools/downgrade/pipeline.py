@@ -51,16 +51,19 @@ from asset_rules import (
     compat_component_overlay,
     i2_font_overlay,
     link_xml,
+    mesh_duplicates,
     mesh_readable_overlay,
     name_overlay,
     native_plugin_overlay,
     npot_texture_overlay,
     render_texture_overlay,
     rewired_vita_overlay,
+    scene_dedup_overlay,
     scene_reference_overlay,
     settings_overlay,
     stripped_component_overlay,
     texture_cap_overlay,
+    texture_dedup_overlay,
     texture_overlay,
 )
 from code_trim import TRIMMED_ON, trim_assemblies
@@ -679,7 +682,10 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(texture_overlay(exported, game, platform))
         overlay.update(npot_texture_overlay(exported, overlay, platform))
         overlay.update(texture_cap_overlay(exported, overlay, platform))
-        overlay.update(mesh_readable_overlay(exported, overlay, platform))
+        duplicates = mesh_duplicates(exported, platform)
+        overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
+        texture_copies, renamed_references = texture_dedup_overlay(exported, overlay, platform)
+        overlay.update(renamed_references)
         moved, renamed = addressables_overlay(exported, overlay)
         overlay.update(moved)
         excluded.update(renamed)
@@ -690,6 +696,7 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(moved)
         excluded.update(renamed)
         video_overlay(exported, overlay, excluded, platform)
+        overlay.update(scene_dedup_overlay(exported, overlay, {**duplicates, **texture_copies}, platform))
     return overlay, excluded
 
 

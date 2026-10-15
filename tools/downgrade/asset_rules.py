@@ -8,7 +8,19 @@ import struct
 import sys
 from pathlib import Path
 
-from common import NATIVE_ASSETS, WORK, folder_meta, game_data, guid_for, listing, log, meta_guid, meta_of, scan
+from common import (
+    NATIVE_ASSETS,
+    WORK,
+    YAML_FILES,
+    folder_meta,
+    game_data,
+    guid_for,
+    listing,
+    log,
+    meta_guid,
+    meta_of,
+    scan,
+)
 
 
 def current_text(exported: Path, overlay: dict, relative: Path):
@@ -701,37 +713,57 @@ def scene_mesh_users(path: Path):
     return [sorted(combined), sorted(others - combined), sorted(named)]
 
 
-def mesh_readable_overlay(exported: Path, overlay: dict, platform: str):
-    if platform != 'vita':
-        return {}
-    assets = exported / 'Assets'
-    scenes = scan(
+def scene_mesh_scan(assets: Path):
+    """{scene: scene_mesh_users(scene)}, read once per file version."""
+    return scan(
         'mesh-users',
         assets,
         lambda relative: relative.suffix == '.unity',
         scene_mesh_users,
         version=f'{MESH_COMBINER_SCRIPT} {SCENE_DOCUMENT.pattern}',
     )
-    elsewhere = scan(
+
+
+def mesh_references_elsewhere(assets: Path):
+    """{prefab or asset: the mesh GUIDs it names}, read once per file version."""
+    return scan(
         'mesh-references',
         assets,
         lambda relative: relative.suffix in TEXTURE_REFERRERS - {'.unity'} and relative.parts[0] != 'Mesh',
         lambda path: sorted({g.decode() for g in MESH_REFERENCE.findall(path.read_bytes())}),
         version=MESH_REFERENCE.pattern.decode(),
     )
+
+
+def mesh_guids(assets: Path):
+    """{Mesh/<name>.asset.meta: the mesh's GUID}."""
+    return scan(
+        'mesh-guids',
+        assets,
+        lambda relative: relative.parts[0] == 'Mesh' and relative.name.endswith('.asset.meta'),
+        meta_guid,
+    )
+
+
+def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict | None = None):
+    """duplicates: mesh_duplicates' {copy's GUID: the GUID the scenes name instead}."""
+    if platform != 'vita':
+        return {}
+    assets = exported / 'Assets'
+    scenes = scene_mesh_scan(assets)
+    elsewhere = mesh_references_elsewhere(assets)
     keep, candidates = set(), set()
     for combined, others, named in scenes.values():
         keep.update(combined, named)
         candidates.update(others)
     for guids in elsewhere.values():
         keep.update(guids)
+    if duplicates:
+        # A group's one mesh stays readable if any of its copies had to.
+        keep = {duplicates.get(guid, guid) for guid in keep}
+        candidates = {duplicates.get(guid, guid) for guid in candidates}
     candidates -= keep
-    guids = scan(
-        'mesh-guids',
-        assets,
-        lambda relative: relative.parts[0] == 'Mesh' and relative.name.endswith('.asset.meta'),
-        meta_guid,
-    )
+    guids = mesh_guids(assets)
     # The changed meshes go into MESH_CACHE and the overlay names those files, so 42,000 meshes are
     # neither held in memory nor read again: a cached copy written after the exported file, of its
     # size (the flags keep the length), is current.
@@ -761,6 +793,217 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str):
         result[relative] = cached
         changed += 1
     log(f'{platform}: {changed} of {len(guids)} meshes not readable; {len(keep)} stay readable for MeshCombineStudio')
+    return result
+
+
+# Meshes with the same geometry. ProBuilder gives every object a mesh of its own, so the game has many
+# copies of each shape (a step, a tile, a pillar): Pool's 4,517 meshes are 617 shapes, and the copies
+# were 30 of its 40 MB of mesh memory on the PS Vita (readable ones counted twice; Ocean Kingdom 32 of
+# 38, Underground NE 32 of 40, Haunted Hilltop 22 of 29, Station Square 16 of 21), besides the cost of
+# 3,900 more Mesh objects. The scenes' references to a copy name one mesh of its group instead (the
+# lowest GUID), and the copies are no longer built; the group's mesh is readable if any copy had to be
+# (mesh_readable_overlay). Only meshes that scenes alone name: a mesh a prefab or another asset names
+# (the player prefab, loaded all the time) is left alone, so no mesh is shared by the resident player
+# and an area, whose meshes MeshRelease makes unreadable once combined. No game script or PlayMaker
+# action reads or writes a mesh; MeshCombineStudio, MeshColliders and particle systems take shared ones.
+MESH_DEDUP_PLATFORMS = {'vita', 'windows'}
+MESH_DEDUP_CACHE = WORK / 'deduplicated-scenes'
+READABLE_LINES = re.compile(rb'^  m_(?:IsReadable|KeepVertices|KeepIndices): \d+\n', re.M)
+MESH_NAME_LINE = re.compile(rb'^  m_Name: .*\n', re.M)
+
+
+def mesh_geometry(path: Path):
+    """A hash of a mesh asset's text after its name, its read/write flags left out."""
+    data = path.read_bytes()
+    name = MESH_NAME_LINE.search(data)
+    return hashlib.sha1(READABLE_LINES.sub(b'', data[name.end() :] if name else data)).hexdigest()
+
+
+def mesh_duplicates(exported: Path, platform: str):
+    """{a copy's GUID: the GUID of its group's mesh}, for meshes only scenes name."""
+    if platform not in MESH_DEDUP_PLATFORMS:
+        return {}
+    assets = exported / 'Assets'
+    geometry = scan(
+        'mesh-geometry',
+        assets,
+        lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset',
+        mesh_geometry,
+        version=READABLE_LINES.pattern.decode() + MESH_NAME_LINE.pattern.decode(),
+    )
+    named_elsewhere = {guid for guids in mesh_references_elsewhere(assets).values() for guid in guids}
+    groups = {}
+    for meta, guid in mesh_guids(assets).items():
+        shape = geometry.get(meta.with_suffix(''))
+        if shape and guid not in named_elsewhere:
+            groups.setdefault(shape, []).append(guid)
+    duplicates = {}
+    for members in groups.values():
+        kept = min(members)
+        duplicates.update((guid, kept) for guid in members if guid != kept)
+    log(f'Meshes: {len(duplicates)} copies of {len(set(duplicates.values()))} shapes replaced by one mesh each')
+    return duplicates
+
+
+# Textures with the same image and import settings. The player prefab came from an Addressables bundle
+# with copies of its own of textures the areas use too ("old paper wallpaper grunge 2" and "..._0"), so
+# an area loaded a second copy of what the resident player holds: 1.7-5.4 MB a big area, 6 MB on the
+# title. References to a copy (from scenes, materials, sprites, other assets) name one texture of its
+# group instead: the one the player prefab reaches, else the lowest GUID. Only copies whose image (after
+# npot_texture_overlay) and import settings (after the texture rules) are the same byte for byte, and
+# not readable ones: TextMeshPro's font atlases are, for dynamic glyphs written at run time, and two font
+# assets sharing one atlas could write over each other.
+TEXTURE_DEDUP_PLATFORMS = {'vita', 'windows'}
+TEXTURE_USE = re.compile(rb'fileID: (?:2800000|21300000), guid: ([0-9a-f]{32})')
+ANY_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
+META_IDENTITY_LINES = re.compile(r'^(?:guid|timeCreated): .*\n', re.M)
+
+
+def texture_users(assets: Path):
+    """{YAML file: the texture GUIDs it names (as a texture or its sprite)}, read once per file version."""
+    return scan(
+        'texture-users',
+        assets,
+        lambda relative: relative.suffix in YAML_FILES and relative.parts[0] != 'Mesh',
+        lambda path: sorted({g.decode() for g in TEXTURE_USE.findall(path.read_bytes())}),
+        version=TEXTURE_USE.pattern.decode(),
+    )
+
+
+def resident_guids(assets: Path):
+    """The GUIDs the player prefab (ADDRESSABLE_ASSETS, loaded all the time) reaches through native assets."""
+    references = scan(
+        'guid-references',
+        assets,
+        lambda relative: relative.suffix in NATIVE_ASSETS and relative.parts[0] != 'Mesh',
+        lambda path: sorted({g.decode() for g in ANY_GUID.findall(path.read_bytes())}),
+        version=ANY_GUID.pattern.decode(),
+    )
+    paths = scan(
+        'asset-guids',
+        assets,
+        lambda relative: relative.suffix == '.meta' and relative.parts[0] != 'Mesh',
+        meta_guid,
+    )
+    by_guid = {guid: meta.with_suffix('') for meta, guid in paths.items() if guid}
+    seen, todo = set(), [root.relative_to('Assets') for root in ADDRESSABLE_ASSETS.values()]
+    while todo:
+        for guid in references.get(todo.pop(), []):
+            if guid not in seen:
+                seen.add(guid)
+                if by_guid.get(guid) in references:
+                    todo.append(by_guid[guid])
+    return seen
+
+
+def texture_dedup_overlay(exported: Path, overlay: dict, platform: str):
+    """Returns ({a copy's GUID: the GUID references name instead}, overlay entries for the native
+    assets that named a copy). Scenes are rewritten by scene_dedup_overlay."""
+    if platform not in TEXTURE_DEDUP_PLATFORMS:
+        return {}, {}
+    assets = exported / 'Assets'
+    content = scan(
+        'texture-content',
+        assets,
+        lambda relative: relative.parts[0] == 'Texture2D' and relative.suffix == '.png',
+        lambda path: hashlib.sha1(path.read_bytes()).hexdigest(),
+    )
+    groups = {}
+    for found, image in content.items():
+        relative = Path('Assets') / found
+        source = overlay.get(relative)  # npot_texture_overlay's padded images
+        if source is not None:
+            image = hashlib.sha1(source.read_bytes() if isinstance(source, Path) else source).hexdigest()
+        meta = current_text(exported, overlay, meta_of(relative))
+        if 'TextureImporter:' not in meta or re.search(r'^  isReadable: 1$', meta, re.M):
+            continue
+        guid = re.search(r'^guid: (\w+)', meta, re.M)[1]
+        settings = hashlib.sha1(META_IDENTITY_LINES.sub('', meta).encode()).hexdigest()
+        groups.setdefault((image, settings), []).append(guid)
+    resident = resident_guids(assets)
+    duplicates = {}
+    for members in groups.values():
+        kept = min((guid not in resident, guid) for guid in members)[1]
+        duplicates.update((guid, kept) for guid in members if guid != kept)
+    result, references = {}, 0
+    for found, guids in texture_users(assets).items():
+        if found.suffix == '.unity' or not any(guid in duplicates for guid in guids):
+            continue
+        relative = Path('Assets') / found
+        source = overlay.get(relative)
+        data = source.read_bytes() if isinstance(source, Path) else source or (exported / relative).read_bytes()
+        new, count = replace_references(data, duplicates)
+        if count:
+            result[relative] = new
+            references += count
+    kept_resident = sum(1 for guid in set(duplicates.values()) if guid in resident)
+    log(
+        f'Textures: {len(duplicates)} copies replaced by one texture each ({kept_resident} of them the player '
+        f"prefab's), {references} references in {len(result)} assets"
+    )
+    return duplicates, result
+
+
+DEDUPLICATED_REFERENCE = re.compile(rb'fileID: (4300000|2800000|21300000), guid: ([0-9a-f]{32})')
+
+
+def replace_references(data: bytes, duplicates: dict):
+    """data with its mesh and texture references to copies naming their group's asset, and the count."""
+    count = 0
+
+    def kept(m):
+        nonlocal count
+        guid = duplicates.get(m[2].decode())
+        if guid is None:
+            return m[0]
+        count += 1
+        return b'fileID: ' + m[1] + b', guid: ' + guid.encode()
+
+    return DEDUPLICATED_REFERENCE.sub(kept, data), count
+
+
+def scene_dedup_overlay(exported: Path, overlay: dict, duplicates: dict, platform: str):
+    """The scenes with their references to mesh and texture copies changed to the group's asset
+    (mesh_duplicates, texture_dedup_overlay). The rewritten scenes (1 GB) go into MESH_DEDUP_CACHE/<platform>,
+    current while their stamp (the source's identity and the replacements) matches, and the overlay
+    names those files."""
+    if not duplicates:
+        return {}
+    assets = exported / 'Assets'
+    files = listing(assets)
+    textures = texture_users(assets)
+    result, references = {}, 0
+    for found, users in scene_mesh_scan(assets).items():
+        named = {guid for guids in users for guid in guids} | set(textures.get(found, []))
+        replaced = sorted(guid for guid in named if guid in duplicates)
+        if not replaced:
+            continue
+        relative = Path('Assets') / found
+        source = overlay.get(relative)
+        if isinstance(source, Path):
+            stat = source.stat()
+            identity = f'{source} {stat.st_size} {stat.st_mtime_ns}'
+        elif source is not None:
+            identity = hashlib.sha1(source).hexdigest()
+        else:
+            identity = f'{files[found][0]} {files[found][1]}'
+        stamp = hashlib.sha1(f'{identity} {[(g, duplicates[g]) for g in replaced]}'.encode()).hexdigest()
+        cached = MESH_DEDUP_CACHE / platform / relative
+        stamp_file = cached.with_name(cached.name + '.stamp')
+        if cached.exists() and stamp_file.exists() and stamp_file.read_text() == stamp:
+            result[relative] = cached
+            continue
+        data = source.read_bytes() if isinstance(source, Path) else source or (exported / relative).read_bytes()
+        new, count = replace_references(data, duplicates)
+        references += count
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(new)
+        stamp_file.write_text(stamp)
+        result[relative] = cached
+    log(
+        f'Copies of meshes and textures replaced in {len(result)} scenes '
+        f'({references} references rewritten this run, the rest as cached)'
+    )
     return result
 
 
