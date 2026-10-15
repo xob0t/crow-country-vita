@@ -184,6 +184,7 @@ namespace CrowCompat
             var meshes = new HashSet<Mesh>();
             var casterSizes = new int[6];  // bounds diagonal under 0.5, 1, 2, 5, 10 m, and larger
             var casterNames = new Dictionary<string, int>();
+            var big = new List<KeyValuePair<Renderer, Mesh>>();  // the largest meshes drawn, for the details
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 if (!renderer.enabled || !renderer.isVisible) continue;
@@ -238,6 +239,7 @@ namespace CrowCompat
                 if (mesh != null)
                 {
                     meshes.Add(mesh);
+                    if (perMaterial) big.Add(new KeyValuePair<Renderer, Mesh>(renderer, mesh));
                     if (mesh.vertexCount < 300 && count == 1 && skin == null) small++;
                     if (mesh.isReadable)
                     {
@@ -286,6 +288,9 @@ namespace CrowCompat
             Debug.Log("CROW_DRAWMAT casters by size <0.5m=" + casterSizes[0] + " <1m=" + casterSizes[1] + " <2m=" + casterSizes[2] + " <5m=" + casterSizes[3] +
                       " <10m=" + casterSizes[4] + " more=" + casterSizes[5] + " by name " +
                       string.Join(" ", casterNames.OrderByDescending(p => p.Value).Take(20).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
+            foreach (KeyValuePair<Renderer, Mesh> pair in big.OrderByDescending(p => p.Value.vertexCount).Take(8))
+                Debug.Log("CROW_DRAWMAT mesh " + pair.Value.name.Replace(' ', '_') + " vertices=" + pair.Value.vertexCount + " readable=" + (pair.Value.isReadable ? 1 : 0) +
+                          " path=" + Perf.Path(pair.Key.transform, 5));
             Debug.Log("CROW_DRAWMAT shaders " + string.Join(" ", shaders.OrderByDescending(p => p.Value).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
             foreach (KeyValuePair<Material, int> pair in materials.OrderByDescending(p => p.Value).Take(15))
                 Debug.Log("CROW_DRAWMAT uses=" + pair.Value + " " + pair.Key.name.Replace(' ', '_') + " shader=" + (pair.Key.shader == null ? "?" : pair.Key.shader.name.Replace(' ', '_')));
@@ -304,13 +309,21 @@ namespace CrowCompat
     // 180 of them with three vertex-colour materials), each a draw in the base pass, in every pixel
     // light's additive pass and in the shadow map. A static batch draws neighbours with the same
     // material and lights as one. Its renderers draw from a world-space copy of their meshes, so they
-    // must never move; enabling, disabling and material changes still work.
-    //   -crow-static-batch off|all  all: some seconds after each area loads (MeshCombineStudio has
-    //                               combined by then), batch every active, enabled MeshRenderer with a
-    //                               readable mesh, outside the player's prefab and without a Rigidbody,
-    //                               Animator or Animation on it or above it; batched renderers that
-    //                               move after all are logged (CROW_BATCH moved). -crow-cycle takes
-    //                               batch=all (now, in the current area).
+    // must never move; enabling, disabling and material changes still work. Not a default: on the PS
+    // Vita the main thread's cost is per renderer more than per draw call. Roadside with its meshes made
+    // readable (a test, they aren't on the PS Vita) and all 218 candidates batched: camera draw 20.4 ->
+    // 19.8 ms, the combine itself a 375 ms frame; and most of its small renderers are the crows' and
+    // flies' parts, which move (safe batches 29). Dynamic batching on the same readable meshes saved
+    // nothing measurable.
+    //   -crow-static-batch off|all|safe  all: some seconds after each area loads (MeshCombineStudio
+    //                               has combined by then), batch every active, enabled MeshRenderer with
+    //                               a readable mesh, outside the player's prefab and without a Rigidbody,
+    //                               Animator or Animation on it or above it. safe also leaves out what a
+    //                               PlayMaker action that moves transforms (SetPosition, DOTween...,
+    //                               SmoothLookAt...) names, or a game script that moves its object, and
+    //                               what is below them. A batched renderer that moves after all gets its
+    //                               own mesh back (CROW_BATCH moved). -crow-cycle takes batch=all|safe
+    //                               (now, in the current area).
     static class StaticBatch
     {
         static string rule = "off";
@@ -318,6 +331,8 @@ namespace CrowCompat
         static bool hooked;
         static readonly List<Transform> watched = new List<Transform>();
         static readonly HashSet<Transform> moved = new HashSet<Transform>();
+        // Each batched renderer's own mesh, given back to its MeshFilter when it moves after all.
+        static readonly Dictionary<Transform, KeyValuePair<MeshFilter, Mesh>> originals = new Dictionary<Transform, KeyValuePair<MeshFilter, Mesh>>();
         internal static int Batched;
 
         public static void Install(string[] args)
@@ -328,6 +343,11 @@ namespace CrowCompat
 
         internal static void Set(string value, bool now)
         {
+            if (value == "nudge")
+            {
+                Nudge();
+                return;
+            }
             rule = value;
             if (!hooked)
             {
@@ -369,8 +389,35 @@ namespace CrowCompat
                 }
                 if (!transform.hasChanged) continue;
                 transform.hasChanged = false;
-                if (moved.Add(transform)) Debug.Log("CROW_BATCH moved " + Perf.Path(transform, 6) + " in " + transform.gameObject.scene.name.Replace(' ', '_'));
+                watched.RemoveAt(i);
+                Unbatch(transform);
             }
+        }
+
+        // A batched renderer that moved draws its own mesh again: the static batch's copy stays where
+        // it was batched.
+        static void Unbatch(Transform transform)
+        {
+            KeyValuePair<MeshFilter, Mesh> original;
+            if (!originals.TryGetValue(transform, out original) || original.Key == null) return;
+            originals.Remove(transform);
+            original.Key.sharedMesh = original.Value;
+            var renderer = transform.GetComponent<MeshRenderer>();
+            if (moved.Add(transform))
+                Debug.Log("CROW_BATCH moved " + Perf.Path(transform, 6) + " in " + transform.gameObject.scene.name.Replace(' ', '_') +
+                          ": own mesh again, batched=" + (renderer != null && renderer.isPartOfStaticBatch ? 1 : 0));
+        }
+
+        // batch=nudge (a test of Unbatch): lift ten batched renderers by 0.3 m.
+        static void Nudge()
+        {
+            int count = 0;
+            foreach (Transform transform in watched.Where(t => t != null).Take(10).ToList())
+            {
+                transform.position += new Vector3(0f, 0.3f, 0f);
+                count++;
+            }
+            Debug.Log("CROW_BATCH nudged " + count);
         }
 
         static bool Moves(Transform transform)
@@ -394,6 +441,10 @@ namespace CrowCompat
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var scenes = new Dictionary<Scene, List<GameObject>>();
             int seen = 0, unreadable = 0, moving = 0, player = 0, already = 0, vertices = 0;
+            string why = "";
+            MoverWhy.Clear();
+            covered.Clear();
+            HashSet<Transform> movers = rule == "safe" ? Movers(out why) : null;
             foreach (MeshRenderer renderer in UnityEngine.Object.FindObjectsOfType<MeshRenderer>())
             {
                 if (!renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
@@ -417,7 +468,7 @@ namespace CrowCompat
                     player++;
                     continue;
                 }
-                if (Moves(renderer.transform))
+                if (Moves(renderer.transform) || (movers != null && Below(renderer.transform, movers)))
                 {
                     moving++;
                     continue;
@@ -425,6 +476,7 @@ namespace CrowCompat
                 List<GameObject> list;
                 if (!scenes.TryGetValue(scene, out list)) scenes[scene] = list = new List<GameObject>();
                 list.Add(renderer.gameObject);
+                originals[renderer.transform] = new KeyValuePair<MeshFilter, Mesh>(filter, mesh);
                 vertices += mesh.vertexCount;
             }
             int batched = 0;
@@ -434,16 +486,210 @@ namespace CrowCompat
                 foreach (GameObject go in pair.Value)
                 {
                     var renderer = go.GetComponent<MeshRenderer>();
-                    if (renderer == null || !renderer.isPartOfStaticBatch) continue;
+                    if (renderer == null || !renderer.isPartOfStaticBatch)
+                    {
+                        originals.Remove(go.transform);
+                        continue;
+                    }
                     batched++;
                     go.transform.hasChanged = false;
                     watched.Add(go.transform);
                 }
             }
             Batched += batched;
+            foreach (Transform gone in originals.Keys.Where(t => t == null).ToList()) originals.Remove(gone);
             Debug.Log("CROW_BATCH " + rule + ": " + batched + " of " + seen + " renderers batched (" + vertices + " vertices) in " +
                       clock.ElapsedMilliseconds + " ms; left out: unreadable " + unreadable + ", moving " + moving + ", player " + player +
-                      ", batched before " + already);
+                      ", batched before " + already + why);
+            if (covered.Count > 0)
+                Debug.Log("CROW_BATCH left out below " + string.Join(" ", covered.OrderByDescending(p => p.Value).Take(40)
+                    .Select(p => Perf.Path(p.Key, 4) + "=" + p.Value + "(" + (MoverWhy.ContainsKey(p.Key) ? MoverWhy[p.Key] : "?").Replace(' ', '_') + ")").ToArray()));
+        }
+
+        static bool Below(Transform transform, HashSet<Transform> roots)
+        {
+            for (Transform t = transform; t != null; t = t.parent)
+                if (roots.Contains(t))
+                {
+                    int count;
+                    covered.TryGetValue(t, out count);
+                    covered[t] = count + 1;
+                    return true;
+                }
+            return false;
+        }
+
+        // Why each moving root counts (the FSM and action, or the script), and how many candidates
+        // each left out, for the log.
+        static readonly Dictionary<Transform, string> MoverWhy = new Dictionary<Transform, string>();
+        static readonly Dictionary<Transform, int> covered = new Dictionary<Transform, int>();
+
+        // PlayMaker actions that move, rotate, scale or reparent a transform, or push a rigidbody (by
+        // class name; DOTweenTransform* too). SetProperty counts when it sets a transform's property.
+        static readonly HashSet<string> MoverActions = new HashSet<string>
+        {
+            "SetPosition", "SetRotation", "SetScale", "Rotate", "Translate", "LookAt", "SmoothLookAt", "SmoothLookAt2d",
+            "SmoothLookAtDirection", "SmoothLookAtWithLimit", "MoveTowards", "SetRandomRotation", "SetParent", "DOTweenRigidbodyMove",
+            "AddForce", "AddExplosionForce", "SetVelocity", "SetAngularVelocity", "SetIsKinematic", "UseGravity",
+        };
+
+        static bool IsMoverAction(string name)
+        {
+            return MoverActions.Contains(name) || name.StartsWith("DOTweenTransform") || name == "SetProperty";
+        }
+
+        // Game scripts that move their own object (or what is below it) after it starts.
+        static readonly HashSet<string> MoverScripts = new HashSet<string>
+        {
+            "TransformResetter", "PMGlobalFloatToRotation", "DOTweenAnimation", "DOTweenPath", "SmoothFollow", "LookAtCamera",
+        };
+
+        const System.Reflection.BindingFlags Instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+
+        static object Field(object target, string name)
+        {
+            if (target == null) return null;
+            for (Type type = target.GetType(); type != null; type = type.BaseType)
+            {
+                System.Reflection.FieldInfo field = type.GetField(name, Instance | System.Reflection.BindingFlags.DeclaredOnly);
+                if (field != null) return field.GetValue(target);
+            }
+            return null;
+        }
+
+        static bool TransformProperty(string property)
+        {
+            if (property == null) return false;
+            foreach (string part in new[] { "position", "rotation", "scale", "euler", "parent" })
+                if (property.IndexOf(part, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
+        // The objects a loaded mover action moves: its FsmOwnerDefault fields (the owner, or another
+        // object; PlayMaker's actions name what they act on so, and their FsmGameObject fields are
+        // other parameters: what to look at, the new parent); for SetProperty, its target when the
+        // property is a transform's. Returns whether the action moves anything.
+        static bool ActionTargets(object action, Component owner, List<KeyValuePair<object, string>> targets)
+        {
+            string name = action.GetType().Name;
+            if (!IsMoverAction(name)) return false;
+            bool moves = name != "SetProperty";
+            foreach (System.Reflection.FieldInfo field in action.GetType().GetFields(Instance))
+            {
+                object value = field.GetValue(action);
+                if (value == null) continue;
+                string kind = value.GetType().Name;
+                if (name == "SetProperty")
+                {
+                    if (kind != "FsmProperty") continue;
+                    object target = Field(Field(value, "TargetObject"), "value");
+                    if ((!(target is Transform) && !(target is GameObject)) || !TransformProperty(Field(value, "PropertyName") as string)) continue;
+                    moves = true;
+                    targets.Add(new KeyValuePair<object, string>(target, name));
+                }
+                else if (kind == "FsmOwnerDefault")
+                {
+                    object option = Field(value, "ownerOption");
+                    targets.Add(new KeyValuePair<object, string>(option != null && Convert.ToInt32(option) == 0 ? owner.transform : Field(Field(value, "gameObject"), "value"), name));
+                }
+            }
+            return moves;
+        }
+
+        // A state whose actions aren't loaded (its FSM never started: an inactive object): when its
+        // action data names a mover action, all the objects the data names, and the owner.
+        static bool DataTargets(object state, Component owner, List<KeyValuePair<object, string>> targets)
+        {
+            object data = Field(state, "actionData");
+            var names = Field(data, "actionNames") as System.Collections.IList;
+            if (names == null) return false;
+            bool any = false;
+            foreach (object item in names)
+            {
+                string full = item as string ?? "";
+                if (IsMoverAction(full.Substring(full.LastIndexOf('.') + 1))) any = true;
+            }
+            if (!any) return false;
+            targets.Add(new KeyValuePair<object, string>(owner.transform, "data"));
+            foreach (string list in new[] { "fsmOwnerDefaultParams", "fsmGameObjectParams", "fsmPropertyParams" })
+            {
+                var items = Field(data, list) as System.Collections.IList;
+                if (items == null) continue;
+                foreach (object item in items)
+                {
+                    if (list == "fsmOwnerDefaultParams") targets.Add(new KeyValuePair<object, string>(Field(Field(item, "gameObject"), "value"), "data"));
+                    else if (list == "fsmGameObjectParams") targets.Add(new KeyValuePair<object, string>(Field(item, "value"), "data"));
+                    else targets.Add(new KeyValuePair<object, string>(Field(Field(item, "TargetObject"), "value"), "data"));
+                }
+            }
+            return true;
+        }
+
+        // What PlayMaker's FSMs and the game's scripts in the loaded scenes may move: the objects their
+        // mover actions name, with their FSMs' GameObject variables (a target often is one), and the
+        // objects of mover scripts.
+        static HashSet<Transform> Movers(out string report)
+        {
+            var movers = new HashSet<Transform>();
+            int fsms = 0, moverFsms = 0, unloaded = 0, unknown = 0, scripts = 0;
+            Type fsmType = Type.GetType("PlayMakerFSM, PlayMaker");
+            if (fsmType != null)
+                foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(fsmType))
+                {
+                    var component = found as Component;
+                    if (component == null || !component.gameObject.scene.IsValid()) continue;
+                    fsms++;
+                    object fsm = Field(component, "fsm");
+                    var states = Field(fsm, "states") as Array;
+                    if (states == null) continue;
+                    bool mover = false;
+                    var targets = new List<KeyValuePair<object, string>>();
+                    foreach (object state in states)
+                    {
+                        if (state == null) continue;
+                        var actions = Field(state, "actions") as Array;
+                        if (actions == null)
+                        {
+                            if (DataTargets(state, component, targets))
+                            {
+                                mover = true;
+                                unloaded++;
+                            }
+                            continue;
+                        }
+                        foreach (object action in actions)
+                            if (action != null && ActionTargets(action, component, targets)) mover = true;
+                    }
+                    if (!mover) continue;
+                    moverFsms++;
+                    // States not loaded name their targets through the FSM's variables.
+                    var variables = Field(Field(fsm, "variables"), "gameObjectVariables") as Array;
+                    if (variables != null && targets.Any(t => t.Value == "data"))
+                        foreach (object variable in variables) targets.Add(new KeyValuePair<object, string>(Field(variable, "value"), "data"));
+                    foreach (KeyValuePair<object, string> target in targets)
+                    {
+                        var go = target.Key as GameObject;
+                        var part = target.Key as Component;
+                        Transform transform = go != null ? go.transform : part != null ? part.transform : null;
+                        if (transform == null)
+                        {
+                            unknown++;
+                            continue;
+                        }
+                        movers.Add(transform);
+                        if (!MoverWhy.ContainsKey(transform)) MoverWhy[transform] = Perf.Path(component.transform, 3) + ":" + target.Value;
+                    }
+                }
+            foreach (MonoBehaviour behaviour in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
+            {
+                if (behaviour == null || !MoverScripts.Contains(behaviour.GetType().Name)) continue;
+                movers.Add(behaviour.transform);
+                MoverWhy[behaviour.transform] = behaviour.GetType().Name;
+                scripts++;
+            }
+            report = "; safe: " + moverFsms + " of " + fsms + " FSMs move things (" + unloaded + " states not loaded), " + movers.Count +
+                     " moving roots, " + unknown + " targets unknown, " + scripts + " mover scripts";
+            return movers;
         }
     }
 }
