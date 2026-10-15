@@ -22,6 +22,7 @@ using UnityEngine.SceneManagement;
 //                               every s seconds apply the next change set of <sets> (sets separated by
 //                               '/', changes in a set by ','; Quality.Change's keys and these: particles=,
 //                               fixed=, maxdt=, iter=, sync=, gpu=<MHz>, vsync=<n>, camera=624|550|416,
+//                               batch=all (Draws.cs's static batching, now),
 //                               time=<scale>, 0 to hold a moment for screenshots), with a CROW_LOOP
 //                               line (-crow-loop-profile) for each set's window, labelled with the set.
 //                               E.g. -crow-cycle 10 gpu=222/gpu=166/resolution=0/resolution=1 with
@@ -65,6 +66,9 @@ namespace CrowCompat
             {
                 case "particles":
                     ParticleRule.Set(value);
+                    return true;
+                case "batch":
+                    StaticBatch.Set(value, true);
                     return true;
                 case "fixed":
                     if (numeric && number > 0f) Time.fixedDeltaTime = number;

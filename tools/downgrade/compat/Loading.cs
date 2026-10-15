@@ -361,7 +361,96 @@ namespace CrowCompat
             // A load from the title before the player's scene was requested (a second after the title
             // appeared): request it first, so Unity finishes it before this load and MaraLoader finds it.
             if (name != First) MaraScene.Request();
+            if (SceneGap.Load(name, mode)) return;
             SceneManager.LoadScene(name, mode);
+        }
+    }
+
+    // Area loads by way of an empty scene, on the PS Vita. A single-mode load reads the whole new area
+    // (its objects, assets and managed objects, PlayMaker's FSMs) while the old one is still loaded, and
+    // unloads the old one only then: the peak is both areas at once, and the garbage collector's heap,
+    // which never gives memory back, keeps the managed part of that peak for good. Here the load first
+    // makes an empty scene (CrowGap) the active one and unloads the others, then frees their assets
+    // (Resources.UnloadUnusedAssets) and collects, and only then loads the area, so the peak is the
+    // larger of the two. Textures matter most: the old area's fill the video memory (CDRAM), and the new
+    // area's then go to main memory and stay there. Station Square from the title: 25 MB of main
+    // memory free after the load this way, 5 MB without. Costs about 3 s on the PS Vita (2.4 s of
+    // unused-asset pass, 0.6 s of collection). The player (DontDestroyOnLoad) stays. On the PS Vita
+    // unless -crow-no-gap; on other players with -crow-gap. CROW_GAP lines time the steps.
+    public static class SceneGap
+    {
+        public const string Scene = "CrowGap";
+        static bool installed, on;
+        static string target;
+        static int pending;
+        static readonly Stopwatch clock = new Stopwatch();
+
+        static bool On
+        {
+            get
+            {
+                if (installed) return on;
+                installed = true;
+                string[] args = ProbeFiles.Args;
+                on = Application.platform == RuntimePlatform.PSP2 ? !args.Contains("-crow-no-gap") : args.Contains("-crow-gap");
+                return on;
+            }
+        }
+
+        // Takes a single-mode load from an area or the title (not from the logos, the first load).
+        public static bool Load(string name, LoadSceneMode mode)
+        {
+            if (!On || mode != LoadSceneMode.Single) return false;
+            if (target != null)
+            {
+                Debug.Log("CROW_GAP " + name + " requested while loading " + target + ": loads instead");
+                target = name;
+                return true;
+            }
+            Scene active = SceneManager.GetActiveScene();
+            if (active.buildIndex == 0) return false;
+            target = name;
+            clock.Reset();
+            clock.Start();
+            Scene gap = SceneManager.GetSceneByName(Scene);  // a load right after the last gap's, before it went
+            if (!gap.IsValid()) gap = SceneManager.CreateScene(Scene);
+            SceneManager.SetActiveScene(gap);
+            var scenes = new List<Scene>();
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (scene != gap && scene.isLoaded) scenes.Add(scene);
+            }
+            pending = 0;
+            foreach (Scene scene in scenes)
+            {
+                AsyncOperation unload = SceneManager.UnloadSceneAsync(scene);
+                if (unload == null) continue;
+                pending++;
+                unload.completed += Unloaded;
+            }
+            Debug.Log("CROW_GAP " + name + ": unloading " + string.Join(", ", scenes.Select(s => s.name).ToArray()) + " first");
+            if (pending == 0) Unloaded(null);
+            return true;
+        }
+
+        // Steps on the operations' completed events (CrowCompat can't add a MonoBehaviour to run them
+        // without a build).
+        static void Unloaded(AsyncOperation operation)
+        {
+            if (operation != null && --pending > 0) return;
+            Debug.Log("CROW_GAP scenes unloaded after " + clock.ElapsedMilliseconds + " ms");
+            Resources.UnloadUnusedAssets().completed += AssetsUnloaded;
+        }
+
+        static void AssetsUnloaded(AsyncOperation operation)
+        {
+            long assets = clock.ElapsedMilliseconds;
+            GC.Collect();
+            string name = target;
+            target = null;
+            Debug.Log("CROW_GAP assets unloaded after " + assets + " ms, collected after " + clock.ElapsedMilliseconds + " ms; loading " + name);
+            SceneManager.LoadScene(name, LoadSceneMode.Single);
         }
     }
 

@@ -36,6 +36,7 @@ namespace CrowCompat
             every = Quality.Number(args, "-crow-draw-report", -1f);
             int index = Array.IndexOf(args, "-crow-casters");
             if (index >= 0 && index + 1 < args.Length) Casters(args[index + 1]);
+            StaticBatch.Install(args);
             if (every <= 0f) return;
             SceneManager.sceneLoaded += (scene, mode) => detail = true;
             Application.onBeforeRender += Tick;
@@ -279,6 +280,7 @@ namespace CrowCompat
             line.Append(" casters=").Append(casters).Append(" castersInRange=").Append(castersInRange);
             line.Append(" casterSlotsInRange=").Append(casterSlotsInRange).Append(" flatCasters=").Append(flatCasters);
             line.Append(" receivers=").Append(receivers).Append(" turnedOff=").Append(turnedOff.Count(r => r != null));
+            line.Append(" batches=").Append(StaticBatch.Batched);
             Debug.Log(line.ToString());
             if (!perMaterial || drawn == 0) return drawn;
             Debug.Log("CROW_DRAWMAT casters by size <0.5m=" + casterSizes[0] + " <1m=" + casterSizes[1] + " <2m=" + casterSizes[2] + " <5m=" + casterSizes[3] +
@@ -294,6 +296,154 @@ namespace CrowCompat
                           string.Join(",", names.Distinct().Take(6).ToArray()) + " sig=" + group.Key.Substring(0, Math.Min(160, group.Key.Length)).Replace(' ', '_'));
             }
             return drawn;
+        }
+    }
+
+    // Static batching at run time (StaticBatchingUtility.Combine): the game's builds have none, and
+    // its areas draw many small unique meshes with a few shared materials (Roadside: 281 renderers,
+    // 180 of them with three vertex-colour materials), each a draw in the base pass, in every pixel
+    // light's additive pass and in the shadow map. A static batch draws neighbours with the same
+    // material and lights as one. Its renderers draw from a world-space copy of their meshes, so they
+    // must never move; enabling, disabling and material changes still work.
+    //   -crow-static-batch off|all  all: some seconds after each area loads (MeshCombineStudio has
+    //                               combined by then), batch every active, enabled MeshRenderer with a
+    //                               readable mesh, outside the player's prefab and without a Rigidbody,
+    //                               Animator or Animation on it or above it; batched renderers that
+    //                               move after all are logged (CROW_BATCH moved). -crow-cycle takes
+    //                               batch=all (now, in the current area).
+    static class StaticBatch
+    {
+        static string rule = "off";
+        static float due = -1f, lastWatch;
+        static bool hooked;
+        static readonly List<Transform> watched = new List<Transform>();
+        static readonly HashSet<Transform> moved = new HashSet<Transform>();
+        internal static int Batched;
+
+        public static void Install(string[] args)
+        {
+            int index = Array.IndexOf(args, "-crow-static-batch");
+            if (index >= 0 && index + 1 < args.Length) Set(args[index + 1], false);
+        }
+
+        internal static void Set(string value, bool now)
+        {
+            rule = value;
+            if (!hooked)
+            {
+                hooked = true;
+                SceneManager.sceneLoaded += (scene, mode) =>
+                {
+                    if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara") return;
+                    due = Time.realtimeSinceStartup + 8f;
+                };
+                Application.onBeforeRender += Tick;
+            }
+            if (now) due = 0f;
+        }
+
+        static void Tick()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (due >= 0f && now >= due)
+            {
+                due = -1f;
+                try
+                {
+                    Combine();
+                }
+                catch (Exception exception)
+                {
+                    Debug.Log("CROW_BATCH failed: " + exception);
+                }
+            }
+            if (watched.Count == 0 || now - lastWatch < 0.5f) return;
+            lastWatch = now;
+            for (int i = watched.Count - 1; i >= 0; i--)
+            {
+                Transform transform = watched[i];
+                if (transform == null)
+                {
+                    watched.RemoveAt(i);
+                    continue;
+                }
+                if (!transform.hasChanged) continue;
+                transform.hasChanged = false;
+                if (moved.Add(transform)) Debug.Log("CROW_BATCH moved " + Perf.Path(transform, 6) + " in " + transform.gameObject.scene.name.Replace(' ', '_'));
+            }
+        }
+
+        static bool Moves(Transform transform)
+        {
+            // Animator and Animation by name: CrowCompat doesn't reference the animation module.
+            for (Transform t = transform; t != null; t = t.parent)
+            {
+                if (t.GetComponent<Rigidbody>() != null) return true;
+                foreach (Behaviour behaviour in t.GetComponents<Behaviour>())
+                {
+                    string name = behaviour == null ? null : behaviour.GetType().Name;
+                    if (name == "Animator" || name == "Animation") return true;
+                }
+            }
+            return false;
+        }
+
+        static void Combine()
+        {
+            if (rule == "off") return;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var scenes = new Dictionary<Scene, List<GameObject>>();
+            int seen = 0, unreadable = 0, moving = 0, player = 0, already = 0, vertices = 0;
+            foreach (MeshRenderer renderer in UnityEngine.Object.FindObjectsOfType<MeshRenderer>())
+            {
+                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
+                seen++;
+                if (renderer.isPartOfStaticBatch)
+                {
+                    already++;
+                    continue;
+                }
+                MeshFilter filter = renderer.GetComponent<MeshFilter>();
+                Mesh mesh = filter == null ? null : filter.sharedMesh;
+                if (mesh == null || mesh.vertexCount == 0) continue;
+                if (!mesh.isReadable)
+                {
+                    unreadable++;
+                    continue;
+                }
+                Scene scene = renderer.gameObject.scene;
+                if (scene.name == "DontDestroyOnLoad" || scene.name == "CrowMara" || renderer.transform.root.name.StartsWith("CharacterCameraPrefab"))
+                {
+                    player++;
+                    continue;
+                }
+                if (Moves(renderer.transform))
+                {
+                    moving++;
+                    continue;
+                }
+                List<GameObject> list;
+                if (!scenes.TryGetValue(scene, out list)) scenes[scene] = list = new List<GameObject>();
+                list.Add(renderer.gameObject);
+                vertices += mesh.vertexCount;
+            }
+            int batched = 0;
+            foreach (KeyValuePair<Scene, List<GameObject>> pair in scenes)
+            {
+                StaticBatchingUtility.Combine(pair.Value.ToArray(), null);
+                foreach (GameObject go in pair.Value)
+                {
+                    var renderer = go.GetComponent<MeshRenderer>();
+                    if (renderer == null || !renderer.isPartOfStaticBatch) continue;
+                    batched++;
+                    go.transform.hasChanged = false;
+                    watched.Add(go.transform);
+                }
+            }
+            Batched += batched;
+            Debug.Log("CROW_BATCH " + rule + ": " + batched + " of " + seen + " renderers batched (" + vertices + " vertices) in " +
+                      clock.ElapsedMilliseconds + " ms; left out: unreadable " + unreadable + ", moving " + moving + ", player " + player +
+                      ", batched before " + already);
         }
     }
 }

@@ -16,6 +16,8 @@ namespace CrowCompat
     {
         const string Help =
             "-crow-scene <name>       load this scene once the Title and the player's scene (CrowMara) have loaded (an area)\n" +
+            "-crow-scene-then <name> <s>  s seconds (default 30) after that scene loaded, load this one as the game's\n" +
+            "                         area changes do (PlayMaker's LoadScene action), with the player in play\n" +
             "-crow-heartbeat <s>      every s seconds, log frame times, GC and memory, visible renderers and lights\n" +
             "-crow-quit-after <s>     quit s seconds after the probe starts\n" +
             "-crow-shot <s> <path>    save a screenshot s seconds after the last scene load\n" +
@@ -30,7 +32,8 @@ namespace CrowCompat
             "-crow-language <name>    keep I2 Localization on this language (English, French, Japanese, Korean, \"Chinese (Simplified)\", ...)";
 
         static string[] args;
-        static string sceneToLoad;
+        static string sceneToLoad, sceneThen;
+        static float sceneThenAfter;
         static float heartbeat, quitAfter = -1f, shotAfter = -1f;
         static string shotPath;
         static bool noVsync, mute, input;
@@ -60,6 +63,11 @@ namespace CrowCompat
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene");
+            sceneThen = Value("-crow-scene-then");
+            int then = Array.IndexOf(args, "-crow-scene-then");
+            if (then < 0 || then + 2 >= args.Length || !float.TryParse(args[then + 2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out sceneThenAfter))
+                sceneThenAfter = 30f;
             heartbeat = Number("-crow-heartbeat", 0f);
             quitAfter = Number("-crow-quit-after", -1f);
             shotAfter = Number("-crow-shot", -1f);
@@ -157,13 +165,20 @@ namespace CrowCompat
                 {
                     sceneRequested = true;
                     Debug.Log("CROW_DIAG loading " + sceneToLoad);
-                    SceneManager.LoadScene(sceneToLoad);
+                    if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (Loading.cs)
                 }
                 else if (!waitLogged)
                 {
                     waitLogged = true;
                     Debug.Log("CROW_DIAG waiting for " + MaraScene.Scene + " before loading " + sceneToLoad);
                 }
+            }
+            if (sceneThen != null && sceneRequested && SceneManager.GetActiveScene().name == sceneToLoad && now - lastLoad >= sceneThenAfter)
+            {
+                string next = sceneThen;
+                sceneThen = null;
+                Debug.Log("CROW_DIAG loading " + next + " from " + sceneToLoad);
+                ScenePrefetch.LoadScene(next, LoadSceneMode.Single);
             }
             float delta = Time.unscaledDeltaTime * 1000f;
             frames++;

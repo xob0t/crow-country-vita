@@ -159,12 +159,21 @@ partial class DowngradeAssemblies
 
     // PlayMaker's LoadScene action loads with SceneManager.LoadScene(name, mode); the call goes to
     // CrowCompat ScenePrefetch.LoadScene, which activates the title where it was read ahead
-    // during the logos (compat/Loading.cs), and loads as before otherwise.
+    // during the logos, and on the PS Vita loads areas by way of an empty scene (SceneGap,
+    // compat/Loading.cs). The game's RestartLevel action (an area loaded again: retry after death)
+    // goes there too.
     static int PatchLoadSceneAction(ModuleDefinition module)
     {
         TypeDefinition type = GameType(module, "HutongGames.PlayMaker.Actions.LoadScene");
         if (type == null) return 0;
-        MethodDefinition load = type.Methods.Single(m => m.Name == "DoLoadSceneSync" && m.Parameters.Count == 0);
+        int count = RouteLoadScene(module, type.Methods.Single(m => m.Name == "DoLoadSceneSync" && m.Parameters.Count == 0));
+        TypeDefinition restart = GameType(module, "HutongGames.PlayMaker.Actions.RestartLevel");
+        if (restart != null) count += RouteLoadScene(module, restart.Methods.Single(m => m.Name == "OnEnter" && m.Parameters.Count == 0));
+        return count;
+    }
+
+    static int RouteLoadScene(ModuleDefinition module, MethodDefinition load)
+    {
         int count = 0;
         foreach (Instruction call in load.Body.Instructions)
         {

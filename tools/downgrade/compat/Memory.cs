@@ -23,6 +23,20 @@ using UnityEngine.SceneManagement;
 //   -crow-memory-census     with it, MEMCENSUS lines: managed memory by the Unity object or static that holds it.
 //   -crow-memory-unload     before each MEMTYPES pass, Resources.UnloadUnusedAssets and a GC, so the
 //                           pass counts what stays loaded.
+//   -crow-memory-watch [ms] a thread of its own samples memory every ms (default 250), also through
+//                           the long frames of a scene load, when the main thread logs nothing: a
+//                           MEMWATCH line when a value moved by 1 MB or more, and every 10 s (the GC
+//                           heap's size and free part, bytes allocated since the last line, the PS
+//                           Vita's free LPDDR, CDRAM and PHYSCONT). The last lines before an
+//                           out-of-memory crash show which pool ran out.
+//   -crow-gc-retries <n>    Boehm's GC_max_retries: collections tried when the GC heap can't grow,
+//                           before the out-of-memory abort (PS Vita default 2; Boehm's own is 0).
+//   -crow-gc-divisor <n>    Boehm's GC_free_space_divisor: the heap grows by about heap/n at a time,
+//                           and collects after about (live data)/n has been allocated (PS Vita
+//                           default 6; Boehm's own is 3).
+//   -crow-gc-reserve <MB>   the main memory the GC heap's cap leaves to Unity (PS Vita default 16; 0:
+//                           no cap). See GcSettings.
+//   -crow-no-phycont-heap   keep the GC heap out of the PHYCONT memory (see PhyContPool).
 // MeshRelease, below, frees what MeshCombineStudio keeps after combining (on the PS Vita).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
@@ -41,6 +55,13 @@ namespace CrowCompat
         {
             string[] args = ProbeFiles.Args;
             MeshRelease.Install(args);
+            GcSettings(args);
+            int watch = Array.IndexOf(args, "-crow-memory-watch");
+            if (watch >= 0)
+            {
+                int ms;
+                Watch(watch + 1 < args.Length && int.TryParse(args[watch + 1], out ms) && ms > 0 ? ms : 250);
+            }
             int index = Array.IndexOf(args, "-crow-memory");
             if (index < 0) return;
             every = 30f;
@@ -141,6 +162,195 @@ namespace CrowCompat
                 noGcHeap = true;
                 return managed;
             }
+        }
+
+        // The garbage collector's heap on the PS Vita (IL2CPP links Boehm into the game module, so its C
+        // API is reachable as __Internal). Boehm takes its heap from the system in sections of about a
+        // third of the heap at a time (free_space_divisor 3) and never gives them back; when a section
+        // can't be had, it aborts without collecting first (max_retries 0). In Station Square, from
+        // the title, the area's read left 35 MB of main memory, the full GC heap (91.6 MB, 2 MB free)
+        // grew by 31 MB, and Unity's allocator then failed with 3 MB left. The PS Vita defaults: a
+        // section of a sixth of the heap (collections come sooner too, after a sixth of the live data
+        // allocated instead of a third), and two collections tried before giving up.
+        // -crow-gc-retries <n> and -crow-gc-divisor <n> override them; 0 keeps Boehm's own.
+        // Boehm still grows the heap rather than collect while less than that sixth has been allocated
+        // since the last collection, even when most of the heap is garbage and main memory is nearly
+        // gone (Station Square: a 120 MB heap, 4 MB of it free, and 25 MB of main memory left, which
+        // its next 20 MB section would take). Governor caps the heap at its size plus the free main
+        // memory beyond a reserve for Unity (default 16 MB, -crow-gc-reserve <MB>, 0 for none): where
+        // the cap stops a section, Boehm collects instead (the retries above), and only data that is
+        // really live can make it fail.
+        const int VitaRetries = 2, VitaDivisor = 6, VitaReserveMB = 16;
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern void GC_set_max_heap_size(UIntPtr value);
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern void GC_set_max_retries(UIntPtr value);
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_max_retries();
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern void GC_set_free_space_divisor(UIntPtr value);
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_free_space_divisor();
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
+
+        static int IntArg(string[] args, string name, int fallback)
+        {
+            int index = Array.IndexOf(args, name), value;
+            return index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) ? value : fallback;
+        }
+
+        static void GcSettings(string[] args)
+        {
+            if (Application.platform != RuntimePlatform.PSP2) return;
+            int retries = IntArg(args, "-crow-gc-retries", VitaRetries), divisor = IntArg(args, "-crow-gc-divisor", VitaDivisor);
+            string pool = PhyContPool(args);
+            try
+            {
+                if (retries > 0) GC_set_max_retries((UIntPtr)(uint)retries);
+                if (divisor > 0) GC_set_free_space_divisor((UIntPtr)(uint)divisor);
+                int reserve = IntArg(args, "-crow-gc-reserve", VitaReserveMB);
+                Debug.Log("CROW_GC max_retries=" + (ulong)GC_get_max_retries() + " free_space_divisor=" + (ulong)GC_get_free_space_divisor() +
+                          " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve);
+                if (reserve > 0) Governor(reserve);
+            }
+            catch (Exception e)
+            {
+                Debug.Log("CROW_GC settings failed: " + e.GetType().Name + " " + e.Message);
+            }
+        }
+
+        // Every 100 ms on a thread of its own (scene loads allocate on the loading thread while the main
+        // thread waits): the heap's cap from the free main memory. Logs when the cap starts and stops
+        // holding the heap at its size.
+        static void Governor(int reserveMB)
+        {
+            Type diagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
+            MethodInfo freeMain = diagnostics == null ? null : diagnostics.GetMethod("GetFreeMemoryLPDDR");
+            if (freeMain == null)
+            {
+                Debug.Log("CROW_GC no governor: UnityEngine.PSVita.Diagnostics.GetFreeMemoryLPDDR missing");
+                return;
+            }
+            long reserve = reserveMB * 1048576L;
+            var thread = new System.Threading.Thread(() =>
+            {
+                bool held = false;
+                while (true)
+                {
+                    try
+                    {
+                        long heap = (long)(ulong)GC_get_heap_size();
+                        long room = Math.Max(0L, (int)freeMain.Invoke(null, null) - reserve);
+                        // Not by slivers: each section is a memory block of its own, and Boehm has a
+                        // fixed number of section slots.
+                        if (room < 4 * 1048576L) room = 0;
+                        GC_set_max_heap_size((UIntPtr)(ulong)(heap + room));
+                        bool holds = room == 0;
+                        if (holds != held)
+                        {
+                            held = holds;
+                            Debug.Log("CROW_GC " + (held ? "heap held at " : "heap free to grow from ") + F(heap / MB) + " MB, " +
+                                      F((room + reserve) / MB) + " MB of main memory free");
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.Log("CROW_GC governor stopped: " + e.GetType().Name + " " + e.Message);
+                        GC_set_max_heap_size(UIntPtr.Zero);
+                        return;
+                    }
+                    System.Threading.Thread.Sleep(100);
+                }
+            });
+            thread.IsBackground = true;
+            thread.Name = "CrowGcGovernor";
+            thread.Start();
+        }
+
+        // The PS Vita's 26 MB of physically contiguous memory, which the game leaves unused (Unity's
+        // PSVitaVideoPlayer, which needs it for its decoder, is never used: CrowCompat plays the game's
+        // videos). PSVitaVideoPlayer.TransferMemToMonoHeap makes all of it a pool of Unity's
+        // BigAlignmentKernelAllocator, which serves memalign calls with a large alignment, the GC
+        // heap's sections among them, and which takes main memory blocks ("heapbb") only for a
+        // request the pool can't fit. So up to 26 MB of the GC heap comes from there instead of main
+        // memory. Before the heap grows past its first sections; off with -crow-no-phycont-heap.
+        static string PhyContPool(string[] args)
+        {
+            if (args.Contains("-crow-no-phycont-heap")) return " phycontPool=off";
+            try
+            {
+                return " phycontPool=" + (UnityEngine.PSVita.PSVitaVideoPlayer.TransferMemToMonoHeap() ? "on" : "failed");
+            }
+            catch (Exception e)
+            {
+                return " phycontPool=error:" + e.GetType().Name;
+            }
+        }
+
+        // -crow-memory-watch: memory sampled on a thread of its own (the main thread logs nothing during
+        // a scene load's long frames). Each sample: GC heap, GC free, free LPDDR, CDRAM, PHYSCONT (MB).
+        static void Watch(int ms)
+        {
+            MethodInfo[] free = new MethodInfo[3];
+            Type diagnostics = Application.platform == RuntimePlatform.PSP2
+                ? Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule") : null;
+            if (diagnostics != null)
+            {
+                free[0] = diagnostics.GetMethod("GetFreeMemoryLPDDR");
+                free[1] = diagnostics.GetMethod("GetFreeMemoryCDRAM");
+                free[2] = diagnostics.GetMethod("GetFreeMemoryPHYSCONT");
+            }
+            bool gc = Application.platform == RuntimePlatform.PSP2;
+            var thread = new System.Threading.Thread(() =>
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                float[] last = null;
+                long lastAt = -100000, lastTotal = 0;
+                float lowest = float.MaxValue;
+                string[] names = { "gcHeap", "gcFree", "freeLPDDR", "freeCDRAM", "freePHYSCONT" };
+                while (true)
+                {
+                    var now = new float[5];
+                    long total = 0;
+                    try
+                    {
+                        if (gc)
+                        {
+                            now[0] = (ulong)GC_get_heap_size() / MB;
+                            now[1] = (ulong)GC_get_free_bytes() / MB;
+                            total = (long)(ulong)GC_get_total_bytes();
+                        }
+                        else
+                        {
+                            now[0] = GC.GetTotalMemory(false) / MB;
+                        }
+                        for (int i = 0; i < 3; i++)
+                            if (free[i] != null) now[2 + i] = (int)free[i].Invoke(null, null) / MB;
+                    }
+                    catch (Exception e)
+                    {
+                        Debug.Log("MEMWATCH failed: " + e.GetType().Name + " " + e.Message);
+                        return;
+                    }
+                    if (free[0] != null && now[2] < lowest) lowest = now[2];
+                    bool moved = last == null;
+                    for (int i = 0; !moved && i < now.Length; i++) moved = Math.Abs(now[i] - last[i]) >= 1f;
+                    long at = clock.ElapsedMilliseconds;
+                    if (moved || at - lastAt >= 10000)
+                    {
+                        var line = new StringBuilder("MEMWATCH t=").Append((at / 1000.0).ToString("F2", Inv));
+                        for (int i = 0; i < now.Length; i++)
+                            if (i < 2 ? gc || i == 0 : free[i - 2] != null)
+                                line.Append(' ').Append(names[i]).Append('=').Append(F(now[i]));
+                        if (gc) line.Append(" allocdMB=").Append(F((total - lastTotal) / MB));
+                        if (free[0] != null) line.Append(" lowestLPDDR=").Append(F(lowest));
+                        Debug.Log(line.ToString());
+                        last = now;
+                        lastAt = at;
+                        lastTotal = total;
+                    }
+                    System.Threading.Thread.Sleep(ms);
+                }
+            });
+            thread.IsBackground = true;
+            thread.Name = "CrowMemWatch";
+            thread.Start();
+            Debug.Log("MEMWATCH every " + ms + " ms");
         }
 
         // Bits per texel of the TextureFormats the game's textures use on the PS Vita and Windows.
@@ -445,6 +655,7 @@ namespace CrowCompat
     // several, switched on later (Station Square 14, Gift Shop 7), and a combiner that meets a source
     // mesh made unreadable skips it with an error and leaves its renderer as it was, a draw call of
     // its own (Gift Shop's "Cube" and "gums"). Those are released at the check after they combine.
+    // It also drops MeshCombineStudio's pooled work buffers (about 7 MB, ReleaseBuffers).
     // Off with -crow-keep-mesh-caches; on other players with -crow-release-meshes.
     // -crow-no-mesh-combine disables every MeshCombiner when its scene has loaded (before its Start),
     // to measure what combining costs.
@@ -453,6 +664,11 @@ namespace CrowCompat
         static Type combinerType, managerType;
         static FieldInfo instancesField, inRuntimeField, combinedField, combinerJobsField, managerField, cacheField, managerJobsField;
         static FieldInfo searchOptionsField, parentField, parentsField;
+        static FieldInfo poolField, tempCacheField, weldField;
+        // Unity's built-in primitive meshes, which every scene shares and no scene unload frees: made
+        // unreadable in one area, they stayed so in the next (Roadside then Station Square: a
+        // MeshCollider on a scaled Quad stopped working, and MeshCombineStudio skipped a Plane).
+        static readonly HashSet<string> Builtin = new HashSet<string> { "Cube", "Sphere", "Capsule", "Cylinder", "Plane", "Quad" };
         static int released;
         static long releasedBytes;
         float nextCheck;
@@ -471,6 +687,10 @@ namespace CrowCompat
             managerField = managerType.GetField("instance", any | BindingFlags.Static);
             cacheField = managerType.GetField("meshCacheDictionary", any | BindingFlags.Instance);
             managerJobsField = managerType.GetField("meshCombineJobs", any | BindingFlags.Instance);
+            poolField = managerType.GetField("newMeshObjectsPool", any | BindingFlags.Instance);
+            tempCacheField = managerType.GetField("tempMeshCache", any | BindingFlags.Instance);
+            Type newMeshObject = managerType.GetNestedType("NewMeshObject", any);
+            weldField = newMeshObject == null ? null : newMeshObject.GetField("weldVertices", any | BindingFlags.Static);
             searchOptionsField = combinerType.GetField("searchOptions", any | BindingFlags.Instance);
             if (searchOptionsField != null)
             {
@@ -572,7 +792,7 @@ namespace CrowCompat
             foreach (object key in cache.Keys)
             {
                 var mesh = key as Mesh;
-                if (mesh == null || !mesh.isReadable || keep.Contains(mesh)) continue;
+                if (mesh == null || !mesh.isReadable || keep.Contains(mesh) || Builtin.Contains(mesh.name)) continue;
                 long indices = 0;
                 for (int sub = 0; sub < mesh.subMeshCount; sub++) indices += mesh.GetIndexCount(sub);
                 bytes += mesh.vertexCount * 32L + indices * 2L;
@@ -583,10 +803,55 @@ namespace CrowCompat
             cache.Clear();
             released += now;
             releasedBytes += bytes;
+            int buffers = ReleaseBuffers();
             Debug.Log("MeshRelease: " + combined + " of " + combiners + " MeshCombiners done; cleared " + entries +
                       " mesh caches, made " + now + " source meshes unreadable (about " +
-                      (bytes / 1048576f).ToString("0.0", CultureInfo.InvariantCulture) + " MB); " + pending +
-                      " MeshCombiners still to combine keep theirs");
+                      (bytes / 1048576f).ToString("0.0", CultureInfo.InvariantCulture) + " MB), dropped " + buffers +
+                      " combine buffers; " + pending + " MeshCombiners still to combine keep theirs");
+        }
+
+        // MeshCombineStudio's work buffers, which it keeps for its next combine: each pooled NewMeshObject
+        // has arrays for a whole 65,534-vertex mesh (vertices, 786,408 triangle indices, normals, tangents,
+        // uvs, colours: about 7 MB of managed heap), and the job manager a vertex copy and the welder a
+        // vertex list. Dropped while no job runs; MeshCombineStudio makes new ones when a combiner that
+        // switches on later combines. Returns how many pooled objects went.
+        static int ReleaseBuffers()
+        {
+            object manager = managerField.GetValue(null);
+            if (manager == null) return 0;
+            int dropped = 0;
+            object pool = poolField == null ? null : poolField.GetValue(manager);
+            if (pool != null)
+            {
+                lock (pool)
+                {
+                    Type list = pool.GetType();
+                    FieldInfo items = FieldOf(list, "items"), count = FieldOf(list, "Count"), innerCount = FieldOf(list, "_count");
+                    var array = items == null ? null : items.GetValue(pool) as Array;
+                    if (array != null && count != null && innerCount != null)
+                    {
+                        dropped = (int)count.GetValue(pool);
+                        Array.Clear(array, 0, array.Length);
+                        count.SetValue(pool, 0);
+                        innerCount.SetValue(pool, 0);
+                    }
+                }
+            }
+            if (tempCacheField != null) tempCacheField.SetValue(manager, null);
+            if (weldField != null) weldField.SetValue(null, null);
+            return dropped;
+        }
+
+        // An instance field declared by the type or a base type (FastList's are in two generations of bases).
+        static FieldInfo FieldOf(Type type, string name)
+        {
+            const BindingFlags declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
+            for (Type t = type; t != null; t = t.BaseType)
+            {
+                FieldInfo found = t.GetField(name, declared);
+                if (found != null) return found;
+            }
+            return null;
         }
 
         // Adds the meshes under the search parents of every run-time MeshCombiner in a loaded scene that
@@ -619,5 +884,19 @@ namespace CrowCompat
             }
             return pending;
         }
+    }
+}
+
+// The engine's internal call behind UnityEngine.PSVitaModule's PSVitaVideoPlayer.TransferMemToMonoHeap
+// (Memory.PhyContPool). The linker strips that module's class from the build, and quickcode can't
+// change what it keeps, so CrowCompat declares the call under the name the PS Vita player registers
+// it by ("UnityEngine.PSVita.PSVitaVideoPlayer::TransferMemToMonoHeap()"). PS Vita only: other
+// players have no such call.
+namespace UnityEngine.PSVita
+{
+    public static class PSVitaVideoPlayer
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.InternalCall)]
+        public static extern bool TransferMemToMonoHeap();
     }
 }
