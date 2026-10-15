@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -403,6 +404,15 @@ namespace CrowCompat
         [DllImport("CrowClock")] static extern int CrowThreadsRunning(int[] uids);
         [DllImport("CrowClock")] static extern int CrowCpuIdle(int[] idle);
 
+        // The plugin exists on the PS Vita only. Mono looks a P/Invoke up when it compiles the method that
+        // calls it, whichever branch then runs, and logs the failed library load ("Fallback handler could
+        // not load library ...CrowClock"): methods that other players run call it through this.
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int SelfNative()
+        {
+            return CrowThreadSelf();
+        }
+
         class Known
         {
             public string Name, Tag;
@@ -433,7 +443,7 @@ namespace CrowCompat
             if (Application.platform != RuntimePlatform.PSP2) return;
             try
             {
-                Name(CrowThreadSelf(), null);
+                Name(SelfNative(), null);
                 available = true;
             }
             catch (Exception e)
@@ -466,7 +476,7 @@ namespace CrowCompat
             if (mask == 0) return;
             try
             {
-                CrowThreadSelf();
+                SelfNative();
             }
             catch (Exception e)
             {
@@ -504,7 +514,7 @@ namespace CrowCompat
 
         internal static int Self()
         {
-            try { return available ? CrowThreadSelf() : 0; }
+            try { return available ? SelfNative() : 0; }
             catch (Exception) { return 0; }
         }
 
@@ -513,7 +523,7 @@ namespace CrowCompat
         internal static int SelfAnyway()
         {
             if (Application.platform != RuntimePlatform.PSP2) return 0;
-            try { return CrowThreadSelf(); }
+            try { return SelfNative(); }
             catch (Exception) { return 0; }
         }
 

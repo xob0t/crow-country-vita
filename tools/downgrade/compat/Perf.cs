@@ -29,7 +29,10 @@ using UnityEngine.SceneManagement;
 //                               every s seconds apply the next change set of <sets> (sets separated by
 //                               '/', changes in a set by ','; Quality.Change's keys and these: particles=,
 //                               fixed=, maxdt=, iter=, sync=, gpu=<MHz>, vsync=<n>, camera=624|550|416,
-//                               batch=all (Draws.cs's static batching, now), sort=default|nodistance|
+//                               batch=all (Draws.cs's static batching, now), hide=static|safe|none
+//                               (StaticBatch.Hide: its candidates' renderers off, a cost test),
+//                               merge=on|off|merged|report (Merge.cs, in the loaded scenes),
+//                               sort=default|nodistance|
 //                               fronttoback (the cameras' opaque sort), probes=off and reflections=off
 //                               (every renderer's light and reflection probe use; the scene's light
 //                               probe count is logged), rewired=pad|game (RewiredPad), split=ui
@@ -91,6 +94,12 @@ namespace CrowCompat
                     return true;
                 case "batch":
                     StaticBatch.Set(value, true);
+                    return true;
+                case "hide":
+                    StaticBatch.Hide(value);
+                    return true;
+                case "merge":
+                    Merge.Set(value);
                     return true;
                 case "fixed":
                     if (numeric && number > 0f) Time.fixedDeltaTime = number;

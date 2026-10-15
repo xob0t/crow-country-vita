@@ -61,10 +61,12 @@ from asset_rules import (
     scene_dedup_overlay,
     scene_reference_overlay,
     settings_overlay,
+    streamed_mesh_overlay,
     stripped_component_overlay,
     texture_cap_overlay,
     texture_dedup_overlay,
     texture_overlay,
+    vita_lit_overlay,
 )
 from code_trim import TRIMMED_ON, trim_assemblies
 from common import (
@@ -267,9 +269,13 @@ COMPAT_SOURCES = [
             'Loading',
             'ScriptCost',
             'Draws',
+            'Merge',
             'Perf',
             'Clock',
             'Audio',
+            'Alloc',
+            'IdleAudio',
+            'VitaLit',
         )
     ),
 ]
@@ -285,7 +291,10 @@ COMPAT_MODULES = [
 ]
 REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',
-    *(HERE / 'rewriter' / f'{name}.cs' for name in ('Redirect', 'Runtime', 'Patches', 'ScriptCost')),
+    *(
+        HERE / 'rewriter' / f'{name}.cs'
+        for name in ('Redirect', 'Runtime', 'Patches', 'ScriptCost', 'IdleAudio', 'Alloc')
+    ),
 ]
 # Every .cs file in these folders belongs to one of the lists.
 PART_FOLDERS = {HERE / 'compat': COMPAT_SOURCES, HERE / 'rewriter': REWRITER_SOURCES}
@@ -677,12 +686,14 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(canvas_channel_overlay(exported, overlay))
         overlay.update(rewired_vita_overlay(exported, overlay, platform))
         overlay.update(material_keyword_overlay(exported, game, overlay))
+        overlay.update(vita_lit_overlay(overlay))
         overlay[Path('Assets') / 'link.xml'] = link_xml(assemblies, platform).encode()
         overlay[Path('Assets') / 'link.xml.meta'] = stable_meta('asset', 'link.xml', 'TextScriptImporter').encode()
         overlay.update(texture_overlay(exported, game, platform))
         overlay.update(npot_texture_overlay(exported, overlay, platform))
         overlay.update(texture_cap_overlay(exported, overlay, platform))
-        duplicates = mesh_duplicates(exported, platform)
+        overlay.update(streamed_mesh_overlay(exported, game))
+        duplicates = mesh_duplicates(exported, platform, overlay)
         overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
         texture_copies, renamed_references = texture_dedup_overlay(exported, overlay, platform)
         overlay.update(renamed_references)

@@ -229,6 +229,17 @@ public static class DowngradeBuild
         Debug.Log("DOWNGRADE_CODE_STAGE saved " + count + " files and " + assemblies + " staged assemblies to " + stage);
     }
 
+    // The PS Vita build's static merge (CrowCompat's compat/Merge.cs, CrowMergeScenes below), from the
+    // CROW_MERGE environment variable: on (merge, and drop the parts' meshes nothing else in the scene
+    // uses; the default), ab (merge and keep the parts' meshes, so -crow-merge off can switch back for
+    // comparisons), off. Other platforms don't merge.
+    internal static string MergeMode()
+    {
+        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.PSP2) return "off";
+        string mode = Environment.GetEnvironmentVariable("CROW_MERGE");
+        return string.IsNullOrEmpty(mode) ? "on" : mode;
+    }
+
     // Whether a scene path is the scene named (its file name, or its path), in any case.
     static bool IsScene(string path, string name)
     {
@@ -240,5 +251,88 @@ public static class DowngradeBuild
     {
         int index = Array.IndexOf(args, name);
         return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+    }
+}
+
+// Static renderers merged per material and place as the PS Vita build writes each scene (compat/
+// Merge.cs: what may merge is read from the scene's FSMs and scripts). The scene the build writes
+// changes; the project's scene files don't.
+class CrowMergeScenes : UnityEditor.Build.IProcessSceneWithReport
+{
+    static readonly string[] Skipped = { "Logos", "Title", "CrowMara" };
+    static System.Reflection.MethodInfo process;
+    static Type merge;
+
+    public int callbackOrder
+    {
+        get { return 0; }
+    }
+
+    public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
+    {
+        if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
+        string mode = DowngradeBuild.MergeMode();
+        if (mode == "off" || Skipped.Contains(scene.name)) return;
+        if (process == null)
+        {
+            merge = Type.GetType("CrowCompat.Merge, CrowCompat");
+            process = merge == null ? null : merge.GetMethod("Process");
+            if (process == null) throw new InvalidOperationException("No CrowCompat.Merge.Process in the project's CrowCompat.dll");
+            merge.GetField("Drop").SetValue(null, mode == "on");
+            string limit = Environment.GetEnvironmentVariable("CROW_MERGE_MAX_VERTICES");
+            if (!string.IsNullOrEmpty(limit)) merge.GetField("MaxPartVertices").SetValue(null, int.Parse(limit));
+            string budget = Environment.GetEnvironmentVariable("CROW_MERGE_MAX_KB");
+            if (!string.IsNullOrEmpty(budget)) merge.GetField("MaxBytes").SetValue(null, long.Parse(budget) * 1024L);
+        }
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        string lines;
+        try
+        {
+            Func<Mesh, bool> canRead = Readable;
+            lines = (string)process.Invoke(null, new object[] { scene, true, canRead, true });
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError("DOWNGRADE_MERGE " + scene.name + " failed: " + exception);
+            return;
+        }
+        // The merged meshes go to the GPU only, as the parts' unreadable meshes do.
+        int meshes = 0;
+        Type part = Type.GetType("CrowCompat.MergedRenderer, CrowCompat");
+        foreach (GameObject root in scene.GetRootGameObjects())
+            foreach (Component merged in root.GetComponentsInChildren(part, true))
+            {
+                var filter = merged.GetComponent<MeshFilter>();
+                if (filter == null || filter.sharedMesh == null) continue;
+                var serialized = new SerializedObject(filter.sharedMesh);
+                SerializedProperty readable = serialized.FindProperty("m_IsReadable");
+                if (readable == null) continue;
+                readable.boolValue = false;
+                serialized.ApplyModifiedPropertiesWithoutUndo();
+                meshes++;
+            }
+        foreach (string line in lines.Split('\n'))
+            if (line.Length > 0) Debug.Log("DOWNGRADE_" + line);
+        Debug.Log("DOWNGRADE_MERGE " + scene.name + " mode=" + mode + " unreadable=" + meshes + " ms=" + clock.ElapsedMilliseconds);
+    }
+
+    // The editor reads every mesh's data, readable or not; one it can't read stays out.
+    static readonly System.Collections.Generic.Dictionary<Mesh, bool> readable = new System.Collections.Generic.Dictionary<Mesh, bool>();
+
+    static bool Readable(Mesh mesh)
+    {
+        bool known;
+        if (readable.TryGetValue(mesh, out known)) return known;
+        bool can;
+        try
+        {
+            can = mesh.vertices.Length == mesh.vertexCount;
+        }
+        catch (Exception)
+        {
+            can = false;
+        }
+        readable[mesh] = can;
+        return can;
     }
 }

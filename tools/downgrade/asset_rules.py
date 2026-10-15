@@ -286,10 +286,13 @@ def rewired_vita_overlay(exported: Path, overlay: dict, platform: str):
 # IL2CPP strips the class libraries down to what code references. PlayMaker finds its actions
 # and the game's scripts by name, so the game's assemblies and plugins are kept whole. Engine types
 # whose members only PlayMaker's Set/Get Property actions reach (by name, through reflection), which
-# the linker would strip: ParticleSystem's emissionRate, startLifetime and loop (47 actions). And
-# MeshCollider, whose sharedMesh getter only CrowCompat's MeshRelease reads (by reflection; the
-# game only sets it), on by default on the PS Vita.
+# the linker would strip: ParticleSystem's emissionRate, startLifetime and loop (47 actions), and the
+# setters of Light's range and spotAngle (the save rooms' fire lights flicker that way: "Set Method not
+# found for 'range'", an exception several times a frame, once code_trim had removed the unused
+# PlayMaker light actions that kept them). And MeshCollider, whose sharedMesh getter only CrowCompat's
+# MeshRelease reads (by reflection; the game only sets it), on by default on the PS Vita.
 LINK_PRESERVE = {
+    'UnityEngine.CoreModule': ['UnityEngine.Light'],
     'UnityEngine.ParticleSystemModule': ['UnityEngine.ParticleSystem'],
     'UnityEngine.PhysicsModule': ['UnityEngine.MeshCollider'],
 }
@@ -796,6 +799,116 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
     return result
 
 
+# Meshes whose vertex data the game streams from a .resS file (m_StreamData): the 1,460 meshes that
+# MeshCombineStudio combined in the editor and SFB saved into the scenes (walls, fences, pipes, cars, a
+# level's vertex-coloured parts in one mesh: Roadside's Ford Fiesta, the red car's body, the fence rails
+# and pipes), 103 MB in all, 0.3-6.6 MB an area. AssetRipper 2.0.0 exports their index buffers but
+# not their vertex data (m_DataSize 0, _typelessdata empty), so the port built them with every vertex at
+# the origin: drawn, culled as visible, and invisible on every platform. Each such exported mesh gets the
+# vertex data of the game's mesh with its name, vertex count and index buffer, read from the .resS file;
+# the vertex layout (m_Channels) is the export's, which it copied from the game.
+STREAMED_MESHES = WORK / 'streamed-meshes.json'
+STREAMED_MESH_CACHE = WORK / 'streamed-meshes'
+NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.M)
+
+
+def mesh_key(name: str, vertex_count: int, index_buffer: bytes):
+    return f'{name}|{vertex_count}|{hashlib.sha1(index_buffer).hexdigest()}'
+
+
+def original_streamed_meshes(game: Path):
+    """{mesh_key: [.resS file name, offset, size]} for the game's meshes with streamed vertex data. Reading
+    the data files takes UnityPy minutes, so the result is kept in work/, keyed by their sizes and times."""
+    import json
+
+    data = game_data(game)
+    files = sorted(p for p in data.iterdir() if re.fullmatch(r'level\d+|.*\.assets', p.name))
+    key = hashlib.sha256(
+        json.dumps([[p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files]).encode()
+    ).hexdigest()
+    try:
+        cached = json.loads(STREAMED_MESHES.read_text(encoding='utf-8'))
+        if cached.get('key') == key:
+            return cached['meshes']
+    except (OSError, ValueError):
+        pass
+    import UnityPy
+
+    meshes = {}
+    for path in files:
+        for obj in UnityPy.load(str(path)).objects:
+            if obj.type.name != 'Mesh':
+                continue
+            tree = obj.read_typetree()
+            stream = tree.get('m_StreamData') or {}
+            if not stream.get('size'):
+                continue
+            found = mesh_key(tree['m_Name'], tree['m_VertexData']['m_VertexCount'], bytes(tree['m_IndexBuffer']))
+            meshes[found] = [Path(stream['path']).name, stream['offset'], stream['size']]
+    STREAMED_MESHES.write_text(json.dumps({'key': key, 'meshes': meshes}), encoding='utf-8')
+    return meshes
+
+
+def exported_mesh_key(path: Path):
+    """mesh_key of an exported mesh without vertex data, else None."""
+    data = path.read_bytes()
+    if not NO_VERTEX_DATA.search(data):
+        return None
+    name = re.search(rb'^  m_Name: (.*)\n', data, re.M)
+    count = re.search(rb'^    m_VertexCount: (\d+)\n', data, re.M)
+    indices = re.search(rb'^  m_IndexBuffer: ([0-9a-f]*)\n', data, re.M)
+    if not (name and count and indices) or count[1] == b'0':
+        return None
+    return mesh_key(name[1].decode('utf-8'), int(count[1]), bytes.fromhex(indices[1].decode()))
+
+
+def streamed_mesh_overlay(exported: Path, game: Path):
+    """The exported meshes without vertex data, with the game's (files in STREAMED_MESH_CACHE)."""
+    assets = exported / 'Assets'
+    empty = {
+        relative: found
+        for relative, found in scan(
+            'mesh-without-vertices',
+            assets,
+            lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset',
+            exported_mesh_key,
+            version=NO_VERTEX_DATA.pattern.decode(),
+        ).items()
+        if found
+    }
+    if not empty:
+        return {}
+    originals = original_streamed_meshes(game)
+    data = game_data(game)
+    files = listing(assets)
+    result, missing = {}, []
+    for relative, found in sorted(empty.items()):
+        source = originals.get(found)
+        if source is None:
+            missing.append(relative.as_posix())
+            continue
+        cached = STREAMED_MESH_CACHE / relative
+        size, modified = files[relative]
+        stamp = cached.with_name(cached.name + '.source')
+        if not (cached.exists() and stamp.exists() and stamp.read_text() == f'{size} {modified} {source}'):
+            name, offset, length = source
+            with (data / name).open('rb') as handle:
+                handle.seek(offset)
+                vertices = handle.read(length)
+            text = (exported / 'Assets' / relative).read_bytes()
+            lines = f'    m_DataSize: {len(vertices)}\n    _typelessdata: {vertices.hex()}\n'.encode()
+            text = NO_VERTEX_DATA.sub(lambda _, lines=lines: lines, text, count=1)
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(text)
+            stamp.write_text(f'{size} {modified} {source}')
+        result[Path('Assets') / relative] = cached
+    log(
+        f'Meshes: vertex data from the game for {len(result)} meshes the export left without'
+        + (f'; none found for {len(missing)} ({", ".join(missing[:5])})' if missing else '')
+    )
+    return result
+
+
 # Meshes with the same geometry. ProBuilder gives every object a mesh of its own, so the game has many
 # copies of each shape (a step, a tile, a pillar): Pool's 4,517 meshes are 617 shapes, and the copies
 # were 30 of its 40 MB of mesh memory on the PS Vita (readable ones counted twice; Ocean Kingdom 32 of
@@ -819,8 +932,9 @@ def mesh_geometry(path: Path):
     return hashlib.sha1(READABLE_LINES.sub(b'', data[name.end() :] if name else data)).hexdigest()
 
 
-def mesh_duplicates(exported: Path, platform: str):
-    """{a copy's GUID: the GUID of its group's mesh}, for meshes only scenes name."""
+def mesh_duplicates(exported: Path, platform: str, overlay: dict):
+    """{a copy's GUID: the GUID of its group's mesh}, for meshes only scenes name. overlay: the meshes
+    streamed_mesh_overlay gave vertex data (their files)."""
     if platform not in MESH_DEDUP_PLATFORMS:
         return {}
     assets = exported / 'Assets'
@@ -831,6 +945,10 @@ def mesh_duplicates(exported: Path, platform: str):
         mesh_geometry,
         version=READABLE_LINES.pattern.decode() + MESH_NAME_LINE.pattern.decode(),
     )
+    for relative in geometry:
+        restored = overlay.get(Path('Assets') / relative)
+        if isinstance(restored, Path):
+            geometry[relative] = mesh_geometry(restored)
     named_elsewhere = {guid for guids in mesh_references_elsewhere(assets).values() for guid in guids}
     groups = {}
     for meta, guid in mesh_guids(assets).items():
@@ -1328,3 +1446,77 @@ def native_plugin_overlay(game: Path):
         overlay[meta_of(folder / dll.name)] = NATIVE_PLUGIN_META.format(guid=guid_for('native', dll.name)).encode()
     log('Native plugins: ' + ', '.join(p.name for p in overlay if p.suffix == '.dll'))
     return overlay
+
+
+# CrowVita/Lit (vita_shaders/CrowLit.shader, compat/VitaLit.cs): Standard with every light in its
+# base pass, which CrowCompat swaps in at run time. It goes in Resources (Shader.Find finds it), with
+# a material for each set of its keywords the game's Standard materials use, so that the build keeps
+# those variants (it drops the shader_feature variants no material uses).
+VITA_SHADERS = Path(__file__).resolve().parent / 'vita_shaders'
+VITA_LIT_FOLDER = Path('Assets') / 'Resources' / 'CrowVita'
+VITA_LIT_KEYWORDS = {
+    '_ALPHATEST_ON',
+    '_ALPHABLEND_ON',
+    '_ALPHAPREMULTIPLY_ON',
+    '_EMISSION',
+    '_METALLICGLOSSMAP',
+    '_DETAIL_MULX2',
+    '_SPECULARHIGHLIGHTS_OFF',
+    '_GLOSSYREFLECTIONS_OFF',
+}
+VITA_LIT_MATERIAL = """%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!21 &2100000
+Material:
+  serializedVersion: 6
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {{fileID: 0}}
+  m_PrefabInternal: {{fileID: 0}}
+  m_Name: {name}
+  m_Shader: {{fileID: 4800000, guid: {guid}, type: 3}}
+  m_ShaderKeywords: {keywords}
+  m_LightmapFlags: 4
+  m_EnableInstancingVariants: 0
+  m_DoubleSidedGI: 0
+  m_CustomRenderQueue: -1
+  stringTagMap: {{}}
+  disabledShaderPasses: []
+  m_SavedProperties:
+    serializedVersion: 3
+    m_TexEnvs: []
+    m_Floats: []
+    m_Colors: []
+"""
+
+
+def vita_lit_overlay(overlay: dict):
+    from common import stable_meta
+
+    standard = re.compile(r'^  m_Shader: \{fileID: 46, guid: 0000000000000000f000000000000000, type: 0\}$', re.M)
+    sets = set()
+    for relative, data in overlay.items():
+        if relative.suffix != '.mat':
+            continue
+        text = data.decode('utf-8')
+        if not standard.search(text):
+            continue
+        found = re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M)
+        sets.add(' '.join(sorted(k for k in (found.group(1).split() if found else []) if k in VITA_LIT_KEYWORDS)))
+    shader = VITA_SHADERS / 'CrowLit.shader'
+    # Assets/Resources is the export's (Addressables' assets move there).
+    result = folder_meta(VITA_LIT_FOLDER)
+    result[VITA_LIT_FOLDER / shader.name] = shader.read_bytes()
+    name = 'CrowVita/CrowLit.shader'
+    result[meta_of(VITA_LIT_FOLDER / shader.name)] = stable_meta('asset', name, 'ShaderImporter').encode()
+    guid = guid_for('asset', name)
+    for index, keywords in enumerate(sorted(sets)):
+        name = f'CrowLitVariant{index}'
+        relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'
+        result[relative] = VITA_LIT_MATERIAL.format(name=name, guid=guid, keywords=keywords).encode()
+        result[meta_of(relative)] = (
+            f'fileFormatVersion: 2\nguid: {guid_for("asset", f"CrowVita/{name}.mat")}\n'
+            'NativeFormatImporter:\n  externalObjects: {}\n  mainObjectFileID: 2100000\n  userData:\n'
+        ).encode()
+    result.update(folder_meta(VITA_LIT_FOLDER / 'Variants'))
+    log(f'CrowVita/Lit: {len(sets)} keyword sets of the Standard materials')
+    return result

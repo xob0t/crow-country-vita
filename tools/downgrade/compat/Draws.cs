@@ -18,9 +18,11 @@ using UnityEngine.SceneManagement;
 //                             casters, small meshes, static batches; after a scene load also the
 //                             materials used most and the duplicate groups (CROW_DRAWMAT)
 //   -crow-casters <rule>      turn shadow casting off where the rule says, at every scene load and
-//                             every 2 s (renderers come and go): off (all), flat (flat horizontal
+//                             every 10 s (renderers come and go): off (all), flat (flat horizontal
 //                             renderers: floors, ceilings, roads), small:<m> (bounds diagonal under m
-//                             metres). -crow-ab takes casters=<rule> too.
+//                             metres), player (all but the player's own: Mara keeps her shadow; the
+//                             PS Vita's default, see Quality.cs), game (none).
+//                             -crow-ab takes casters=<rule> too.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -36,7 +38,9 @@ namespace CrowCompat
             every = Quality.Number(args, "-crow-draw-report", -1f);
             int index = Array.IndexOf(args, "-crow-casters");
             if (index >= 0 && index + 1 < args.Length) Casters(args[index + 1]);
+            else if (Application.platform == RuntimePlatform.PSP2) Casters("player");
             StaticBatch.Install(args);
+            Merge.Install(args);
             if (every <= 0f) return;
             SceneManager.sceneLoaded += (scene, mode) => detail = true;
             Application.onBeforeRender += Tick;
@@ -78,7 +82,8 @@ namespace CrowCompat
         static void CasterTick()
         {
             float now = Time.realtimeSinceStartup;
-            if (casterRule == null || now - lastCasters < 2f) return;
+            // Every 10 s (each pass allocates the renderer list: Station Square 12 KB) and after each load.
+            if (casterRule == null || now - lastCasters < 10f) return;
             lastCasters = now;
             int changed = 0, casters = 0;
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
@@ -94,9 +99,23 @@ namespace CrowCompat
             if (changed > 0) Debug.Log("CROW_DRAWS casters " + casterRule + ": " + changed + " of " + casters + " off");
         }
 
+        // Whether a hierarchy root is the player prefab, by its name, read once per root (a name read
+        // is a new string, and CasterTick asks for every caster every 2 s).
+        static readonly Dictionary<Transform, bool> playerRoots = new Dictionary<Transform, bool>();
+
+        static bool PlayerRoot(Transform root)
+        {
+            bool player;
+            if (playerRoots.TryGetValue(root, out player)) return player;
+            if (playerRoots.Count > 4096) playerRoots.Clear();  // roots of unloaded scenes
+            return playerRoots[root] = root.name.StartsWith("CharacterCameraPrefab");
+        }
+
         static bool CasterOff(Renderer renderer, string rule)
         {
             if (rule == "off") return true;
+            // player: only the player's own parts (Mara, under CharacterCameraPrefab) keep their shadows.
+            if (rule == "player") return !PlayerRoot(renderer.transform.root);
             Bounds bounds = renderer.bounds;
             Vector3 size = bounds.size;
             if (rule == "flat") return Flat(size);
@@ -504,6 +523,43 @@ namespace CrowCompat
             if (covered.Count > 0)
                 Debug.Log("CROW_BATCH left out below " + string.Join(" ", covered.OrderByDescending(p => p.Value).Take(40)
                     .Select(p => Perf.Path(p.Key, 4) + "=" + p.Value + "(" + (MoverWhy.ContainsKey(p.Key) ? MoverWhy[p.Key] : "?").Replace(' ', '_') + ")").ToArray()));
+        }
+
+        // -crow-cycle hide=static|safe|none: a test of what each renderer costs the main thread. static
+        // disables every renderer static batching would take (readable or not), safe only those
+        // static batching's safe rule takes, none enables them again. The picture loses them.
+        static readonly List<Renderer> hidden = new List<Renderer>();
+
+        internal static void Hide(string value)
+        {
+            foreach (Renderer renderer in hidden)
+                if (renderer != null) renderer.enabled = true;
+            hidden.Clear();
+            if (value == "none")
+            {
+                Debug.Log("CROW_BATCH hide none");
+                return;
+            }
+            string why = "";
+            MoverWhy.Clear();
+            covered.Clear();
+            HashSet<Transform> movers = value == "safe" ? Movers(out why) : null;
+            int seen = 0, vertices = 0;
+            foreach (MeshRenderer renderer in UnityEngine.Object.FindObjectsOfType<MeshRenderer>())
+            {
+                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy) continue;
+                seen++;
+                MeshFilter filter = renderer.GetComponent<MeshFilter>();
+                Mesh mesh = filter == null ? null : filter.sharedMesh;
+                if (mesh == null) continue;
+                Scene scene = renderer.gameObject.scene;
+                if (scene.name == "DontDestroyOnLoad" || scene.name == "CrowMara" || renderer.transform.root.name.StartsWith("CharacterCameraPrefab")) continue;
+                if (Moves(renderer.transform) || (movers != null && Below(renderer.transform, movers))) continue;
+                renderer.enabled = false;
+                hidden.Add(renderer);
+                vertices += mesh.vertexCount;
+            }
+            Debug.Log("CROW_BATCH hide " + value + ": " + hidden.Count + " of " + seen + " renderers off (" + vertices + " vertices)" + why);
         }
 
         static bool Below(Transform transform, HashSet<Transform> roots)

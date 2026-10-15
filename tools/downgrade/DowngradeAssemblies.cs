@@ -23,6 +23,8 @@ using Mono.Cecil.Cil;
 //   Runtime.cs              type layouts the target's Mono rejects (interfaces)
 //   Patches.cs              single game methods that call CrowCompat rules (the camera's post chain)
 //   ScriptCost.cs           per-frame PlayMaker and fade work skipped where it has no effect
+//   IdleAudio.cs            AudioSource play calls and Behaviour.enabled through CrowCompat IdleAudio
+//   Alloc.cs                allocation in play: PlayMaker's DOTween tweens recyclable
 partial class DowngradeAssemblies
 {
     // Types that exist in the target under another name.
@@ -118,6 +120,10 @@ partial class DowngradeAssemblies
         new Pass("scriptcost", Scope.All, PatchFsmLoopReset),
         new Pass("scriptcost", Scope.All, PatchFsmDelayedEvents),
         new Pass("scriptcost", Scope.Game, PatchFullScreenColour),
+        // IdleAudio.cs
+        new Pass("idleaudio", Scope.All, RouteAudioSourcePlays),
+        // Alloc.cs
+        new Pass("alloc", Scope.Game, RecyclePlayMakerTweens),
     };
 
     // Sites changed per rule (a pass, a row of a rule table, a game type a pass looks for),

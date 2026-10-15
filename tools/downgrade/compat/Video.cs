@@ -227,9 +227,9 @@ namespace CrowCompat
                 sound.loop = m_Looping;
                 sound.pitch = m_PlaybackSpeed;
                 sound.time = Mathf.Min((float)clock, clipSound.length - 0.001f);
-                sound.Play();
+                IdleAudio.Play(sound);  // enabled again first if IdleAudio turned it off
             }
-            else sound.UnPause();
+            else IdleAudio.UnPause(sound);
             lastSoundTime = sound.time;
         }
 

@@ -137,6 +137,10 @@ namespace CrowCompat
 
             Type Bind(string assemblyName, string typeName)
             {
+                // Saves the port wrote before BindToName left the formatter's own names alone (below)
+                // record a Type value as System.RuntimeType, with UnitySerializationHolder's members.
+                if (typeName == "System.RuntimeType" && assemblyName.StartsWith("mscorlib"))
+                    return Type.GetType("System.UnitySerializationHolder");
                 Type bound = inner == null ? null : inner.BindToType(assemblyName, typeName);
                 Type type = bound ?? Type.GetType(Rename(typeName) + ", " + RenameAssembly(assemblyName));
                 if (log) Debug.Log("BIND " + assemblyName + " | " + typeName + " -> " + (bound != null ? "game " : "alias ") +
@@ -144,13 +148,27 @@ namespace CrowCompat
                 return type;
             }
 
-            // Saves name the original assemblies, so they stay compatible with the source version.
+            // Saves name the original assemblies, so they stay compatible with the source version. Only
+            // names that change are given: a name the binder gives replaces the one an ISerializable
+            // object chose (SerializationInfo.SetType), so a Type value (FsmObject's, FsmArray's and
+            // FsmEnum's types, in every gameplay save's globals) was written as System.RuntimeType
+            // instead of UnitySerializationHolder, and no save with one loaded again ("The
+            // constructor to deserialize an object of type 'System.RuntimeType' was not found"): Load
+            // Game read an empty scene name, and the PS Vita player died on the black screen after.
             public override void BindToName(Type serializedType, out string assemblyName, out string typeName)
             {
                 assemblyName = typeName = null;
                 if (inner != null) inner.BindToName(serializedType, out assemblyName, out typeName);
-                if (assemblyName == null) assemblyName = Original(serializedType.Assembly.FullName);
-                if (typeName == null) typeName = Original(serializedType.FullName);
+                if (assemblyName != null || typeName != null)
+                {
+                    if (assemblyName == null) assemblyName = Original(serializedType.Assembly.FullName);
+                    if (typeName == null) typeName = Original(serializedType.FullName);
+                    return;
+                }
+                string assembly = serializedType.Assembly.FullName, full = serializedType.FullName;
+                if (Original(assembly) == assembly && Original(full) == full) return;
+                assemblyName = Original(assembly);
+                typeName = Original(full);
             }
         }
 

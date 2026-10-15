@@ -30,6 +30,11 @@ the VPK in VitaShell); after that:
                         newest and prints the crashed thread's symbolized call chain
                         (needs the SDK's psp2bin and the build's SymbolFiles)
 
+The commands that change the console's state (sync, install, launch, quit, run, do,
+reboot, args) refuse while someone else holds the vita-device lock (lock.py): they run inside
+`lock.py run vita-device ...` (CROW_LOCK) or with CROW_HOLDER=<the lock's holder name> after
+`lock.py take`. A free lock lets them run as before.
+
 The log and the flags are CrowCompat Diag's: on the PS Vita it reads its flags from
 ux0:data/crow/args.txt and writes the player's log to ux0:data/crow/log.txt.
 vitacompanion 1.20 or later (install, press/release, screenshot) is needed for
@@ -42,11 +47,13 @@ import ftplib
 import hashlib
 import io
 import json
+import os
 import socket
 import sys
 import time
 from pathlib import Path
 
+import lock
 import pipeline
 from common import EXTERNAL, VITA_HOST, setting, vita_host
 
@@ -55,6 +62,8 @@ SAVES = 'ux0:/data/CrowCountry'  # the game's saves and persistentDataPath on th
 APP = f'ux0:/app/{pipeline.VITA_TITLE_ID}'
 # What a dropped or stalled FTP session raises (TimeoutError is an OSError).
 FTP_ERRORS = (OSError, EOFError, ftplib.Error)
+# The commands that change what the console runs or reads; they respect the vita-device lock.
+CHANGING = ('sync', 'install', 'launch', 'quit', 'run', 'do', 'reboot', 'args')
 # The vitacompanion chain that keeps the console awake, and how often it is repeated (keep_awake).
 KEEP_AWAKE = 'nosleep on; screen on'
 KEEP_AWAKE_SECONDS = 10
@@ -420,6 +429,24 @@ def files(folder: str):
         walk(folder)
 
 
+def check_lock(name):
+    """Stop a changing command while the vita-device lock is someone else's: before, a job whose
+    lock take failed went on and quit another job's run, and overwrote its flags."""
+    if name not in CHANGING:
+        return
+    lock.clear_stale('vita-device')
+    text = lock.holder_of('vita-device')
+    if text is None or os.environ.get('CROW_LOCK') == 'vita-device':
+        return
+    mine = os.environ.get('CROW_HOLDER', '')
+    if mine and lock.owner(mine) == lock.owner(text):
+        return
+    sys.exit(
+        f'vita.py {name}: the console is held by "{text}" (vita-device lock). Run inside '
+        '`lock.py run vita-device ...`, or set CROW_HOLDER=<your holder name> after taking it.'
+    )
+
+
 def main():
     try:
         run_command()
@@ -455,6 +482,7 @@ def run_command():
     # The options may come anywhere; everything else after the command is its arguments, in order
     # (the probe flags of args, the chain of do, the file of shot and screenshot).
     args, args.rest = parser.parse_known_args()
+    check_lock(args.command)
     build = args.build or pipeline.ROOT / 'builds' / f'crow-{pipeline.TARGET}-vita'
 
     if args.command in ('quit', 'run'):

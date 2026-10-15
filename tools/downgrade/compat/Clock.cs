@@ -1,5 +1,6 @@
 using System;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Threading;
 using UnityEngine;
@@ -98,8 +99,15 @@ namespace CrowCompat
         internal static string Describe()
         {
             if (Application.platform != RuntimePlatform.PSP2) return null;
-            try { return CrowClockGetArm() + "/" + CrowClockGetGpu(); }
+            try { return DescribeNative(); }
             catch (Exception) { return null; }
+        }
+
+        // Apart, as Mono looks the plugin up when it compiles a caller (see Audio.cs's Threads.SelfNative).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static string DescribeNative()
+        {
+            return CrowClockGetArm() + "/" + CrowClockGetGpu();
         }
 
         // -crow-cycle's gpu=<mhz>: one change of the GPU clock, kept from then on.

@@ -222,8 +222,8 @@ partial class DowngradeAssemblies
     static int RedirectMembers(ModuleDefinition module)
     {
         // Sites of each rule but the shims, for the NO MATCH check: Type.GetType, Screen calls,
-        // BinaryFormatter, save paths.
-        var sites = new int[4];
+        // BinaryFormatter, save paths, the clock.
+        var sites = new int[5];
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
         foreach (MethodDefinition method in type.Methods)
@@ -270,6 +270,16 @@ partial class DowngradeAssemblies
                     count++;
                     continue;
                 }
+                // DateTime.Now and UtcNow, which the PS Vita's IL2CPP can't tell (save slots dated
+                // 1601). See CrowCompat Saves.
+                if (called.DeclaringType.FullName == "System.DateTime" && (called.Name == "get_Now" || called.Name == "get_UtcNow"))
+                {
+                    string name = called.Name == "get_Now" ? "Now" : "UtcNow";
+                    instruction.Operand = module.ImportReference(compat["CrowCompat.Saves"].Methods.First(m => m.Name == name));
+                    sites[4]++;
+                    count++;
+                    continue;
+                }
                 // BinaryFormatter data the game ships or saved names Assembly-CSharp. Every formatter
                 // gets CrowCompat's alias binder (see TypeNames.NewBinaryFormatter), since IL2CPP
                 // never asks AssemblyResolve; a binder the game sets is wrapped in it.
@@ -311,7 +321,7 @@ partial class DowngradeAssemblies
                 count++;
             }
         }
-        string[] rules = { "Type.GetType", "Screen fullscreen and resolution", "BinaryFormatter binder", "save paths" };
+        string[] rules = { "Type.GetType", "Screen fullscreen and resolution", "BinaryFormatter binder", "save paths", "DateTime.Now" };
         for (int i = 0; i < sites.Length; i++) Count("redirect " + rules[i], sites[i]);
         return count;
     }

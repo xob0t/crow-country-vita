@@ -227,6 +227,17 @@ namespace CrowCompat
                 return;
             }
             long reserve = reserveMB * 1048576L;
+            // A delegate, not MethodInfo.Invoke: Invoke allocates (a parameter array, the boxed result)
+            // ten times a second, for as long as the game runs.
+            Func<int> free;
+            try
+            {
+                free = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), freeMain);
+            }
+            catch (Exception)
+            {
+                free = () => (int)freeMain.Invoke(null, null);
+            }
             var thread = new System.Threading.Thread(() =>
             {
                 bool held = false;
@@ -235,7 +246,7 @@ namespace CrowCompat
                     try
                     {
                         long heap = (long)(ulong)GC_get_heap_size();
-                        long room = Math.Max(0L, (int)freeMain.Invoke(null, null) - reserve);
+                        long room = Math.Max(0L, free() - reserve);
                         // Not by slivers: each section is a memory block of its own, and Boehm has a
                         // fixed number of section slots.
                         if (room < 4 * 1048576L) room = 0;

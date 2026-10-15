@@ -16,6 +16,7 @@ using UnityEngine.SceneManagement;
 //   -crow-shadows off|hard|all      no shadows, hard shadows only, or the game's soft and hard
 //   -crow-shadow-distance <m>       how far from the camera shadows are drawn
 //   -crow-shadow-resolution <0-3>   Low, Medium, High, VeryHigh
+// The PS Vita's defaults: hard shadows, Low, 12 m (the game: soft and hard, Medium there, 50 m).
 // And measurements:
 //   -crow-loop-profile <s>          every s seconds, the main thread's time per player loop step
 //                                   (CROW_LOOP lines; see LoopProfile)
@@ -55,6 +56,7 @@ namespace CrowCompat
             LightRules.Install(args);
             Draws.Install(args);
             Perf.Install(args);
+            VitaLit.Install(args);
             int ab =Array.IndexOf(args, "-crow-ab");
             if (ab >= 0 && ab + 3 < args.Length) AB.Install(Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3]);
             float census = Number(args, "-crow-census", -1);
@@ -68,6 +70,16 @@ namespace CrowCompat
             shadowDistance = Number(args, "-crow-shadow-distance", -1);
             int index = Array.IndexOf(args, "-crow-shadows");
             shadows = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            if (Application.platform == RuntimePlatform.PSP2)
+            {
+                // The PS Vita's shadows: hard, Low resolution, 12 m, and (Draws.cs) only the player's
+                // parts cast them. The shadow pass's GPU cost is mostly fixed: in Roadside with one-pass
+                // lighting (VitaLit.cs) the game's soft Medium 50 m shadows take a frame from 33.4 to
+                // 38 ms, these 33.3 (30 fps), with Mara's shadow kept.
+                if (shadows == null) shadows = "hard";
+                if (shadowResolution < 0) shadowResolution = 0;
+                if (shadowDistance < 0) shadowDistance = 12f;
+            }
             if (pixelLights < 0 && shadowResolution < 0 && shadowDistance < 0 && shadows == null) return;
             Apply();
             SceneManager.sceneLoaded += (scene, mode) => Apply();
@@ -91,6 +103,8 @@ namespace CrowCompat
                 float number;
                 float.TryParse(pair[1], NumberStyles.Float, CultureInfo.InvariantCulture, out number);
                 if (pair[0] == "lights" && pair[1] == "vita") LightRules.Enable();
+                else if (pair[0] == "lit") VitaLit.Set(pair[1]);
+                else if (pair[0] == "litkeys" || pair[0] == "litrange") VitaLit.SetLimits(pair[0], number);
                 else if (pair[0] == "pixel") pixelLights = (int)number;
                 else if (pair[0] == "shadows") shadows = pair[1];
                 else if (pair[0] == "distance") shadowDistance = number;

@@ -51,7 +51,7 @@ namespace CrowCompat
             {
                 Directory.CreateDirectory(Folder);
                 log = new StreamWriter(Path.Combine(Folder, "log.txt"), false, new UTF8Encoding(false));
-                log.WriteLine("Crow Country " + Application.version + ", Unity " + Application.unityVersion + ", started " + DateTime.Now.ToString("s"));
+                log.WriteLine("Crow Country " + Application.version + ", Unity " + Application.unityVersion + ", started " + Saves.Now().ToString("s"));
                 log.WriteLine("args: " + string.Join(" ", Args.Skip(1).ToArray()));
                 log.Flush();
                 Application.logMessageReceivedThreaded += Write;

@@ -29,7 +29,10 @@ namespace CrowCompat
             "-crow-stall-dump <s>     crash the player when a frame has taken s seconds, for a core dump with the main thread's stack\n" +
             "-crow-stall-after <t>    with -crow-stall-dump, only frames that start t seconds or more after startup (skips earlier stalls)\n" +
             "-crow-dump-text <s>      s seconds after the last scene load, log each TextMeshPro text with its font and mesh\n" +
-            "-crow-language <name>    keep I2 Localization on this language (English, French, Japanese, Korean, \"Chinese (Simplified)\", ...)";
+            "-crow-language <name>    keep I2 Localization on this language (English, French, Japanese, Korean, \"Chinese (Simplified)\", ...)\n" +
+            "-crow-find <regex> <s>   s seconds after each scene load, log every renderer (active or not) whose hierarchy path matches\n" +
+            "                         the regex: active, enabled, isVisible, bounds, mesh, materials and shaders (CROW_FIND), for\n" +
+            "                         what looks missing in play";
 
         static string[] args;
         static string sceneToLoad, sceneThen;
@@ -38,6 +41,8 @@ namespace CrowCompat
         static string shotPath;
         static bool noVsync, mute, input;
         static float dumpTextAfter = -1f;
+        static System.Text.RegularExpressions.Regex findPattern;
+        static float findAfter = -1f;
         static string textShader, language;
         static PropertyInfo currentLanguage;
         static float lastLanguageCheck = -10f;
@@ -49,7 +54,7 @@ namespace CrowCompat
         float started, lastBeat, lastLoad, worst;
         int frames, collections;
         double frameSum;
-        bool shotTaken, sceneRequested, textDumped, waitLogged;
+        bool shotTaken, sceneRequested, textDumped, waitLogged, found;
         float lastShaderSwap, lastInputReport = -10f;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -60,6 +65,8 @@ namespace CrowCompat
             Audio.InstallDefaults();  // before Loading's title prefetch, whose loading thread it moves
             Loading.Install();
             Clock.Install();
+            Alloc.Install(ProbeFiles.Args);
+            IdleAudio.Install(ProbeFiles.Args);
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene");
@@ -78,6 +85,15 @@ namespace CrowCompat
             input = args.Contains("-crow-input");
             if (mute) AudioListener.volume = 0f;
             dumpTextAfter = Number("-crow-dump-text", -1f);
+            string find = Value("-crow-find");
+            if (find != null)
+            {
+                findPattern = new System.Text.RegularExpressions.Regex(find);
+                int at = Array.IndexOf(args, "-crow-find");
+                float seconds;
+                findAfter = at + 2 < args.Length && float.TryParse(args[at + 2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 5f;
+            }
             language = Value("-crow-language");
             textShader = Value("-crow-text-shader");
             stallDump = Number("-crow-stall-dump", -1f);
@@ -132,6 +148,7 @@ namespace CrowCompat
                 lastLoad = Time.realtimeSinceStartup;
                 shotTaken = false;
                 textDumped = false;
+                found = false;
                 Debug.Log("CROW_DIAG scene loaded " + scene.name + " (" + mode + ") at " + lastLoad.ToString("F2") + " s");
             };
             Debug.Log("CROW_DIAG started: " + string.Join(" ", args.Where(a => a.StartsWith("-crow-")).ToArray()));
@@ -146,6 +163,7 @@ namespace CrowCompat
         void Update()
         {
             Audio.Frame();
+            Alloc.Frame();
             frameStartTime = Time.realtimeSinceStartup;
             System.Threading.Interlocked.Exchange(ref frameStartTicks, clock.ElapsedTicks);
             if (mute) AudioListener.volume = 0f;  // the game sets it from its sound settings
@@ -157,7 +175,8 @@ namespace CrowCompat
             float now = Time.realtimeSinceStartup;
             // Only once the Logos scene's own load of the Title is over (2 s after it), so two scenes are
             // never in flight at once (that overstated memory: Roadside ran out of it that way).
-            bool titleUp = SceneManager.GetActiveScene().name == "Title" && now - lastLoad >= 2f;
+            // The scene's name is a new string at each read: read only while it matters.
+            bool titleUp = sceneToLoad != null && !sceneRequested && now - lastLoad >= 2f && SceneManager.GetActiveScene().name == "Title";
             if (sceneToLoad != null && !sceneRequested && (titleUp || now - started >= 180f))
             {
                 MaraScene.Request();  // the player's scene, which the title would have loaded (Loading.cs)
@@ -173,7 +192,7 @@ namespace CrowCompat
                     Debug.Log("CROW_DIAG waiting for " + MaraScene.Scene + " before loading " + sceneToLoad);
                 }
             }
-            if (sceneThen != null && sceneRequested && SceneManager.GetActiveScene().name == sceneToLoad && now - lastLoad >= sceneThenAfter)
+            if (sceneThen != null && sceneRequested && now - lastLoad >= sceneThenAfter && SceneManager.GetActiveScene().name == sceneToLoad)
             {
                 string next = sceneThen;
                 sceneThen = null;
@@ -207,6 +226,11 @@ namespace CrowCompat
                 DumpText();
                 DumpCanvas();
             }
+            if (findPattern != null && !found && now - lastLoad >= findAfter)
+            {
+                found = true;
+                FindRenderers();
+            }
             if (language != null && now - lastLanguageCheck >= 0.5f)
             {
                 lastLanguageCheck = now;
@@ -222,6 +246,37 @@ namespace CrowCompat
                 Debug.Log("CROW_DIAG quitting");
                 Application.Quit();
             }
+        }
+
+        // -crow-find: the renderers whose hierarchy path matches, whatever their state.
+        static void FindRenderers()
+        {
+            int count = 0;
+            foreach (Renderer renderer in Resources.FindObjectsOfTypeAll<Renderer>())
+            {
+                if (!renderer.gameObject.scene.IsValid()) continue;  // assets and prefabs
+                var path = new StringBuilder(renderer.name);
+                for (Transform t = renderer.transform.parent; t != null; t = t.parent) path.Insert(0, t.name + "/");
+                if (!findPattern.IsMatch(path.ToString())) continue;
+                count++;
+                var line = new StringBuilder("CROW_FIND ").Append(path).Append(" [").Append(renderer.gameObject.scene.name).Append("]")
+                    .Append(" active=").Append(renderer.gameObject.activeInHierarchy ? 1 : 0)
+                    .Append(" enabled=").Append(renderer.enabled ? 1 : 0)
+                    .Append(" visible=").Append(renderer.isVisible ? 1 : 0)
+                    .Append(" layer=").Append(renderer.gameObject.layer)
+                    .Append(" bounds=").Append(renderer.bounds.center.ToString("F2")).Append(renderer.bounds.size.ToString("F2"));
+                MeshFilter filter = renderer.GetComponent<MeshFilter>();
+                if (filter != null)
+                {
+                    Mesh mesh = filter.sharedMesh;
+                    line.Append(" mesh=").Append(mesh == null ? "none" : mesh.name + "(" + mesh.vertexCount + "v," + mesh.subMeshCount + "sub)");
+                }
+                foreach (Material material in renderer.sharedMaterials)
+                    line.Append(" mat=").Append(material == null ? "none" : material.name + "/" + (material.shader == null ? "none" : material.shader.name)
+                        + "/q" + material.renderQueue + (material.HasProperty("_Color") ? "/" + material.color.ToString("F2") : ""));
+                Debug.Log(line.ToString());
+            }
+            Debug.Log("CROW_FIND " + count + " renderers match " + findPattern);
         }
 
         // -crow-dump-text: each TextMeshPro text in the loaded scenes, with its font asset's tables and

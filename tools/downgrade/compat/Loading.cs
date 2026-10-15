@@ -315,38 +315,57 @@ namespace CrowCompat
     // The title, read while the logos play. The logos scene's FSM loads the title with PlayMaker's
     // LoadScene action, a synchronous load: on the PS Vita the loading thread then spent 11 s reading
     // the title (176 FSMs, their actions made on that thread as each FSM is read) while the logos
-    // stood still. The title now starts loading in the background, held before activation, when the
-    // first scene has loaded; the action's SceneManager.LoadScene call comes here (the rewriter sends
+    // stood still. The title now starts loading in the background, held before activation, at the
+    // logos' first frame; the action's SceneManager.LoadScene call comes here (the rewriter sends
     // it) and activates it. Any other load activates it first, as a load queued behind a held one
     // would never start. Not with -crow-scene, which loads its own scene from the logos.
+    // Not from Install (RuntimeInitializeOnLoadMethod AfterSceneLoad): the first scene's load is
+    // still finishing there, and Unity completes every queued load before it returns, held or not
+    // (see MaraScene.RequestSoon). Requested there, the title was read and activated before the
+    // logos' first frame: the logos never showed (on the PS Vita, 10.5 s of the boot picture, then
+    // the title), the logos' FSMs were destroyed before they started, and one of them, starting from
+    // its OnDisable after the logos' Rewired Input Manager had gone, threw "Rewired is not initialized"
+    // and a NullReferenceException (RewiredGetJoystickCount).
     public static class ScenePrefetch
     {
         const string First = "Title";
         static AsyncOperation held;
         static string heldName;
+        static bool waiting;  // installed, the request not made yet
         static readonly Stopwatch clock = new Stopwatch();
 
         internal static void Install(string[] args)
         {
             if (args.Contains("-crow-scene") || args.Contains("-crow-no-prefetch")) return;
             if (SceneManager.GetActiveScene().buildIndex != 0 || !Application.CanStreamedLevelBeLoaded(First)) return;
-            heldName = First;
-            held = SceneManager.LoadSceneAsync(First, LoadSceneMode.Single);
-            held.allowSceneActivation = false;
-            clock.Start();
+            waiting = true;
+            Canvas.willRenderCanvases += Request;  // every frame, canvases or not
             SceneManager.sceneLoaded += (scene, mode) =>
             {
                 if (scene.name != First || clock.ElapsedMilliseconds == 0) return;
+                held = null;  // activated: nothing left to hold
                 Application.backgroundLoadingPriority = ThreadPriority.Normal;
                 Debug.Log("CROW_PREFETCH " + First + " loaded " + clock.ElapsedMilliseconds + " ms after the request");
                 clock.Reset();
             };
+        }
+
+        static void Request()
+        {
+            Canvas.willRenderCanvases -= Request;
+            if (!waiting) return;
+            waiting = false;
+            heldName = First;
+            held = SceneManager.LoadSceneAsync(First, LoadSceneMode.Single);
+            held.allowSceneActivation = false;
+            clock.Start();
             Debug.Log("CROW_PREFETCH reading " + First + " in the background");
         }
 
         // PlayMaker's LoadScene action's SceneManager.LoadScene(name, mode).
         public static void LoadScene(string name, LoadSceneMode mode)
         {
+            waiting = false;  // a load before the logos' first frame: no prefetch
             if (held != null)
             {
                 AsyncOperation operation = held;
@@ -401,6 +420,10 @@ namespace CrowCompat
         public static bool Load(string name, LoadSceneMode mode)
         {
             if (!On || mode != LoadSceneMode.Single) return false;
+            // A name no build scene has (a save that failed to load gave ""): Unity's own load only logs
+            // it and the game stays where it is; through the gap it would unload the area and the player
+            // first and leave an empty scene, a black screen for good.
+            if (!Application.CanStreamedLevelBeLoaded(name)) return false;
             if (target != null)
             {
                 Debug.Log("CROW_GAP " + name + " requested while loading " + target + ": loads instead");
