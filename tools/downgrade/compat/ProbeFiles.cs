@@ -60,6 +60,7 @@ namespace CrowCompat
             {
                 Debug.LogWarning("CrowCompat: no log file in " + Folder + ": " + exception.Message);
             }
+            Audio.Configure();  // the mixer's settings before anything plays
         }
 
         static void Write(string message, string stack, LogType type)

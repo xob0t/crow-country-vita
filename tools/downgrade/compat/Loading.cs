@@ -221,8 +221,15 @@ namespace CrowCompat
     public static class MaraScene
     {
         public const string Scene = "CrowMara", Key = "CharacterCameraPrefab";
-        static bool available, requested;
+        static bool available, requested, taken;
         static GameObject ready;
+
+        // Whether the player's scene is done loading, or not in the build. Diag's -crow-scene waits for
+        // it: a synchronous area load while it still loaded in the background hung the PS Vita player.
+        public static bool Settled
+        {
+            get { return !available || taken; }
+        }
         static readonly Stopwatch clock = new Stopwatch();
 
         internal static void Install()
@@ -270,7 +277,9 @@ namespace CrowCompat
             // The loading thread at high priority: at Normal it got so little of the PS Vita's CPU
             // beside the title's frames that the scene took 133 s (27 s when waited for), and a
             // synchronous load before the end (a Resources.Load in the title's menus) waits for the rest.
-            Application.backgroundLoadingPriority = ThreadPriority.High;
+            // With the loading thread on CPU 1 (Audio.cs's Threads.MoveLoader), Normal: below the render
+            // worker there, so the title keeps 30 fps, and the scene took 28.7 s instead of 25.5.
+            Application.backgroundLoadingPriority = Audio.LoadPriority(Threads.LoaderMoved ? ThreadPriority.Normal : ThreadPriority.High);  // -crow-load-priority
             SceneManager.LoadSceneAsync(Scene, LoadSceneMode.Additive);
             Debug.Log("CROW_MARA loading " + Scene + " in the background");
         }
@@ -279,6 +288,7 @@ namespace CrowCompat
         {
             GameObject[] roots = scene.GetRootGameObjects();
             ready = roots.Length > 0 ? roots[0] : null;
+            taken = true;
             if (ready != null) UnityEngine.Object.DontDestroyOnLoad(ready);
             Application.backgroundLoadingPriority = ThreadPriority.Normal;
             // The scene, empty now, goes with the next single-mode load (unloading it from its own

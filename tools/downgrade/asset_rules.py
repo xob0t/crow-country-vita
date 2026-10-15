@@ -342,7 +342,11 @@ def render_texture_overlay(exported: Path):
 
 # Per platform: the source's AudioClip load type -> (load type, compression format, quality or None
 # to keep it). On the PS Vita: decompress-on-load and compressed-in-memory clips become compressed in
-# memory as HEVAG (3, its ADPCM), streamed ones stream HEVAG; long clips stream (STREAM_SECONDS).
+# memory, streamed ones stream; long clips stream (STREAM_SECONDS). The format numbers are Unity's
+# AudioCompressionFormat (3 MP3, 5 HEVAG), but the 2018.2 PS Vita module encodes only HEVAG (its
+# FSBTool has vagconv2 alone; no ATRAC9 or MP3 encoder), and the build has every clip as HEVAG
+# (FSB5 mode 9, 961 clips) whichever is asked. HEVAG decodes cheaply in FMOD's mixer; what costs it
+# is the game's reverb filters (compat/Audio.cs's FilterGate).
 PLATFORM_AUDIO = {'vita': {0: (1, 5, None), 1: (1, 3, 0.5), 2: (2, 3, 0.7)}}
 # A clip kept in memory is read whole, on the main thread, when it first plays; long loops stream.
 STREAM_SECONDS = 45
@@ -999,6 +1003,12 @@ PLATFORM_QUALITY_RULES = {
     'vita': {'shadowResolution': '1'},
 }
 
+# Physics settings. Unity 2022 says when physics steps with m_SimulationMode (0: in FixedUpdate,
+# the game's), where 2018 has m_AutoSimulation, which the export wrote as 0: no rigidbody moved in
+# the port, so Mara turned but never walked (her walk is PlayMaker AddForce on her rigidbody), and
+# nothing fell or flew.
+PHYSICS_RULES = {'m_AutoSimulation': '1'}
+
 
 def settings_overlay(exported: Path, platform: str):
     relative = Path('ProjectSettings') / 'ProjectSettings.asset'
@@ -1021,6 +1031,13 @@ def settings_overlay(exported: Path, platform: str):
             if count != 1:
                 sys.exit(f'QualitySettings has {count} entries for {key}, expected one quality level')
         overlay[relative] = text.encode('utf-8')
+    relative = Path('ProjectSettings') / 'DynamicsManager.asset'
+    text = (exported / relative).read_text(encoding='utf-8')
+    for key, value in PHYSICS_RULES.items():
+        text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
+        if count != 1:
+            sys.exit(f'DynamicsManager has {count} entries for {key}')
+    overlay[relative] = text.encode('utf-8')
     return overlay
 
 

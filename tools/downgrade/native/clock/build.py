@@ -1,4 +1,4 @@
-"""Build the CrowClock native plugin for the PS Vita (clock.c): CrowClock.suprx and its CrowClock_stub.a,
+"""Build the CrowClock native plugin for the PS Vita (clock.c, threads.c): CrowClock.suprx and its CrowClock_stub.a,
 in work/native/clock, with the official SDK's psp2snc (SCE_PSP2_SDK_DIR). Also the bootstrap module
 the editor would make from the two (CrowClock.suprx.b.suprx): IL2CPP's [DllImport] on the PS Vita
 (libil2cpp/os/PSP2/dlopen.cpp) loads app0:/Media/Plugins/<name>.suprx, then <name>.suprx.b.suprx,
@@ -41,10 +41,20 @@ BRIDGE = r"""#include <stddef.h>
 SCE_MODULE_INFO(CrowClock_b, SCE_MODULE_ATTR_NONE, 1, 1);
 extern "C" int CrowClockSetArm();
 extern "C" int CrowClockGetArm();
+extern "C" int CrowThreadSelf();
+extern "C" int CrowThreadQuery();
+extern "C" int CrowThreadSet();
+extern "C" int CrowThreadsRunning();
+extern "C" int CrowCpuIdle();
 typedef int (*EXTERNFUNCTION)();
 static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_FunctionNames[] = {
   { "CrowClockSetArm", &CrowClockSetArm },
   { "CrowClockGetArm", &CrowClockGetArm },
+  { "CrowThreadSelf", &CrowThreadSelf },
+  { "CrowThreadQuery", &CrowThreadQuery },
+  { "CrowThreadSet", &CrowThreadSet },
+  { "CrowThreadsRunning", &CrowThreadsRunning },
+  { "CrowCpuIdle", &CrowCpuIdle },
 };
 extern "C" __declspec(dllimport) void RegisterModule(const char* module_name, void* exports,
   size_t exports_count, SceSize size, void* arg);
@@ -102,6 +112,7 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     library = stub_library(OUT)
     run(BIN / 'psp2snc.exe', '-O2', '-Xmserrors', '-c', HERE / 'clock.c', '-o', OUT / 'clock.o')
+    run(BIN / 'psp2snc.exe', '-O2', '-Xmserrors', '-c', HERE / 'threads.c', '-o', OUT / 'threads.o')
     stubs = OUT / 'stubs'
     shutil.rmtree(stubs, ignore_errors=True)
     stubs.mkdir()
@@ -110,7 +121,9 @@ def main():
         '-Wl,--oformat=prx',
         f'-Wl,--prx-stub-output-dir={stubs}',
         OUT / 'clock.o',
+        OUT / 'threads.o',
         library,
+        SDK / 'target' / 'lib' / 'libSceKernel_stub.a',
         f'-Wl,-Map={OUT / "CrowClock.map"}',
         '-o',
         OUT / 'CrowClock.suprx',
