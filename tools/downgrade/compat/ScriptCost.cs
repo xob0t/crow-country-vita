@@ -16,6 +16,10 @@ using System.Runtime.CompilerServices;
 //   - Fsm.UpdateDelayedEvents clears and refills two lists every frame; with no delayed events and
 //     the lists empty, it returns at once. A mark set where events are added (crowDelayedEvents)
 //     saves even asking the lists' counts on FSMs that had none.
+//   - BlobTrailSpawn.Spawn (a Blob's trail) starts with TrailReady: after the Blob dies its pooled
+//     pieces are destroyed and Spawn threw a NullReferenceException every 0.01-0.1 s per dead Blob
+//     (on the PS Vita a stack trace and a log line each, the largest allocation source in fights);
+//     destroyed pieces leave the pool, and an empty pool spawns nothing, as the throw did.
 //   - FullScreenColour.OnGUI (the game's fades: it walks every FSM's active state for actions with
 //     an OnGUI, on every GUI event, and calls those that are Active) returns at once while none
 //     between its OnEnter and OnExit is Active, and turns its component off until one enters (the game's only OnGUI in play, so
@@ -26,6 +30,7 @@ using System.Runtime.CompilerServices;
 //   -crow-script-cost game   keep the game's per-frame work (all but the FastStack, a type change),
 //                            for A/B measurements on one build
 //   -crow-script-cost-log    log each fade action's OnEnter and OnExit (CROW_SCRIPT_COST)
+//   -crow-blob-trail game    keep the Blob trail's throw only (A/B of TrailReady)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -42,6 +47,21 @@ namespace CrowCompat
             if (game) UnityEngine.Debug.Log("CROW_SCRIPT_COST game: the game's per-frame PlayMaker and fade work");
             return game;
         }
+
+        // BlobTrailSpawn.Spawn's first step (rewriter PatchBlobTrailSpawn): whether the trail's pool has a
+        // piece left, its destroyed ones removed. -crow-blob-trail game (or -crow-script-cost game) keeps
+        // the game's throw.
+        public static bool TrailReady(List<UnityEngine.GameObject> pool)
+        {
+            if (!trailGuard || pool == null) return true;
+            if (pool.Count > 0 && pool[0] != null) return true;
+            pool.RemoveAll(destroyed);
+            return pool.Count > 0;
+        }
+
+        static readonly Predicate<UnityEngine.GameObject> destroyed = piece => piece == null;
+        static readonly bool trailGuard = Fast && !(Array.IndexOf(ProbeFiles.Args, "-crow-blob-trail") >= 0 &&
+                                                    Array.IndexOf(ProbeFiles.Args, "game") == Array.IndexOf(ProbeFiles.Args, "-crow-blob-trail") + 1);
 
         // The fade actions between OnEnter and OnExit, with their FSM's GameObject (FsmStateAction.Owner).
         static readonly Dictionary<object, UnityEngine.Object> guiActions = new Dictionary<object, UnityEngine.Object>(new SameObject());

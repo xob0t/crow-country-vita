@@ -81,6 +81,29 @@ partial class DowngradeAssemblies
         return 1;
     }
 
+    // A Blob's trail (BlobTrailSpawn) keeps spawning after the Blob dies, but its death destroys the
+    // pooled trail pieces, so Spawn's pool[0].activeSelf throws a NullReferenceException every 0.01-0.1 s
+    // per dead Blob, for the rest of the area (the original does the same). On the PS Vita each throw
+    // takes a stack trace and a log line: in Station Square's fight about 50-100 a second, the largest
+    // allocation source of the fight. Spawn now starts with CrowCompat ScriptCost.TrailReady(pool),
+    // which drops destroyed pieces from the pool and says whether one is left; if none, it returns,
+    // which is what the throw did.
+    static int PatchBlobTrailSpawn(ModuleDefinition module)
+    {
+        TypeDefinition type = GameType(module, "com.sfbgames.crowcountry.BlobTrailSpawn");
+        if (type == null) return 0;
+        MethodDefinition spawn = type.Methods.Single(m => m.Name == "Spawn" && m.Parameters.Count == 0);
+        FieldDefinition pool = type.Fields.Single(f => f.Name == "pool");
+        var code = spawn.Body.Instructions;
+        ILProcessor il = spawn.Body.GetILProcessor();
+        Instruction first = code[0];
+        il.InsertBefore(first, Instruction.Create(OpCodes.Ldarg_0));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Ldfld, pool));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Call, CompatMethod(module, "ScriptCost", "TrailReady")));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Brfalse, code.Last(i => i.OpCode == OpCodes.Ret)));
+        return 1;
+    }
+
     // The game's console mode (see CrowCompat Settings): PlayMakerFSM.Awake loads PlayMaker's globals
     // (PlayMakerGlobals.Initialize) before the FSM initializes; after that call, the first Awake sets
     //   FsmVariables.GlobalVariables.GetFsmInt("Control Mode Console").Value = Settings.ConsoleControlMode()

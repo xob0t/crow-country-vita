@@ -358,6 +358,13 @@ namespace CrowCompat
             flushLabel = label ?? "";
         }
 
+        // Fight.cs: each step's ticks since Install, never cleared (the reports clear ticks), so a
+        // caller can take differences over windows of its own.
+        static long[] totals;
+        internal static bool Installed { get { return ticks != null; } }
+        internal static List<string> Labels { get { return labels; } }
+        internal static long[] Totals { get { return totals; } }
+
         public static void Install(float seconds)
         {
             every = seconds;
@@ -379,6 +386,7 @@ namespace CrowCompat
             }
             root.subSystemList = phases;
             ticks = new long[labels.Count];
+            totals = new long[labels.Count];
             PlayerLoop.SetPlayerLoop(root);
             Camera.onPreCull += camera => CameraMark(camera, 0);
             Camera.onPreRender += camera => CameraMark(camera, 1);
@@ -424,7 +432,11 @@ namespace CrowCompat
         static void Mark(int index)
         {
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (previous >= 0) ticks[previous] += now - last;
+            if (previous >= 0)
+            {
+                ticks[previous] += now - last;
+                totals[previous] += now - last;
+            }
             previous = index;
             last = now;
             if (index != 0) return;

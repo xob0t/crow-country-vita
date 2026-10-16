@@ -277,6 +277,7 @@ COMPAT_SOURCES = [
             'IdleAudio',
             'VitaLit',
             'Prewarm',
+            'Fight',
         )
     ),
 ]

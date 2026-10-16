@@ -15,6 +15,7 @@ import ctypes
 import ctypes.wintypes as wt
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -72,8 +73,10 @@ kernel32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
 kernel32.CloseHandle.argtypes = [wt.HANDLE]
 
 
-def run(exe: Path, log: Path, arguments, timeout=None):
-    """Runs the player on DESKTOP; returns its exit code (1 if it was killed at the timeout)."""
+def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
+    """Runs the player on DESKTOP; returns its exit code (1 if it was killed at the timeout).
+    on_start(pid), if given, is called with the player's process id once it runs (cmd starts it) and
+    may return a function to call when the run ends (fightbench.py's vitalike duty cycle)."""
     desktop = user32.CreateDesktopW(DESKTOP, None, None, 0, GENERIC_ALL, None)
     if not desktop:
         raise OSError(ctypes.get_last_error(), 'CreateDesktop failed')
@@ -112,7 +115,11 @@ def run(exe: Path, log: Path, arguments, timeout=None):
         ctypes.byref(info),
     ):
         raise OSError(ctypes.get_last_error(), 'CreateProcess failed')
+    stop = None
     try:
+        if on_start is not None:
+            player_pid = child_process(info.dwProcessId, exe.name)
+            stop = on_start(player_pid) if player_pid else None
         waited = kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF if timeout is None else int(timeout * 1000))
         if waited == WAIT_TIMEOUT:
             # cmd and the player: the player is cmd's child; taskkill takes the tree.
@@ -122,8 +129,47 @@ def run(exe: Path, log: Path, arguments, timeout=None):
         kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
         return code.value
     finally:
+        if stop is not None:
+            stop()
         kernel32.CloseHandle(info.hThread)
         kernel32.CloseHandle(info.hProcess)
+
+
+class ProcessEntry(ctypes.Structure):  # PROCESSENTRY32W
+    _fields_ = [
+        ('dwSize', wt.DWORD),
+        ('cntUsage', wt.DWORD),
+        ('th32ProcessID', wt.DWORD),
+        ('th32DefaultHeapID', ctypes.c_size_t),
+        ('th32ModuleID', wt.DWORD),
+        ('cntThreads', wt.DWORD),
+        ('th32ParentProcessID', wt.DWORD),
+        ('pcPriClassBase', wt.LONG),
+        ('dwFlags', wt.DWORD),
+        ('szExeFile', wt.WCHAR * 260),
+    ]
+
+
+def child_process(parent: int, name: str, wait=30.0):
+    """The id of the process called name that parent started (cmd's player), or None after wait seconds."""
+    kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
+    kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(ProcessEntry)]
+    kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(ProcessEntry)]
+    deadline = time.time() + wait
+    while time.time() < deadline:
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        entry = ProcessEntry()
+        entry.dwSize = ctypes.sizeof(ProcessEntry)
+        try:
+            more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while more:
+                if entry.th32ParentProcessID == parent and entry.szExeFile.lower() == name.lower():
+                    return entry.th32ProcessID
+                more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        time.sleep(0.1)
+    return None
 
 
 def main():

@@ -33,7 +33,9 @@ namespace CrowCompat
             "-crow-language <name>    keep I2 Localization on this language (English, French, Japanese, Korean, \"Chinese (Simplified)\", ...)\n" +
             "-crow-find <regex> <s>   s seconds after each scene load, log every renderer (active or not) whose hierarchy path matches\n" +
             "                         the regex: active, enabled, isVisible, bounds, mesh, materials and shaders (CROW_FIND), for\n" +
-            "                         what looks missing in play";
+            "                         what looks missing in play\n" +
+            "-crow-teleport <x,y,z> <s>  s seconds (default 3) after each scene load, move the player (its \"character\n" +
+            "                         RIGIDBODY\") to world position x,y,z, to look at a place without walking there";
 
         static string[] args;
         static string sceneToLoad, sceneThen;
@@ -44,6 +46,8 @@ namespace CrowCompat
         static float dumpTextAfter = -1f;
         static System.Text.RegularExpressions.Regex findPattern;
         static float findAfter = -1f;
+        static Vector3 teleportTo;
+        static float teleportAfter = -1f;
         static string textShader, language;
         static PropertyInfo currentLanguage;
         static float lastLanguageCheck = -10f;
@@ -55,7 +59,7 @@ namespace CrowCompat
         float started, lastBeat, lastLoad, worst;
         int frames, collections;
         double frameSum;
-        bool shotTaken, sceneRequested, textDumped, waitLogged, found;
+        bool shotTaken, sceneRequested, textDumped, waitLogged, found, teleported;
         float lastShaderSwap, lastInputReport = -10f;
 
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
@@ -68,9 +72,10 @@ namespace CrowCompat
             Clock.Install();
             Alloc.Install(ProbeFiles.Args);
             IdleAudio.Install(ProbeFiles.Args);
+            Fight.Install(ProbeFiles.Args);  // -crow-fight: the fight benchmark (Fight.cs)
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
-            sceneToLoad = Value("-crow-scene");
+            sceneToLoad = Value("-crow-scene") ?? Fight.Scene;
             sceneThen = Value("-crow-scene-then");
             int then = Array.IndexOf(args, "-crow-scene-then");
             if (then < 0 || then + 2 >= args.Length || !float.TryParse(args[then + 2], System.Globalization.NumberStyles.Float,
@@ -94,6 +99,16 @@ namespace CrowCompat
                 float seconds;
                 findAfter = at + 2 < args.Length && float.TryParse(args[at + 2], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 5f;
+            }
+            string teleport = Value("-crow-teleport");
+            if (teleport != null)
+            {
+                float[] xyz = teleport.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                teleportTo = new Vector3(xyz[0], xyz[1], xyz[2]);
+                int at = Array.IndexOf(args, "-crow-teleport");
+                float seconds;
+                teleportAfter = at + 2 < args.Length && float.TryParse(args[at + 2], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 3f;
             }
             language = Value("-crow-language");
             textShader = Value("-crow-text-shader");
@@ -152,6 +167,7 @@ namespace CrowCompat
                 shotTaken = false;
                 textDumped = false;
                 found = false;
+                teleported = false;
                 Debug.Log("CROW_DIAG scene loaded " + scene.name + " (" + mode + ") at " + lastLoad.ToString("F2") + " s");
             };
             Debug.Log("CROW_DIAG started: " + string.Join(" ", args.Where(a => a.StartsWith("-crow-")).ToArray()));
@@ -167,6 +183,7 @@ namespace CrowCompat
         {
             Audio.Frame();
             Alloc.Frame();
+            Fight.Frame();
             frameStartTime = Time.realtimeSinceStartup;
             System.Threading.Interlocked.Exchange(ref frameStartTicks, clock.ElapsedTicks);
             if (mute) AudioListener.volume = 0f;  // the game sets it from its sound settings
@@ -187,6 +204,7 @@ namespace CrowCompat
                 {
                     sceneRequested = true;
                     Debug.Log("CROW_DIAG loading " + sceneToLoad);
+                    Fight.BeforeLoad();  // the globals the area's FSMs read as it starts
                     if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (Loading.cs)
                 }
                 else if (!waitLogged)
@@ -237,6 +255,11 @@ namespace CrowCompat
                 found = true;
                 FindRenderers();
             }
+            if (teleportAfter >= 0f && !teleported && now - lastLoad >= teleportAfter)
+            {
+                teleported = true;
+                Teleport();
+            }
             if (language != null && now - lastLanguageCheck >= 0.5f)
             {
                 lastLanguageCheck = now;
@@ -252,6 +275,26 @@ namespace CrowCompat
                 Debug.Log("CROW_DIAG quitting");
                 Application.Quit();
             }
+        }
+
+        // -crow-teleport: the player's body (the rigidbody PlayMaker moves) and its transform put at
+        // teleportTo, at rest; the game's camera follows it.
+        static void Teleport()
+        {
+            GameObject body = GameObject.Find("character RIGIDBODY");
+            if (body == null)
+            {
+                Debug.Log("CROW_DIAG teleport: no active \"character RIGIDBODY\"");
+                return;
+            }
+            var rigidbody = body.GetComponent<Rigidbody>();
+            if (rigidbody != null)
+            {
+                rigidbody.velocity = Vector3.zero;
+                rigidbody.position = teleportTo;
+            }
+            body.transform.position = teleportTo;
+            Debug.Log("CROW_DIAG teleport to " + teleportTo.ToString("F2"));
         }
 
         // -crow-find: the renderers whose hierarchy path matches, whatever their state.
