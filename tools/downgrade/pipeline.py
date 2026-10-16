@@ -278,6 +278,8 @@ COMPAT_SOURCES = [
             'VitaLit',
             'Prewarm',
             'Fight',
+            'EnemyCost',
+            'ActionProfile',
         )
     ),
 ]
@@ -295,7 +297,17 @@ REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',
     *(
         HERE / 'rewriter' / f'{name}.cs'
-        for name in ('Redirect', 'Runtime', 'Patches', 'ScriptCost', 'IdleAudio', 'Alloc', 'LoadStats', 'PlayMakerData')
+        for name in (
+            'Redirect',
+            'Runtime',
+            'Patches',
+            'ScriptCost',
+            'IdleAudio',
+            'Alloc',
+            'LoadStats',
+            'PlayMakerData',
+            'ActionProfile',
+        )
     ),
 ]
 # Every .cs file in these folders belongs to one of the lists.

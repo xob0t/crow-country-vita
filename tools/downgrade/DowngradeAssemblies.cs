@@ -130,6 +130,8 @@ partial class DowngradeAssemblies
         new Pass("playmakerdata", Scope.All, FastActionFields),
         // LoadStats.cs
         new Pass("loadstats", Scope.All, TimeLoadMethods),
+        // ActionProfile.cs (profiling builds only: CROW_ACTION_PROFILE=1)
+        new Pass("profile", Scope.All, ProfileActions),
     };
 
     // Sites changed per rule (a pass, a row of a rule table, a game type a pass looks for),
@@ -389,6 +391,7 @@ partial class DowngradeAssemblies
         foreach (Pass pass in Passes)
         {
             if (pass.Scope == Scope.Game && !IsGameAssembly(module)) continue;
+            if (pass.Group == "profile" && !Profiling) continue;
             int sites = pass.Run(module);
             Count("pass " + pass.Name, sites);
             if (!lines.ContainsKey(pass.Group))

@@ -20,6 +20,8 @@ using UnityEngine.SceneManagement;
 // And measurements:
 //   -crow-loop-profile <s>          every s seconds, the main thread's time per player loop step
 //                                   (CROW_LOOP lines; see LoopProfile)
+//   -crow-physics-sync-probe        with it, each physics step's transform sync done and timed on its
+//                                   own just before the step (FixedUpdate.SyncTransforms(probe))
 //   -crow-loop-cpu                  with it, on the PS Vita, the main thread's run time per frame too
 //                                   (cpu=; the rest of the frame it waits: for jobs, the render thread,
 //                                   the GPU)
@@ -110,7 +112,7 @@ namespace CrowCompat
                 else if (pair[0] == "distance") shadowDistance = number;
                 else if (pair[0] == "resolution") shadowResolution = (int)number;
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
-                else if (!Perf.Change(pair[0], pair[1])) Debug.Log("CROW_QUALITY unknown change " + change);
+                else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1])) Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();
         }
@@ -378,7 +380,12 @@ namespace CrowCompat
                 var list = new List<PlayerLoopSystem>();
                 foreach (PlayerLoopSystem step in steps)
                 {
-                    list.Add(Marker(phase + "." + (step.type == null ? "?" : step.type.Name)));
+                    string name = step.type == null ? "?" : step.type.Name;
+                    // -crow-physics-sync-probe: the transforms' sync with the physics scene, which each
+                    // physics step does first, done (and timed) on its own just before the step.
+                    if (name == "PhysicsFixedUpdate" && Array.IndexOf(ProbeFiles.Args, "-crow-physics-sync-probe") >= 0)
+                        list.Add(SyncProbe(phase + ".SyncTransforms(probe)"));
+                    list.Add(Marker(phase + "." + name));
                     list.Add(step);
                 }
                 list.Add(Marker(phase + ".(end)"));
@@ -420,6 +427,21 @@ namespace CrowCompat
         {
             if (lastCamera != null) lastCamera[2] += now - cameraMark;
             lastCamera = null;
+        }
+
+        static PlayerLoopSystem SyncProbe(string label)
+        {
+            int index = labels.Count;
+            labels.Add(label);
+            return new PlayerLoopSystem
+            {
+                type = typeof(LoopProfile),
+                updateDelegate = () =>
+                {
+                    Mark(index);
+                    Physics.SyncTransforms();
+                }
+            };
         }
 
         static PlayerLoopSystem Marker(string label)
