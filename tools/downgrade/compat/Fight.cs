@@ -35,7 +35,9 @@ using UnityEngine.SceneManagement;
 //   -crow-fight-fire <s>       seconds between shots (default 0.7); empty clips are reloaded
 //   -crow-fight-kill <s>       every s seconds the target dies through its own damage FSM (default 8 in
 //                              real mode, 6 in stress; 0 for none): shots alone kill few, as Grinners
-//                              grab Mara and low shots at Blobs hit the floor
+//                              grab Mara and low shots at Blobs hit the floor. The death a bullet gives
+//                              (its event with a stand-in bullet); -crow-fight-kill-mode explosion gives
+//                              the grenade's instead (a Grinner blows apart into 22 dynamic pieces)
 //   -crow-fight-log            log the first 40 shots: target, aim, the target's health
 //   -crow-fight-dump           log one enemy of each type's colliders and bodies at the setup and
 //                              when measuring starts, and which of their layers collide
@@ -163,6 +165,7 @@ namespace CrowCompat
             string cycle = Value(args, "-crow-fight-cycle");
             if (cycle != null) cycleSets = cycle.Split('/');
             killEvery = Number(args, "-crow-fight-kill", mode == "stress" ? 6f : 8f);
+            explosionKills = Value(args, "-crow-fight-kill-mode") == "explosion";
             if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
             phase = Phase.Loading;
@@ -338,6 +341,7 @@ namespace CrowCompat
             public object HealthVariable;  // that FSM's "my health" (none on Blobs)
             public bool KillFailed, WasAlive, Forced;
             public float LastHealth = -1f;
+            public Func<float> ReadHealth;
             public Collider[] Colliders;
             public bool Copy;
         }
@@ -1302,6 +1306,10 @@ namespace CrowCompat
 
         static void CountHits()
         {
+            // Every 10th frame: a hit takes the enemy's FSM through several states, and its health stays
+            // down; deaths are seen by IsAlive. (Every frame, through reflection, this cost 2% of the
+            // main thread at the PS Vita's speed.)
+            if (Time.frameCount % 10 != 0) return;
             for (int i = 0; i < enemies.Count; i++)
             {
                 Enemy enemy = enemies[i];
@@ -1309,7 +1317,9 @@ namespace CrowCompat
                 if (enemy.WasAlive && !alive && !enemy.Forced) shotKills++;
                 enemy.WasAlive = alive;
                 if (!alive || enemy.HealthVariable == null) continue;
-                float health = Convert.ToSingle(rawValue.GetValue(enemy.HealthVariable, null), Inv);
+                if (enemy.ReadHealth == null) enemy.ReadHealth = Accessor<Func<float>>(enemy.HealthVariable, false);
+                if (enemy.ReadHealth == null) continue;
+                float health = enemy.ReadHealth();
                 if (enemy.LastHealth >= 0f && health < enemy.LastHealth - 1e-4f && !enemy.Forced) hits++;
                 enemy.LastHealth = health;
             }
@@ -1368,6 +1378,31 @@ namespace CrowCompat
         // -crow-fight-kill: the target dies through its own damage FSM, as from a last hit (Blobs and
         // Spiders: "hit"; the others: "my health" 0, then "explosion", which their FSMs take from a
         // grenade), so deaths and their effects come at a steady rate whatever the shots hit.
+        static bool explosionKills;
+        static GameObject fakeBullet;
+        static Func<string> damageState;
+
+        // The death a bullet gives (no explosion: a Grinner falls, as when it's shot): health just above
+        // the damage FSM's 0.01, its "the bullet" a stand-in at the enemy's middle (the headshot check
+        // reads its height), and the bullet event ("bullet", or "hit" where that is the bullet's event);
+        // "explosion" if neither moves the FSM out of its waiting state.
+        static void GunKill(Enemy enemy)
+        {
+            if (fakeBullet == null) fakeBullet = new GameObject("CrowFightBullet");
+            fakeBullet.transform.position = TargetPoint(enemy);
+            object variables = fsmComponent.GetProperty("FsmVariables").GetValue(enemy.Damage, null);
+            object bullet = variables.GetType().GetMethod("FindVariable", new[] { typeof(string) }).Invoke(variables, new object[] { "the bullet" });
+            if (bullet != null) rawValue.SetValue(bullet, fakeBullet, null);
+            if (enemy.HealthVariable != null) rawValue.SetValue(enemy.HealthVariable, 0.012f, null);
+            Func<string> state = StateOf(enemy.Damage);
+            string before = state();
+            foreach (string name in new[] { "bullet", "hit", "explosion" })
+            {
+                sendEvent.Invoke(enemy.Damage, new object[] { name });
+                if (state() != before) return;
+            }
+        }
+
         static void Kill(Enemy enemy)
         {
             if (enemy.Damage == null) return;
@@ -1375,8 +1410,13 @@ namespace CrowCompat
             {
                 if (sendEvent == null) sendEvent = fsmComponent.GetMethod("SendEvent", new[] { typeof(string) });
                 bool shootMe = enemy.Damage.gameObject.name == "shoot me";  // Blobs (no health: "hit" kills) and Spiders
-                if (enemy.HealthVariable != null) rawValue.SetValue(enemy.HealthVariable, 0f, null);
-                sendEvent.Invoke(enemy.Damage, new object[] { shootMe ? "hit" : "explosion" });
+                if (shootMe) sendEvent.Invoke(enemy.Damage, new object[] { "hit" });
+                else if (explosionKills)
+                {
+                    if (enemy.HealthVariable != null) rawValue.SetValue(enemy.HealthVariable, 0f, null);
+                    sendEvent.Invoke(enemy.Damage, new object[] { "explosion" });
+                }
+                else GunKill(enemy);
                 killed++;
                 enemy.Forced = true;
                 victim = enemy;
@@ -1450,6 +1490,33 @@ namespace CrowCompat
         }
 
         static int shotLog;
+        static MethodInfo totalPlaying;
+        static bool noTweens;
+
+        // DOTween's playing tweens now (DG.Tweening.DOTween.TotalPlayingTweens), -1 without DOTween.
+        static int PlayingTweens()
+        {
+            if (noTweens) return -1;
+            try
+            {
+                if (totalPlaying == null)
+                {
+                    Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween");
+                    totalPlaying = dotween == null ? null : dotween.GetMethod("TotalPlayingTweens", BindingFlags.Static | BindingFlags.Public);
+                    if (totalPlaying == null)
+                    {
+                        noTweens = true;
+                        return -1;
+                    }
+                }
+                return (int)totalPlaying.Invoke(null, null);
+            }
+            catch (Exception)
+            {
+                noTweens = true;
+                return -1;
+            }
+        }
 
         static float FlatSquared(Enemy enemy, Vector3 from)
         {
@@ -1585,6 +1652,16 @@ namespace CrowCompat
             line.Append(" reloads=").Append(reloads - reloadsStart).Append(" hits=").Append(hits - hitsStart)
                 .Append(" shotkills=").Append(shotKills - shotKillsStart);
             if (windowSet != null) line.Append(" set=").Append(windowSet);
+            int debrisBodies = 0, debrisAwake = 0;
+            foreach (Rigidbody rigid in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                if (EnemyCost.Debris(rigid))
+                {
+                    debrisBodies++;
+                    if (!rigid.IsSleeping()) debrisAwake++;
+                }
+            line.Append(" debris=").Append(debrisBodies).Append('/').Append(debrisAwake);
+            int tweens = PlayingTweens();
+            if (tweens >= 0) line.Append(" tweens=").Append(tweens);
             if (EnemySplit.Report() != null) line.Append(' ').Append(EnemySplit.Report());
             Debug.Log(line.ToString());
             LoopProfile.Flush("fight-w" + windowIndex);

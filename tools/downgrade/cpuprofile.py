@@ -1,5 +1,6 @@
 """Where the main thread's time goes at about the PS Vita's CPU speed: a sampling profiler on top of
-vitalike.py. The Windows IL2CPP player runs throttled as vitalike runs it; each time the duty
+vitalike.py. The Windows IL2CPP player (a hard-linked copy without Steam's files, started through
+run_player.py on a desktop of its own) runs throttled as vitalike runs it; each time the duty
 controller suspends the player (every --period ms of wall time, so every period * cap of the
 player's time), it walks the main thread's stack with dbghelp. At the end the addresses are named
 from the build's GameAssembly.pdb (IL2CPP's C++ for the game's code: PlayMakerFSM_Update_m..., an
@@ -23,8 +24,9 @@ import argparse
 import collections
 import ctypes
 import ctypes.wintypes as wt
+import os
 import re
-import subprocess
+import shutil
 import sys
 import threading
 import time
@@ -268,10 +270,47 @@ psapi = ctypes.WinDLL('psapi')
 psapi.GetModuleBaseNameW.argtypes = [wt.HANDLE, ctypes.c_void_p, wt.LPWSTR, wt.DWORD]
 
 
+class ModuleEntry(ctypes.Structure):  # MODULEENTRY32W
+    _fields_ = [
+        ('dwSize', wt.DWORD),
+        ('th32ModuleID', wt.DWORD),
+        ('th32ProcessID', wt.DWORD),
+        ('GlblcntUsage', wt.DWORD),
+        ('ProccntUsage', wt.DWORD),
+        ('modBaseAddr', ctypes.c_void_p),
+        ('modBaseSize', wt.DWORD),
+        ('hModule', wt.HMODULE),
+        ('szModule', wt.WCHAR * 256),
+        ('szExePath', wt.WCHAR * 260),
+    ]
+
+
+SNAPSHOT_MODULES = {}  # base -> module file name, from snapshot_modules
+
+
+def snapshot_modules(pid):
+    """The process's modules by base address (Toolhelp), for when GetModuleBaseNameW can't read them."""
+    kernel32.Module32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(ModuleEntry)]
+    kernel32.Module32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(ModuleEntry)]
+    snapshot = kernel32.CreateToolhelp32Snapshot(0x8 | 0x10, pid)  # TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32
+    entry = ModuleEntry()
+    entry.dwSize = ctypes.sizeof(entry)
+    found = {}
+    try:
+        ok = kernel32.Module32FirstW(snapshot, ctypes.byref(entry))
+        while ok:
+            found[entry.modBaseAddr] = entry.szModule
+            ok = kernel32.Module32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    SNAPSHOT_MODULES.update(found)
+    return found
+
+
 def module_name(process, base):
     name = ctypes.create_unicode_buffer(260)
     psapi.GetModuleBaseNameW(process, ctypes.c_void_p(base), name, 260)
-    return name.value or f'{base:#x}'
+    return name.value or SNAPSHOT_MODULES.get(base) or f'{base:#x}'
 
 
 class SamplingDuty(vitalike.Duty):
@@ -313,8 +352,44 @@ class SamplingDuty(vitalike.Duty):
 HEARTBEAT = re.compile(r'^HEARTBEAT t=\S+ scene=(\S+)', re.M)
 
 
+COPY = ROOT / 'work' / 'cpuprofile' / 'player'
+
+
+def prepare_player(build: Path):
+    """A hard-linked copy of the IL2CPP build (nothing copied twice), without Steam's steam_api library
+    and steam_appid.txt; refreshed when the build's GameAssembly.dll changes."""
+    source = build / 'GameAssembly.dll'
+    if not source.exists():
+        sys.exit(f'No IL2CPP player in {build}: pipeline.py build --platform windows --backend il2cpp')
+    stamp = f'{source.stat().st_size}:{source.stat().st_mtime_ns}'
+    marker = COPY / 'cpuprofile-source.txt'
+    if marker.exists() and marker.read_text() == stamp:
+        return
+    if COPY.exists():
+        shutil.rmtree(COPY)
+    for item in build.rglob('*'):
+        if item.name.lower().startswith(('steam_api', 'steam_appid')):
+            continue
+        target = COPY / item.relative_to(build)
+        if item.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(item, target)
+        except OSError:
+            shutil.copy2(item, target)
+    marker.write_text(stamp)
+
+
 def run(args, flags):
-    vitalike.prepare_player(args.build.resolve())
+    """The player runs through run_player.py (a desktop of its own, windowed, muted); once it runs, the
+    duty cycle and the sampler attach to it, and the main thread's stack is sampled in each off slice."""
+    import run_player
+
+    kernel32.OpenProcess.restype = wt.HANDLE
+    kernel32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
+    prepare_player(args.build.resolve())
     out = (OUT / args.tag).resolve()
     out.mkdir(parents=True, exist_ok=True)
     for stale in out.glob('*'):
@@ -326,43 +401,66 @@ def run(args, flags):
         flags += ['-crow-heartbeat', '5']
     if '-crow-quit-after' not in flags:
         flags += ['-crow-quit-after', '1200']
-    command = [
-        str(vitalike.COPY / 'CrowCountry.exe'),
-        '-screen-fullscreen', '0', '-screen-width', '960', '-screen-height', '544', '-logFile', '-',
-        '-crow-no-vsync', '-crow-windowed', '-crow-mute', *flags,
-    ]  # fmt: skip
+    flags = ['-crow-no-vsync', *flags]
     game_mask, controller_mask = vitalike.pick_cpus(args.cores)
     (out / 'cpuprofile.txt').write_text(
         f'cap {args.cap}% period {args.period} ms cores {args.cores} scene {args.scene} '
         f'skip {args.skip} beats {args.beats}\n'
-        f'args {" ".join(command[1:])}\n'
+        f'args {" ".join(flags)} (through run_player.py)\n'
     )
-    job = vitalike.job_object(vitalike.JOB_LIMIT_AFFINITY | vitalike.JOB_KILL_ON_CLOSE, game_mask)
-    guards = vitalike.start_guards(game_mask) if args.guard else None
     log_path = out / 'player.log'
-    log = log_path.open('w', encoding='utf-8', errors='replace')
-    process = subprocess.Popen(command, cwd=vitalike.COPY, stdout=log, stderr=subprocess.STDOUT, creationflags=0x4)
-    handle = wt.HANDLE(int(process._handle))
-    sampler = Sampler(handle, first_thread(process.pid))
-    started = time.time()
-    duty = None
-    try:
-        vitalike.check(kernel32.AssignProcessToJobObject(job, handle), 'AssignProcessToJobObject')
-        vitalike.check(kernel32.SetPriorityClass(handle, 0x80), 'SetPriorityClass')
+    attached = {}
+
+    def on_start(pid):
+        handle = wt.HANDLE(kernel32.OpenProcess(0x1F0FFF, False, pid))  # PROCESS_ALL_ACCESS
+        if not handle:
+            return None
+        kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(game_mask))
+        kernel32.SetPriorityClass(handle, 0x80)  # HIGH_PRIORITY_CLASS
+        guards = vitalike.start_guards(game_mask) if args.guard else None
+        sampler = Sampler(handle, first_thread(pid))
+        attached['pid'] = pid
         duty = SamplingDuty(
             handle, args.cap / 100, args.period / 1000, controller_mask, guards[1] if guards else (), sampler=sampler
         )
         duty.start()
-        threading.Thread(target=vitalike.offscreen, args=(process.pid,), daemon=True).start()
+        attached.update(handle=handle, sampler=sampler, duty=duty, guards=guards)
+
+        def stop():
+            duty.stop.set()
+            duty.join(5)
+            if guards is not None:
+                kernel32.TerminateJobObject(guards[0], 0)
+                kernel32.CloseHandle(guards[0])
+
+        return stop
+
+    exe = COPY / 'CrowCountry.exe'
+    runner = threading.Thread(
+        target=run_player.run,
+        args=(exe, log_path, flags),
+        kwargs={'timeout': args.timeout, 'on_start': on_start},
+        daemon=True,
+    )
+    started = time.time()
+    runner.start()
+    while 'sampler' not in attached and runner.is_alive() and time.time() - started < 120:
+        time.sleep(0.5)
+    if 'sampler' not in attached:
+        sys.exit('the player did not start')
+    sampler, duty, handle = attached['sampler'], attached['duty'], attached['handle']
+    try:
         target = None
         counted = seen = 0
-        while process.poll() is None and time.time() - started < args.timeout:
+        while runner.is_alive() and time.time() - started < args.timeout:
             time.sleep(1)
+            if not log_path.exists():
+                continue
             beats = HEARTBEAT.findall(log_path.read_text(encoding='utf-8', errors='replace'))
             if not beats:
                 continue
             if not sampler.ready:
-                sampler.init_symbols(vitalike.COPY)  # modules are loaded by the first heartbeat
+                sampler.init_symbols(COPY)  # modules are loaded by the first heartbeat
             scene = beats[-1]
             if sampler.on and scene != target:  # the samples since the last heartbeat include the load
                 print(f'{target} ended (now {scene}) after {sum(1 for b in beats if b == target) - counted} heartbeats')
@@ -385,22 +483,18 @@ def run(args, flags):
             if sampler.on and in_scene - counted >= args.beats:
                 break
         else:
-            if process.poll() is None:
+            if runner.is_alive():
                 print(f'timed out after {args.timeout} s')
     finally:
         sampler.on = False
-        if duty is not None:
-            duty.stop.set()
-            duty.join(5)
+        duty.stop.set()
+        duty.join(5)
         ntdll.NtSuspendProcess(handle)
+        modules = snapshot_modules(attached['pid'])
+        (out / 'modules.txt').write_text(''.join(f'{base:#x} {name}\n' for base, name in sorted(modules.items())))
         names = sampler.names() if sampler.ready else {}
-        process.kill()
-        process.wait()
-        log.close()
-        kernel32.CloseHandle(job)
-        if guards is not None:
-            kernel32.TerminateJobObject(guards[0], 0)
-            kernel32.CloseHandle(guards[0])
+        kernel32.TerminateProcess(handle, 1)
+        runner.join(30)
     total = sum(sampler.stacks.values())
     with open(out / 'stacks.txt', 'w', encoding='utf-8') as file:
         for stack, count in sampler.stacks.most_common():
@@ -512,7 +606,7 @@ def report(tag, top=60):
         frames, _, count = line.rpartition(' ')
         stacks.append((frames.split(';'), int(count)))
     if raw:
-        names = symbolize(sorted({f for frames, _ in stacks for f in frames}), vitalike.COPY)
+        names = symbolize(sorted({f for frames, _ in stacks for f in frames}), COPY)
         stacks = [([names[f] for f in frames], count) for frames, count in stacks]
         with open(named, 'w', encoding='utf-8') as file:
             for frames, count in stacks:

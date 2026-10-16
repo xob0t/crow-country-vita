@@ -46,6 +46,15 @@ using UnityEngine.SceneManagement;
 //   emerge=on|off     the enabled mesh renderers of awake enemies that share a parent, one renderer
 //                     with a submesh each (readable meshes), the originals off; and back (what fewer
 //                     renderers would save: the game's later switches of single parts aren't followed)
+//   einertia=fixed|auto the enemies' root bodies' centre of mass and inertia set to what they are now
+//                     (Unity then stops working them out again when a child collider moves), and back
+//   eanimcol=off|on   the enemies' enabled colliders below their root object off, and back (measurement)
+//   edebrissleep=on|off every dynamic body but the player's, the live enemies' roots and the bullets (the
+//                     death debris: Grinner spikes and shards, Blob chunks, Spindle limbs) gets a sleep
+//                     threshold of 0.5 instead of its own, so a settled piece sleeps; and back
+//   eslice=on|off     awake enemies' FSMs (but Pause/Cull, spawn/kill, the damage FSMs and any with delayed
+//                     events) update every other frame, half the enemies on even frames, half on odd
+//                     (Fsm.ManualUpdate; no time correction yet: a measurement of what slicing saves)
 //   eculled=off|on    the behaviours of enemies paused beyond the camera's reach (their Pause/Cull
 //                     FSM not "visible") off, but that FSM and spawn/kill, and back on
 // Part of CrowCompat; see Compat2018.cs.
@@ -387,6 +396,72 @@ namespace CrowCompat
                 case "emerge":
                     MergeExperiment(value == "on");
                     return true;
+                case "einertia":
+                    foreach (GameObject enemy in Enemies())
+                    {
+                        var body = enemy.GetComponent<Rigidbody>();
+                        if (body == null || !enemy.activeInHierarchy) continue;
+                        if (value == "fixed")
+                        {
+                            body.centerOfMass = body.centerOfMass;
+                            body.inertiaTensor = body.inertiaTensor;
+                            body.inertiaTensorRotation = body.inertiaTensorRotation;
+                        }
+                        else
+                        {
+                            body.ResetCenterOfMass();
+                            body.ResetInertiaTensor();
+                        }
+                    }
+                    Debug.Log("CROW_ENEMY einertia=" + value);
+                    return true;
+                case "eanimcol":
+                    if (value == "off")
+                    {
+                        foreach (GameObject enemy in Enemies())
+                            foreach (Collider collider in enemy.GetComponentsInChildren<Collider>(false))
+                                if (collider.enabled && collider.gameObject != enemy)
+                                {
+                                    collider.enabled = false;
+                                    animOff.Add(collider);
+                                }
+                    }
+                    else
+                    {
+                        foreach (Collider collider in animOff)
+                            if (collider != null) collider.enabled = true;
+                        animOff.Clear();
+                    }
+                    Debug.Log("CROW_ENEMY eanimcol=" + value + " (" + animOff.Count + " off)");
+                    return true;
+                case "edebrissleep":
+                    if (value == "on")
+                    {
+                        foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                        {
+                            if (!Debris(body) || sleepSaved.ContainsKey(body)) continue;
+                            sleepSaved[body] = body.sleepThreshold;
+                            body.sleepThreshold = 0.5f;
+                        }
+                    }
+                    else
+                    {
+                        foreach (KeyValuePair<Rigidbody, float> pair in sleepSaved)
+                            if (pair.Key != null) pair.Key.sleepThreshold = pair.Value;
+                        sleepSaved.Clear();
+                    }
+                    Debug.Log("CROW_ENEMY edebrissleep=" + value + " (" + sleepSaved.Count + " bodies)");
+                    return true;
+                case "eslice":
+                    slicing = value == "on";
+                    if (!slicing) Unslice();
+                    else if (!sliceHooked)
+                    {
+                        sliceHooked = true;
+                        Canvas.willRenderCanvases += SliceFrame;
+                    }
+                    Debug.Log("CROW_ENEMY eslice=" + value);
+                    return true;
                 case "eculled":
                     Toggle(key, value, Culled);
                     return true;
@@ -395,6 +470,87 @@ namespace CrowCompat
         }
 
         static readonly List<Rigidbody> madeKinematic = new List<Rigidbody>();
+
+        // eslice: per enemy, its sliceable FSMs' ManualUpdate setters and DelayedEvents lists.
+        static bool slicing, sliceHooked;
+        static float sliceScanAt;
+        class Sliced
+        {
+            public GameObject Enemy;
+            public Component Cull;
+            public List<Action<bool>> Manual = new List<Action<bool>>();
+            public List<System.Collections.ICollection> Delayed = new List<System.Collections.ICollection>();
+            public int Parity;
+        }
+        static readonly List<Sliced> sliced = new List<Sliced>();
+        static readonly string[] NeverSliced = { "Pause/Cull", "Pause/Cull?", "spawn/kill", "ExplorationMode?", "shoot me" };
+
+        static void SliceFrame()
+        {
+            if (!slicing) return;
+            if (Time.realtimeSinceStartup >= sliceScanAt)
+            {
+                sliceScanAt = Time.realtimeSinceStartup + 2f;
+                SliceScan();
+            }
+            int frame = Time.frameCount + 1;  // set now for the next frame's Update
+            foreach (Sliced enemy in sliced)
+            {
+                if (enemy.Enemy == null) continue;
+                bool awake = enemy.Enemy.activeInHierarchy && enemy.Cull != null &&
+                             (string)activeStateProperty.GetValue(enemy.Cull, null) == "visible";
+                bool skip = awake && (frame & 1) == enemy.Parity;
+                for (int i = 0; i < enemy.Manual.Count; i++)
+                    enemy.Manual[i](skip && (enemy.Delayed[i] == null || enemy.Delayed[i].Count == 0));
+            }
+        }
+
+        static System.Reflection.PropertyInfo activeStateProperty;
+
+        static void SliceScan()
+        {
+            Type fsmType = Type.GetType("PlayMakerFSM, PlayMaker");
+            if (fsmType == null) return;
+            activeStateProperty = fsmType.GetProperty("ActiveStateName");
+            System.Reflection.PropertyInfo fsmProperty = fsmType.GetProperty("Fsm");
+            var known = new HashSet<GameObject>();
+            foreach (Sliced s in sliced) known.Add(s.Enemy);
+            foreach (GameObject enemy in Enemies())
+            {
+                if (known.Contains(enemy)) continue;
+                var entry = new Sliced { Enemy = enemy, Parity = sliced.Count & 1 };
+                foreach (Component fsm in enemy.GetComponentsInChildren(fsmType, true))
+                {
+                    string owner = fsm.gameObject.name;
+                    if (owner == "Pause/Cull" || owner == "Pause/Cull?") entry.Cull = fsm;
+                    if (Array.IndexOf(NeverSliced, owner) >= 0 || owner.StartsWith("damage / kill", StringComparison.Ordinal)) continue;
+                    object inner = fsmProperty.GetValue(fsm, null);
+                    System.Reflection.PropertyInfo manual = inner.GetType().GetProperty("ManualUpdate");
+                    System.Reflection.PropertyInfo delayed = inner.GetType().GetProperty("DelayedEvents");
+                    if (manual == null) continue;
+                    entry.Manual.Add((Action<bool>)Delegate.CreateDelegate(typeof(Action<bool>), inner, manual.GetSetMethod()));
+                    entry.Delayed.Add(delayed == null ? null : delayed.GetValue(inner, null) as System.Collections.ICollection);
+                }
+                sliced.Add(entry);
+            }
+        }
+
+        static void Unslice()
+        {
+            foreach (Sliced enemy in sliced)
+                foreach (Action<bool> manual in enemy.Manual) manual(false);
+        }
+        static readonly Dictionary<Rigidbody, float> sleepSaved = new Dictionary<Rigidbody, float>();
+
+        // Death debris, roughly: a dynamic body that isn't the player's, an enemy's root or a bullet.
+        internal static bool Debris(Rigidbody body)
+        {
+            if (body == null || body.isKinematic || !body.gameObject.activeInHierarchy) return false;
+            string name = body.name;
+            if (name.StartsWith("Enemy ", StringComparison.Ordinal) || name.EndsWith("bullet", StringComparison.OrdinalIgnoreCase)) return false;
+            return body.transform.root.name.IndexOf("CharacterCameraPrefab", StringComparison.Ordinal) < 0;
+        }
+        static readonly List<Collider> animOff = new List<Collider>();
         static readonly List<GameObject> mergedObjects = new List<GameObject>();
         static readonly List<Renderer> mergedSources = new List<Renderer>();
 
