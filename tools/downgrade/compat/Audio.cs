@@ -440,7 +440,17 @@ namespace CrowCompat
                     else Debug.Log("CROW_THREADS -crow-thread wants <name>:<priority>:<cpus>, not " + args[i + 1]);
                 }
             if (!report && settings.Count == 0) return;
-            if (Application.platform != RuntimePlatform.PSP2) return;
+            Start();
+        }
+
+        static bool started;
+
+        // The sampler, once (-crow-audio and Loading's -crow-load-cpu both want it).
+        internal static bool Start()
+        {
+            if (started) return available;
+            started = true;
+            if (Application.platform != RuntimePlatform.PSP2) return false;
             try
             {
                 Name(SelfNative(), null);
@@ -449,9 +459,10 @@ namespace CrowCompat
             catch (Exception e)
             {
                 Debug.Log("CROW_THREADS no CrowClock thread functions (" + e.GetType().Name + ": " + e.Message + ")");
-                return;
+                return false;
             }
             new Thread(Sample) { IsBackground = true, Name = "CrowThreadSample" }.Start();
+            return true;
         }
 
         // Unity's loading thread (UnityPreload) runs on CPU 2 by the player's choice, beside FMOD's mixer,
@@ -595,7 +606,16 @@ namespace CrowCompat
         // A CROW_THREADS line: each known thread's share of a CPU over the window, the busiest first.
         internal static void Report(bool quiet)
         {
-            if (!available) return;
+            string shares = Shares();
+            if (shares == null || quiet) return;
+            Debug.Log("CROW_THREADS " + shares);
+        }
+
+        // Each known thread's share of a CPU since the last call, the busiest first (null without the
+        // plugin). One caller only: Report's (-crow-audio) or Loading's -crow-load-cpu thread.
+        internal static string Shares()
+        {
+            if (!available) return null;
             long now = wall.ElapsedTicks;
             double us = (now - threadWall) * 1e6 / Stopwatch.Frequency;
             bool first = threadWall == 0;
@@ -633,8 +653,7 @@ namespace CrowCompat
                 rows.Add(new KeyValuePair<double, string>(share, Short(entry.Name) + entry.Tag + "=" + share.ToString("F0", CultureInfo.InvariantCulture) +
                     "%[p" + info[1].ToString("x") + " c" + Cpus(info[2]) + " s" + (rounds > 0 ? (100 * samples / rounds).ToString(CultureInfo.InvariantCulture) : "?") + "]"));
             }
-            if (quiet) return;
-            Debug.Log("CROW_THREADS " + string.Join(" ", rows.OrderByDescending(r => r.Key).Select(r => r.Value).ToArray()));
+            return string.Join(" ", rows.OrderByDescending(r => r.Key).Select(r => r.Value).ToArray());
         }
 
         // "82810B90 Unity_main_thread" -> "Unity_main_thread"; spaces to underscores.

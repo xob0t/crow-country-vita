@@ -124,6 +124,11 @@ partial class DowngradeAssemblies
         new Pass("idleaudio", Scope.All, RouteAudioSourcePlays),
         // Alloc.cs
         new Pass("alloc", Scope.Game, RecyclePlayMakerTweens),
+        // PlayMakerData.cs
+        new Pass("playmakerdata", Scope.All, SerializeActionDataAsArrays),
+        new Pass("playmakerdata", Scope.All, FastActionFields),
+        // LoadStats.cs
+        new Pass("loadstats", Scope.All, TimeLoadMethods),
     };
 
     // Sites changed per rule (a pass, a row of a rule table, a game type a pass looks for),

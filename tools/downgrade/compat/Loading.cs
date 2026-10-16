@@ -20,6 +20,12 @@ using Debug = UnityEngine.Debug;
 //   -crow-mcs-time          time MeshCombineStudio's run-time combining: each MeshCombiner that would
 //                           combine in its Start combines when its scene has loaded, under a
 //                           stopwatch, instead (CROW_MCS lines, per combiner and per scene).
+//   -crow-load-cpu [ms]     through each area load, every ms (default 250), each CPU's load and each
+//                           game thread's share (CROW_LOADCPU, from a thread of its own; with
+//                           -crow-gc-log the collections in the window, with -crow-load-stats the sums)
+//   -crow-load-stats        PlayMaker's load-time methods timed per thread (CROW_LOADSTATS after each
+//                           area load): OnAfterDeserialize, InitData, LoadActions, CreateAction, ...
+//   -crow-read-test <files> read build files at startup and log the card's MB/s (CROW_READ)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -38,6 +44,15 @@ namespace CrowCompat
                 Trace.Install(given ? ms : 200f);
             }
             if (args.Contains("-crow-mcs-time")) CombineTimer.Install();
+            if (args.Contains("-crow-load-stats")) LoadStats.Install();
+            int read = Array.IndexOf(args, "-crow-read-test");
+            if (read >= 0 && read + 1 < args.Length) ReadTest(args[read + 1]);
+            int cpu = Array.IndexOf(args, "-crow-load-cpu");
+            if (cpu >= 0)
+            {
+                int ms;
+                LoadCpu.Install(cpu + 1 < args.Length && int.TryParse(args[cpu + 1], out ms) ? ms : 250);
+            }
             MaraScene.Install();
             ScenePrefetch.Install(args);
             SceneGap.Install(args);
@@ -134,6 +149,111 @@ namespace CrowCompat
                     loading = null;
                 }
                 Array.Clear(ticks, 0, ticks.Length);
+            }
+        }
+
+        // -crow-read-test <files>: how fast the card reads the build's data. On a thread of its own at
+        // startup, each file (comma-separated, under Application.dataPath, e.g. level5,sharedassets5.assets)
+        // read whole, in 1 MB blocks and then in 64 KB blocks (CROW_READ lines: MB, ms, MB/s).
+        static void ReadTest(string files)
+        {
+            string root = Application.dataPath;
+            new System.Threading.Thread(() =>
+            {
+                foreach (int block in new[] { 1 << 20, 64 << 10 })
+                    foreach (string file in files.Split(','))
+                    {
+                        string path = root + "/" + file;
+                        try
+                        {
+                            var buffer = new byte[block];
+                            var watch = Stopwatch.StartNew();
+                            long total = 0;
+                            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read, 4096))
+                            {
+                                int n;
+                                while ((n = stream.Read(buffer, 0, block)) > 0) total += n;
+                            }
+                            double ms = watch.Elapsed.TotalMilliseconds;
+                            Debug.Log("CROW_READ " + file + " block=" + (block >> 10) + "KB MB=" + (total / 1048576.0).ToString("F1") + " ms=" + ms.ToString("F0") +
+                                      " MB/s=" + (total / 1048576.0 / (ms / 1000.0)).ToString("F1"));
+                        }
+                        catch (Exception e)
+                        {
+                            Debug.Log("CROW_READ " + path + " failed: " + e.GetType().Name + " " + e.Message);
+                        }
+                    }
+            }) { IsBackground = true, Name = "CrowReadTest" }.Start();
+        }
+
+        // -crow-load-cpu [ms]: through each area load (from the gap's first step, or any scene load,
+        // to 8 s after the area's sceneLoaded), every ms (default 250) a CROW_LOADCPU line from a thread
+        // of its own: each CPU's load and each game thread's share of a CPU over the window (the main
+        // thread, UnityPreload, the render worker, FMOD's), from the kernel (Audio.cs's Threads).
+        // The main thread busy with UnityPreload idle is integration (Awake, OnEnable) or the
+        // unused-asset pass; UnityPreload busy is reading and deserializing. A window with no line is a
+        // garbage collection (it stops this thread too). Not with -crow-audio (one reader of the shares).
+        internal static class LoadCpu
+        {
+            static readonly Stopwatch clock = Stopwatch.StartNew();
+            static long begun = -1, endAt = -1;
+            static int seenRuns;
+
+            internal static void Install(int ms)
+            {
+                if (!Threads.Start())
+                {
+                    Debug.Log("CROW_LOADCPU no thread accounting on this player");
+                    return;
+                }
+                SceneManager.sceneLoaded += (scene, mode) =>
+                {
+                    if (scene.name == SceneGap.Scene || scene.name == MaraScene.Scene) return;
+                    Begin();
+                    endAt = clock.ElapsedMilliseconds + 8000;
+                };
+                new System.Threading.Thread(() => Run(Math.Max(20, ms))) { IsBackground = true, Name = "CrowLoadCpu" }.Start();
+                Debug.Log("CROW_LOADCPU every " + ms + " ms through loads");
+            }
+
+            internal static void Begin()
+            {
+                if (begun < 0) begun = clock.ElapsedMilliseconds;
+                endAt = long.MaxValue;
+            }
+
+            static void Run(int ms)
+            {
+                var line = new StringBuilder();
+                bool was = false;
+                while (true)
+                {
+                    System.Threading.Thread.Sleep(ms);
+                    long now = clock.ElapsedMilliseconds;
+                    bool on = begun >= 0 && now < endAt;
+                    if (!on)
+                    {
+                        if (was) begun = -1;
+                        was = false;
+                        continue;
+                    }
+                    if (!was)
+                    {
+                        Threads.Shares();  // start the window here
+                        seenRuns = Alloc.RunsEnded;
+                    }
+                    was = true;
+                    line.Length = 0;
+                    line.Append("CROW_LOADCPU +").Append(now - begun).Append(" ms");
+                    int runs;
+                    double paused = Alloc.PausesSince(seenRuns, out runs);
+                    seenRuns += runs;
+                    if (runs > 0) line.Append(" gc=").Append(runs).Append('x').Append(paused.ToString("F0")).Append("ms");
+                    Threads.AppendCpu(line);
+                    line.Append(' ').Append(Threads.Shares());
+                    if (LoadStats.On) line.Append(" | ").Append(LoadStats.Line());
+                    Debug.Log(line.ToString());
+                }
             }
         }
 
@@ -397,13 +517,16 @@ namespace CrowCompat
     // memory free after the load this way, 5 MB without. Costs about 3 s on the PS Vita (2.4 s of
     // unused-asset pass, 0.6 s of collection). The player (DontDestroyOnLoad) stays. On the PS Vita
     // unless -crow-no-gap; on other players with -crow-gap. CROW_GAP lines time the steps.
-    // -crow-gap-additive: the area then loads additively instead of as a single-mode load, which
-    // runs Resources.UnloadUnusedAssets again once the area is in: a second pass over every object,
-    // with nothing left to free after the gap's, at the load's peak of memory (both PS Vita crashes
-    // of 15-16 Oct, Entrance -> Station Square and Station Square -> Pool, ran out of main memory in
-    // that pass, growing its object tables by 3 MB). The area becomes the active scene in the first
-    // sceneLoaded handler, before the game's; what its Awake and OnEnable made went into the gap,
-    // which was active then, and moves into the area before the gap is unloaded.
+    // From the gap the area loads additively (-crow-gap-single: as a single-mode load, as before). A
+    // single-mode load runs Resources.UnloadUnusedAssets and a collection again once the area is in
+    // (on the PS Vita 3.2-3.7 s at the end of the load's frame, after sceneLoaded): a second pass over
+    // every object, with nothing left to free after the gap's, at the load's peak of memory (both PS
+    // Vita crashes of 15-16 Oct, Entrance -> Station Square and Station Square -> Pool, ran out of
+    // main memory in that pass, growing its object tables by 3 MB). The area becomes the active scene
+    // in the first sceneLoaded handler, before the game's; what its Awake and OnEnable made went into
+    // the gap, which was active then, and moves into the area before the gap is unloaded. The areas
+    // have no lightmaps or light probes, which an additive load would treat otherwise. -crow-gap-additive
+    // is accepted and changes nothing.
     public static class SceneGap
     {
         public const string Scene = "CrowGap";
@@ -415,7 +538,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            additive = args.Contains("-crow-gap-additive");
+            additive = !args.Contains("-crow-gap-single");
             if (additive) SceneManager.sceneLoaded += Arrived;
         }
 
@@ -450,6 +573,7 @@ namespace CrowCompat
             target = name;
             clock.Reset();
             clock.Start();
+            Loading.LoadCpu.Begin();  // -crow-load-cpu
             Scene gap = SceneManager.GetSceneByName(Scene);  // a load right after the last gap's, before it went
             if (!gap.IsValid()) gap = SceneManager.CreateScene(Scene);
             SceneManager.SetActiveScene(gap);
@@ -503,7 +627,7 @@ namespace CrowCompat
             SceneManager.LoadScene(name, LoadSceneMode.Additive);
         }
 
-        // -crow-gap-additive: the area in, before the other sceneLoaded handlers (hooked at startup).
+        // The area in (additive), before the other sceneLoaded handlers (hooked at startup).
         static void Arrived(Scene scene, LoadSceneMode mode)
         {
             if (arriving == null || mode != LoadSceneMode.Additive || scene.name != arriving) return;
@@ -522,6 +646,78 @@ namespace CrowCompat
                 SceneManager.UnloadSceneAsync(gap);
             }
             Debug.Log("CROW_GAP " + scene.name + " in after " + clock.ElapsedMilliseconds + " ms (additive, " + moved + " objects its load made moved in from the gap)");
+        }
+    }
+
+    // -crow-load-stats: PlayMaker's load-time methods timed (the rewriter's TimeLoadMethods,
+    // rewriter/LoadStats.cs, wraps each in Start and Stop), summed per method and per thread (the
+    // main thread or another: OnAfterDeserialize runs on the loading thread while a scene is read).
+    // Loading's -crow-load-cpu lines carry the sums so far; a CROW_LOADSTATS line follows each area load.
+    public static class LoadStats
+    {
+        public static readonly string[] Names = { "fsmDeserialize", "fsmAwake", "fsmEnable", "fsmStart", "initData", "loadActions", "fsmInit", "preprocess", "createAction", "loadField" };
+        static readonly long[] ticks = new long[32];
+        static readonly int[] counts = new int[32];
+        static volatile bool on;
+        static System.Threading.Thread main;
+
+        internal static bool On { get { return on; } }
+
+        internal static void Install()
+        {
+            main = System.Threading.Thread.CurrentThread;
+            on = true;
+            SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                if (scene.name == SceneGap.Scene) return;
+                Debug.Log("CROW_LOADSTATS " + scene.name.Replace(' ', '_') + " " + Line());
+                Array.Clear(ticks, 0, ticks.Length);
+                Array.Clear(counts, 0, counts.Length);
+            };
+        }
+
+        public static long Start()
+        {
+            return on ? Stopwatch.GetTimestamp() : 0L;
+        }
+
+        public static void Stop(long start, int slot)
+        {
+            if (start == 0L) return;
+            if (System.Threading.Thread.CurrentThread != main) slot += 16;
+            System.Threading.Interlocked.Add(ref ticks[slot], Stopwatch.GetTimestamp() - start);
+            System.Threading.Interlocked.Increment(ref counts[slot]);
+        }
+
+        // "name=ms/calls" for each slot used, the loading thread's with an @ (fsmDeserialize@=...).
+        internal static string Line()
+        {
+            var line = new StringBuilder();
+            for (int i = 0; i < 32; i++)
+            {
+                if (counts[i] == 0 || (i & 15) >= Names.Length) continue;
+                if (line.Length > 0) line.Append(' ');
+                line.Append(Names[i & 15]).Append(i >= 16 ? "@" : "").Append('=')
+                    .Append((ticks[i] * 1000.0 / Stopwatch.Frequency).ToString("F0")).Append('/').Append(counts[i]);
+            }
+            return line.ToString();
+        }
+    }
+
+    // For PlayMaker's ActionData, whose serialized lists the rewriter makes arrays (rewriter/
+    // PlayMakerData.cs): one shared empty array per element type (the constructor's initial values, and
+    // what LoadActions puts in place of each empty array the serializer made), and List<T>.Contains.
+    public static class EmptyArray<T>
+    {
+        public static readonly T[] Value = new T[0];
+    }
+
+    public static class ArrayHelper
+    {
+        public static bool Contains<T>(T[] array, T item)
+        {
+            if (array == null) throw new NullReferenceException();
+            return Array.IndexOf(array, item) >= 0;
         }
     }
 

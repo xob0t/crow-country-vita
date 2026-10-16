@@ -294,7 +294,7 @@ REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',
     *(
         HERE / 'rewriter' / f'{name}.cs'
-        for name in ('Redirect', 'Runtime', 'Patches', 'ScriptCost', 'IdleAudio', 'Alloc')
+        for name in ('Redirect', 'Runtime', 'Patches', 'ScriptCost', 'IdleAudio', 'Alloc', 'LoadStats', 'PlayMakerData')
     ),
 ]
 # Every .cs file in these folders belongs to one of the lists.

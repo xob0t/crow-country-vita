@@ -69,6 +69,21 @@ namespace CrowCompat
         static long[] runStart, runEnd;
         static int runsStarted, runsEnded;
 
+        // For Loading's -crow-load-cpu (with -crow-gc-log): collections ended so far, and the pause
+        // (ms) of each of those after a given count (at most the ring's 64).
+        internal static int RunsEnded { get { return runsEnded; } }
+
+        internal static double PausesSince(int seen, out int count)
+        {
+            int ended = runsEnded;
+            count = 0;
+            double ms = 0;
+            if (runStart == null) return 0;
+            for (int i = Math.Max(seen, ended - Runs); i < ended; i++, count++)
+                ms += (runEnd[i % Runs] - runStart[i % Runs]) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            return ms;
+        }
+
         // Allocations per class (an open-addressed table keyed by Il2CppClass*).
         const int Slots = 8192;
         static IntPtr[] classes;
