@@ -13,6 +13,10 @@ using UnityEngine.SceneManagement;
 //                     each; Dynamic takes it once a frame from the source's movement. Station Square's
 //                     fight: AudioFixedUpdate 3.8 -> 2.5 ms a frame with 6 enemies awake, 32 -> 7 with 18.
 //                     Set on the loaded scenes' sources (and the player's) a second after each load.
+//   -crow-enemy-readable
+//                     the enemies' MeshCombineStudio combiners keep their combined meshes readable
+//                     (makeMeshesUnreadable off, set as each scene loads, before they combine), so the
+//                     enemies' part renderers can be merged across materials (emerge=)
 //   -crow-corpses off|game
 //                     a dead enemy's scripts off once it lies still (off; game, the default, keeps them:
 //                     on the PS Vita it saved ~0.3 ms once the Blob trail's exceptions were gone). A corpse keeps its FSMs running for the rest of the area (a dead Grinner 11:
@@ -36,6 +40,12 @@ using UnityEngine.SceneManagement;
 //   erefl=off|on      the same for reflection probes (both log the scene's probe counts)
 //   etrail=off|on     the Blobs' trails off (BlobTrailSpawn off, its pieces hidden), and back on: what
 //                     the trails cost (a visible change: for measurements only)
+//   edebris=out|in    each enemy's topmost inactive subtrees (death debris, mostly) moved to a root of
+//                     their own, and back to their places: whether the physics step's pose writes cost by
+//                     hierarchy size (for measurements with no deaths: the death code expects them in place)
+//   emerge=on|off     the enabled mesh renderers of awake enemies that share a parent, one renderer
+//                     with a submesh each (readable meshes), the originals off; and back (what fewer
+//                     renderers would save: the game's later switches of single parts aren't followed)
 //   eculled=off|on    the behaviours of enemies paused beyond the camera's reach (their Pause/Cull
 //                     FSM not "visible") off, but that FSM and spawn/kill, and back on
 // Part of CrowCompat; see Compat2018.cs.
@@ -43,7 +53,7 @@ namespace CrowCompat
 {
     public static class EnemyCost
     {
-        static bool dynamicVelocity, stopCorpses;
+        static bool dynamicVelocity, stopCorpses, readable;
         static float scanAt = -1f, corpseScanAt = -1f, nextCorpseCheck;
 
         // From Diag.Install (every player, flags or not).
@@ -55,9 +65,11 @@ namespace CrowCompat
             flag = Array.IndexOf(args, "-crow-corpses");
             mode = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
             stopCorpses = mode == "off";
-            if (!dynamicVelocity && !stopCorpses) return;
+            readable = Array.IndexOf(args, "-crow-enemy-readable") >= 0;
+            if (!dynamicVelocity && !stopCorpses && !readable) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
+                if (readable) KeepReadable(scene);
                 scanAt = Time.realtimeSinceStartup + 1f;
                 corpseScanAt = Time.realtimeSinceStartup + 3f;
             };
@@ -92,6 +104,26 @@ namespace CrowCompat
                         count++;
                     }
             return count;
+        }
+
+        // The enemies' combiners in a scene just loaded: their output readable.
+        static void KeepReadable(Scene scene)
+        {
+            Type combiner = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
+            System.Reflection.FieldInfo unreadable = combiner == null ? null : combiner.GetField("makeMeshesUnreadable");
+            if (unreadable == null) return;
+            int count = 0;
+            foreach (GameObject root in scene.GetRootGameObjects())
+                foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
+                {
+                    if (!body.name.StartsWith("Enemy ", StringComparison.Ordinal)) continue;
+                    foreach (Component component in body.GetComponentsInChildren(combiner, true))
+                    {
+                        unreadable.SetValue(component, false);
+                        count++;
+                    }
+                }
+            if (count > 0) Debug.Log("CROW_ENEMY " + count + " enemy combiners keep their meshes readable");
         }
 
         // A new copy of an enemy (Fight's stress mode): the same defaults.
@@ -349,6 +381,12 @@ namespace CrowCompat
                     }
                     Debug.Log("CROW_ENEMY etrail=" + value + " (" + trailOff.Count + " trails, " + piecesOff.Count + " pieces off)");
                     return true;
+                case "edebris":
+                    Debris(value == "out");
+                    return true;
+                case "emerge":
+                    MergeExperiment(value == "on");
+                    return true;
                 case "eculled":
                     Toggle(key, value, Culled);
                     return true;
@@ -357,6 +395,127 @@ namespace CrowCompat
         }
 
         static readonly List<Rigidbody> madeKinematic = new List<Rigidbody>();
+        static readonly List<GameObject> mergedObjects = new List<GameObject>();
+        static readonly List<Renderer> mergedSources = new List<Renderer>();
+
+        static void MergeExperiment(bool on)
+        {
+            if (!on)
+            {
+                foreach (GameObject merged in mergedObjects)
+                    if (merged != null) UnityEngine.Object.Destroy(merged);
+                foreach (Renderer source in mergedSources)
+                    if (source != null) source.enabled = true;
+                Debug.Log("CROW_ENEMY emerge=off: " + mergedObjects.Count + " merged renderers gone, " + mergedSources.Count + " back");
+                mergedObjects.Clear();
+                mergedSources.Clear();
+                return;
+            }
+            int groups = 0, sources = 0, seen = 0, unreadable = 0;
+            foreach (GameObject enemy in Enemies())
+            {
+                if (!enemy.activeInHierarchy) continue;
+                var byParent = new Dictionary<Transform, List<MeshRenderer>>();
+                foreach (MeshRenderer renderer in enemy.GetComponentsInChildren<MeshRenderer>(false))
+                {
+                    if (!renderer.enabled || renderer.transform.parent == null) continue;
+                    var filter = renderer.GetComponent<MeshFilter>();
+                    seen++;
+                    if (filter == null || filter.sharedMesh == null) continue;
+                    if (!filter.sharedMesh.isReadable)
+                    {
+                        unreadable++;
+                        continue;
+                    }
+                    if (filter.sharedMesh.subMeshCount != 1) continue;
+                    List<MeshRenderer> list;
+                    if (!byParent.TryGetValue(renderer.transform.parent, out list)) byParent[renderer.transform.parent] = list = new List<MeshRenderer>();
+                    list.Add(renderer);
+                }
+                foreach (KeyValuePair<Transform, List<MeshRenderer>> pair in byParent)
+                {
+                    if (pair.Value.Count < 2) continue;
+                    var instances = new List<CombineInstance>();
+                    var materials = new List<Material>();
+                    int vertices = 0;
+                    foreach (MeshRenderer renderer in pair.Value)
+                    {
+                        Mesh mesh = renderer.GetComponent<MeshFilter>().sharedMesh;
+                        if (vertices + mesh.vertexCount > 60000) break;
+                        vertices += mesh.vertexCount;
+                        instances.Add(new CombineInstance { mesh = mesh, transform = pair.Key.worldToLocalMatrix * renderer.transform.localToWorldMatrix });
+                        materials.Add(renderer.sharedMaterial);
+                    }
+                    var combined = new Mesh { name = "CrowEnemyMerge" };
+                    combined.CombineMeshes(instances.ToArray(), false, true);
+                    var merged = new GameObject("CrowEnemyMerge");
+                    merged.layer = pair.Value[0].gameObject.layer;
+                    merged.transform.SetParent(pair.Key, false);
+                    merged.AddComponent<MeshFilter>().sharedMesh = combined;
+                    var mergedRenderer = merged.AddComponent<MeshRenderer>();
+                    mergedRenderer.sharedMaterials = materials.ToArray();
+                    mergedRenderer.shadowCastingMode = pair.Value[0].shadowCastingMode;
+                    mergedRenderer.receiveShadows = pair.Value[0].receiveShadows;
+                    mergedObjects.Add(merged);
+                    for (int i = 0; i < instances.Count; i++)
+                    {
+                        pair.Value[i].enabled = false;
+                        mergedSources.Add(pair.Value[i]);
+                    }
+                    groups++;
+                    sources += instances.Count;
+                }
+            }
+            Debug.Log("CROW_ENEMY emerge=on: " + sources + " renderers in " + groups + " merged, of " + seen + " (" + unreadable + " unreadable)");
+        }
+
+        class Moved
+        {
+            public Transform Part, Parent;
+            public int Sibling;
+            public Vector3 Position, Scale;
+            public Quaternion Rotation;
+        }
+
+        static readonly List<Moved> moved = new List<Moved>();
+        static Transform debrisRoot;
+
+        static void Debris(bool takeOut)
+        {
+            int transforms = 0;
+            if (takeOut)
+            {
+                if (debrisRoot == null) debrisRoot = new GameObject("CrowDebrisOut").transform;
+                foreach (GameObject enemy in Enemies())
+                {
+                    if (!enemy.activeInHierarchy) continue;
+                    var tops = new List<Transform>();
+                    foreach (Transform t in enemy.GetComponentsInChildren<Transform>(true))
+                        if (!t.gameObject.activeSelf && t.parent != null && t.parent.gameObject.activeInHierarchy) tops.Add(t);
+                    foreach (Transform t in tops)
+                    {
+                        transforms += t.GetComponentsInChildren<Transform>(true).Length;
+                        moved.Add(new Moved { Part = t, Parent = t.parent, Sibling = t.GetSiblingIndex(), Position = t.localPosition, Rotation = t.localRotation, Scale = t.localScale });
+                        t.SetParent(debrisRoot, true);
+                    }
+                }
+            }
+            else
+            {
+                foreach (Moved m in moved)
+                {
+                    if (m.Part == null || m.Parent == null) continue;
+                    m.Part.SetParent(m.Parent, false);
+                    m.Part.SetSiblingIndex(m.Sibling);
+                    m.Part.localPosition = m.Position;
+                    m.Part.localRotation = m.Rotation;
+                    m.Part.localScale = m.Scale;
+                    transforms++;
+                }
+                moved.Clear();
+            }
+            Debug.Log("CROW_ENEMY edebris=" + (takeOut ? "out: " + moved.Count + " subtrees, " + transforms + " transforms" : "in: " + transforms + " subtrees"));
+        }
         static readonly List<Behaviour> trailOff = new List<Behaviour>();
         static readonly List<GameObject> piecesOff = new List<GameObject>();
         static readonly Dictionary<Renderer, int> probeUsage = new Dictionary<Renderer, int>(), reflectionUsage = new Dictionary<Renderer, int>();

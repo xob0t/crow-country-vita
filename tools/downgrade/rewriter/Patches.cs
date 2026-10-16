@@ -104,6 +104,35 @@ partial class DowngradeAssemblies
         return 1;
     }
 
+    // PlayMaker's AddForce action: its Rigidbody AddForce, AddRelativeForce and AddForceAtPosition calls go
+    // to CrowCompat FixedStep with the action's everyFrame, which scales an impulse given in every physics
+    // step when the step isn't the game's 0.02 s (-crow-fixed-dt), so Mara walks and Blobs move as fast.
+    static int PatchAddForce(ModuleDefinition module)
+    {
+        TypeDefinition type = GameType(module, "HutongGames.PlayMaker.Actions.AddForce");
+        if (type == null) return 0;
+        FieldDefinition everyFrame = type.Fields.Single(f => f.Name == "everyFrame");
+        int count = 0;
+        foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
+        {
+            ILProcessor il = method.Body.GetILProcessor();
+            foreach (Instruction call in method.Body.Instructions.ToArray())
+            {
+                var target = call.Operand as MethodReference;
+                if ((call.OpCode != OpCodes.Callvirt && call.OpCode != OpCodes.Call) || target == null ||
+                    target.DeclaringType.FullName != "UnityEngine.Rigidbody") continue;
+                if (target.Name != "AddForce" && target.Name != "AddRelativeForce" && target.Name != "AddForceAtPosition") continue;
+                if (!target.Parameters.Any(p => p.ParameterType.FullName == "UnityEngine.ForceMode")) continue;
+                il.InsertBefore(call, Instruction.Create(OpCodes.Ldarg_0));
+                il.InsertBefore(call, Instruction.Create(OpCodes.Ldfld, everyFrame));
+                call.OpCode = OpCodes.Call;
+                call.Operand = CompatMethod(module, "FixedStep", target.Name);
+                count++;
+            }
+        }
+        return count;
+    }
+
     // The game's console mode (see CrowCompat Settings): PlayMakerFSM.Awake loads PlayMaker's globals
     // (PlayMakerGlobals.Initialize) before the FSM initializes; after that call, the first Awake sets
     //   FsmVariables.GlobalVariables.GetFsmInt("Control Mode Console").Value = Settings.ConsoleControlMode()

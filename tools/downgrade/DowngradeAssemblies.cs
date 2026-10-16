@@ -111,6 +111,7 @@ partial class DowngradeAssemblies
         new Pass("patches", Scope.Game, PatchKeyboardOrController),
         new Pass("patches", Scope.All, PatchGarbageCollectMesh),
         new Pass("patches", Scope.Game, PatchBlobTrailSpawn),
+        new Pass("patches", Scope.Game, PatchAddForce),
         new Pass("patches", Scope.All, PatchConsoleMode),
         new Pass("patches", Scope.Game, PatchPlatformAnimation),
         new Pass("patches", Scope.Game, PatchMaraLoader),
@@ -123,6 +124,8 @@ partial class DowngradeAssemblies
         new Pass("scriptcost", Scope.Game, PatchFullScreenColour),
         // IdleAudio.cs
         new Pass("idleaudio", Scope.All, RouteAudioSourcePlays),
+        // EnemySplit.cs
+        new Pass("enemysplit", Scope.Game, RouteEnemySplit),
         // Alloc.cs
         new Pass("alloc", Scope.Game, RecyclePlayMakerTweens),
         // PlayMakerData.cs

@@ -112,7 +112,8 @@ namespace CrowCompat
                 else if (pair[0] == "distance") shadowDistance = number;
                 else if (pair[0] == "resolution") shadowResolution = (int)number;
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
-                else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1])) Debug.Log("CROW_QUALITY unknown change " + change);
+                else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1]) && !FixedStep.Change(pair[0], pair[1]))
+                    Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();
         }
@@ -364,6 +365,8 @@ namespace CrowCompat
         // caller can take differences over windows of its own.
         static long[] totals;
         internal static bool Installed { get { return ticks != null; } }
+        // Fight's physics test: called in each physics step, before the physics (the time goes to the step before).
+        internal static Action FixedHook;
         internal static List<string> Labels { get { return labels; } }
         internal static long[] Totals { get { return totals; } }
 
@@ -381,6 +384,8 @@ namespace CrowCompat
                 foreach (PlayerLoopSystem step in steps)
                 {
                     string name = step.type == null ? "?" : step.type.Name;
+                    if (name == "PhysicsFixedUpdate")
+                        list.Add(new PlayerLoopSystem { type = typeof(LoopProfile), updateDelegate = () => { if (FixedHook != null) FixedHook(); } });
                     // -crow-physics-sync-probe: the transforms' sync with the physics scene, which each
                     // physics step does first, done (and timed) on its own just before the step.
                     if (name == "PhysicsFixedUpdate" && Array.IndexOf(ProbeFiles.Args, "-crow-physics-sync-probe") >= 0)

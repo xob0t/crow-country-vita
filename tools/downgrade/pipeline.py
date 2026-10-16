@@ -280,6 +280,8 @@ COMPAT_SOURCES = [
             'Fight',
             'EnemyCost',
             'ActionProfile',
+            'FixedStep',
+            'EnemySplit',
         )
     ),
 ]
@@ -307,6 +309,7 @@ REWRITER_SOURCES = [
             'LoadStats',
             'PlayMakerData',
             'ActionProfile',
+            'EnemySplit',
         )
     ),
 ]

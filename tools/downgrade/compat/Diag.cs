@@ -74,6 +74,8 @@ namespace CrowCompat
             IdleAudio.Install(ProbeFiles.Args);
             Fight.Install(ProbeFiles.Args);  // -crow-fight: the fight benchmark (Fight.cs)
             EnemyCost.Install(ProbeFiles.Args);  // the enemies' costs (PS Vita defaults)
+            FixedStep.Install(ProbeFiles.Args);  // -crow-fixed-dt: the physics step
+            EnemySplit.Install(ProbeFiles.Args);  // -crow-enemy-split: the enemies' inactive parts out
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene") ?? Fight.Scene;

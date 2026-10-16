@@ -2,7 +2,8 @@
 on the console or a Windows player and prints where the frame goes.
 
     uv run tools/downgrade/fightbench.py vita [--modes real,stress] [--runs 2] [--tag T] [--no-sync]
-                                         [--seconds 60] [--area NAME] [--wait S] [-- <more -crow-* flags>]
+                                         [--seconds 60] [--area NAME] [--wait S] [--input CHAIN]
+                                         [-- <more -crow-* flags>]
     uv run tools/downgrade/fightbench.py pc [--modes ...] [--runs 1] [--build DIR] [--vitalike [CAP]]
                                        [-- <more flags>]
     uv run tools/downgrade/fightbench.py report <tag or log>...
@@ -67,6 +68,8 @@ COLUMNS = [
     ('alive', 'alive', '{:.1f}'),
     ('shots', 'shots', '{:.0f}'),
     ('kills', 'kills', '{:.0f}'),
+    ('hits', 'hits', '{:.0f}'),
+    ('shotkills', 'shotk', '{:.0f}'),
     ('freeMB', 'freeMB', '{:.0f}'),
 ]
 
@@ -154,7 +157,8 @@ def report(logs):
         'anim: Animator/Director; '
         'skin: skinned meshes; part: particle systems; render: culling and draw submission, renderers;\n'
         'ui: canvases; wait: vsync, present and frame start); gc/gcms: collections and their pause in the\n'
-        'measured windows; KB/s: allocation rate; alive: enemies alive (mean); freeMB: lowest free main memory.'
+        'measured windows; KB/s: allocation rate; alive: enemies alive (mean); hits: health drops by shots;\n'
+        "shotk: kills by shots (not the fight's own); freeMB: lowest free main memory."
     )
     return '\n'.join([text, '', *notes, '', legend])
 
@@ -215,7 +219,7 @@ def vita_run(vita, mode, run, args, tag_dir):
     out = tag_dir / f'{mode}-{run}.log'
     perf = tag_dir / f'perf-{mode}-{run}.txt'
     perf.write_text('')
-    text, fighting, samples = '', False, 0
+    text, fighting, samples, sent = '', False, 0, False
     while time.time() - started < args.timeout:
         time.sleep(POLL_SECONDS)
         try:
@@ -230,6 +234,9 @@ def vita_run(vita, mode, run, args, tag_dir):
         if 'CROW_FIGHT_START' in text and not fighting:
             fighting = True
             print(f'  fight started after {time.time() - started:.0f} s')
+        if fighting and args.input and not sent and len(windows) >= 1:
+            sent = True  # in the second window, the first having measured the start
+            print(f'  input: {vita.command(f"{vita.KEEP_AWAKE}; {args.input}", timeout=60)}')
         if fighting and summary is None and samples < 3 and len(windows) >= samples + 1:
             samples += 1
             try:
@@ -366,6 +373,7 @@ def main():
     parser.add_argument('--no-sync', action='store_true', help='vita: skip the sync')
     parser.add_argument('--wait', type=int, default=7200, help='vita: seconds to wait for the vita-device lock')
     parser.add_argument('--vitalike', type=float, nargs='?', const=5.5, help='pc: run at CAP percent (5.5)')
+    parser.add_argument('--input', help='vita: a vitacompanion chain sent once in the second window (walk mode)')
     args = parser.parse_args(own)
     args.extra = extra
     args.modes = [m for m in args.modes.split(',') if m]
