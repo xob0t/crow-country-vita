@@ -12,7 +12,7 @@ using UnityEngine.SceneManagement;
 // the game's Standard materials (and SFBStandard's: SFB's copy of Standard, with the same properties,
 // on one material, Entrance's "tiles floor" path; left to it, that path lost the key lights, which
 // light nothing else, and its decompiled shadow read is the PC's screen-space one, so it drew nearly
-// black) draw with CrowVita/Lit (vita_shaders/CrowLit.shader: Standard's
+// black; and Legacy Shaders/Diffuse's, see LegacyDiffuse) draw with CrowVita/Lit (vita_shaders/CrowLit.shader: Standard's
 // simple form, no ForwardAdd pass), which draws the main directional light, the harmonics and the 4
 // point lights Unity gives each object per vertex, and up to 8 key lights set here as globals per
 // pixel, Lambert only: the spot and point lights that reach the camera's view (spots first), on the
@@ -44,6 +44,8 @@ namespace CrowCompat
         // from the statics; CamEffect's list of camera effects kept their render textures that way). The
         // areas' materials were not seen to stay with the Material keys, but nothing here needs them held.
         static readonly Dictionary<int, Shader> swapped = new Dictionary<int, Shader>();
+        // Legacy Diffuse materials' own colours, by instance ID (LegacyDiffuse changes them).
+        static readonly Dictionary<int, Color> diffuseColors = new Dictionary<int, Color>();
         static readonly Dictionary<Light, KeyValuePair<int, LightShadows>> keyed = new Dictionary<Light, KeyValuePair<int, LightShadows>>();
         static readonly Dictionary<Light, LightRenderMode> forced = new Dictionary<Light, LightRenderMode>();
         static readonly List<Light> keys = new List<Light>();
@@ -130,8 +132,16 @@ namespace CrowCompat
                     int queue = material.renderQueue;
                     material.shader = shader;
                     material.renderQueue = queue;
+                    Color color;
+                    if (diffuseColors.TryGetValue(material.GetInstanceID(), out color))
+                    {
+                        material.color = color;
+                        material.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
+                        material.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
+                    }
                 }
                 swapped.Clear();
+                diffuseColors.Clear();
                 foreach (Light light in keyed.Keys.ToList()) Unkey(light);
                 foreach (KeyValuePair<Light, LightRenderMode> pair in forced)
                     if (pair.Key != null) pair.Key.renderMode = pair.Value;
@@ -180,8 +190,16 @@ namespace CrowCompat
             foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
             {
                 Shader shader = material.shader;
-                if (shader == null || shader == lit || !(shader == standard || shader.name == "Standard" || shader.name == "SFBStandard")) continue;
+                if (shader == null || shader == lit) continue;
+                bool diffuse = false;
+                if (shader != standard)
+                {
+                    string name = shader.name;
+                    diffuse = name == "Legacy Shaders/Diffuse";
+                    if (!diffuse && name != "Standard" && name != "SFBStandard") continue;
+                }
                 swapped[material.GetInstanceID()] = shader;
+                if (diffuse) LegacyDiffuse(material);
                 // Setting a shader resets the material's render queue to the shader's (Geometry): the
                 // game's Fade and Transparent materials (queue 3000, no depth writes) were then drawn
                 // before the ground, which covered them (Roadside's car glass). Keep the queue.
@@ -214,6 +232,25 @@ namespace CrowCompat
                 Debug.Log("CROW_LIT " + count + " materials to CrowVita/Lit (" + transparent + " transparent, " + cutout + " cutout, " + changedQueue +
                           " render queues kept); " + litRenderers + " renderers, " + lightmapped + " lightmapped (" +
                           LightmapSettings.lightmaps.Length + " lightmaps); layers " + majorLayers.ToString("X"));
+        }
+
+        // Legacy Shaders/Diffuse (texture times colour, Lambert; 48 untextured materials, white, red,
+        // green and grey) as CrowVita/Lit sees it: no specular highlights or reflections, smoothness and
+        // metallic 0 (a variant the build has), and the colour divided by Standard's dielectric
+        // diffuse factor in gamma space (1 - 0.2209), so the main light and the ambient light it as
+        // Diffuse did. The game's visible ones: Swan Boats' swans (merged), Arcade's basketball hoop,
+        // Office Tolman's elevator map lights, Control Room's and Fairy Pool's combined parts; the rest
+        // are collider meshes with their renderers off and the examine sets' marker spheres.
+        static void LegacyDiffuse(Material material)
+        {
+            Color color = material.color;
+            diffuseColors[material.GetInstanceID()] = color;
+            const float dielectricDiffuse = 1f - 0.220916301f;
+            material.color = new Color(color.r / dielectricDiffuse, color.g / dielectricDiffuse, color.b / dielectricDiffuse, color.a);
+            material.SetFloat("_Glossiness", 0f);
+            material.SetFloat("_Metallic", 0f);
+            material.EnableKeyword("_GLOSSYREFLECTIONS_OFF");
+            material.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
         }
 
         static float Luminance(Color c)
