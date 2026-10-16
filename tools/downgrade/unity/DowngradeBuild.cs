@@ -240,6 +240,15 @@ public static class DowngradeBuild
         return string.IsNullOrEmpty(mode) ? "on" : mode;
     }
 
+    // The PS Vita build's scene split (CrowCompat's Merge.Split, after the merge in CrowMergeScenes),
+    // from the CROW_SPLIT environment variable: on (the default) or off. Other platforms don't split.
+    internal static string SplitMode()
+    {
+        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.PSP2) return "off";
+        string mode = Environment.GetEnvironmentVariable("CROW_SPLIT");
+        return string.IsNullOrEmpty(mode) ? "on" : mode;
+    }
+
     // Whether a scene path is the scene named (its file name, or its path), in any case.
     static bool IsScene(string path, string name)
     {
@@ -255,12 +264,13 @@ public static class DowngradeBuild
 }
 
 // Static renderers merged per material and place as the PS Vita build writes each scene (compat/
-// Merge.cs: what may merge is read from the scene's FSMs and scripts). The scene the build writes
-// changes; the project's scene files don't.
+// Merge.cs: what may merge is read from the scene's FSMs and scripts), then the still parts of the
+// area's big hierarchies taken out to the scene's root (Merge.Split, Perf.cs's SceneSplit). The scene
+// the build writes changes; the project's scene files don't.
 class CrowMergeScenes : UnityEditor.Build.IProcessSceneWithReport
 {
     static readonly string[] Skipped = { "Logos", "Title", "CrowMara" };
-    static System.Reflection.MethodInfo process;
+    static System.Reflection.MethodInfo process, split;
     static Type merge;
 
     public int callbackOrder
@@ -271,8 +281,28 @@ class CrowMergeScenes : UnityEditor.Build.IProcessSceneWithReport
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
+        if (Skipped.Contains(scene.name)) return;
         string mode = DowngradeBuild.MergeMode();
-        if (mode == "off" || Skipped.Contains(scene.name)) return;
+        if (mode != "off") MergeScene(scene, mode);
+        if (DowngradeBuild.SplitMode() == "off") return;
+        if (split == null)
+        {
+            Type type = Type.GetType("CrowCompat.Merge, CrowCompat");
+            split = type == null ? null : type.GetMethod("Split");
+            if (split == null) throw new InvalidOperationException("No CrowCompat.Merge.Split in the project's CrowCompat.dll");
+        }
+        try
+        {
+            Debug.Log("DOWNGRADE_" + (string)split.Invoke(null, new object[] { scene, true }));
+        }
+        catch (Exception exception)
+        {
+            Debug.LogError("DOWNGRADE_SPLIT " + scene.name + " failed: " + exception);
+        }
+    }
+
+    static void MergeScene(UnityEngine.SceneManagement.Scene scene, string mode)
+    {
         if (process == null)
         {
             merge = Type.GetType("CrowCompat.Merge, CrowCompat");

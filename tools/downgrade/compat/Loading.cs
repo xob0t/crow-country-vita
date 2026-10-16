@@ -40,6 +40,7 @@ namespace CrowCompat
             if (args.Contains("-crow-mcs-time")) CombineTimer.Install();
             MaraScene.Install();
             ScenePrefetch.Install(args);
+            SceneGap.Install(args);
         }
 
         static class Trace
@@ -396,13 +397,27 @@ namespace CrowCompat
     // memory free after the load this way, 5 MB without. Costs about 3 s on the PS Vita (2.4 s of
     // unused-asset pass, 0.6 s of collection). The player (DontDestroyOnLoad) stays. On the PS Vita
     // unless -crow-no-gap; on other players with -crow-gap. CROW_GAP lines time the steps.
+    // -crow-gap-additive: the area then loads additively instead of as a single-mode load, which
+    // runs Resources.UnloadUnusedAssets again once the area is in: a second pass over every object,
+    // with nothing left to free after the gap's, at the load's peak of memory (both PS Vita crashes
+    // of 15-16 Oct, Entrance -> Station Square and Station Square -> Pool, ran out of main memory in
+    // that pass, growing its object tables by 3 MB). The area becomes the active scene in the first
+    // sceneLoaded handler, before the game's; what its Awake and OnEnable made went into the gap,
+    // which was active then, and moves into the area before the gap is unloaded.
     public static class SceneGap
     {
         public const string Scene = "CrowGap";
-        static bool installed, on;
-        static string target;
+        static bool installed, on, additive;
+        static string target, arriving;
         static int pending;
         static readonly Stopwatch clock = new Stopwatch();
+        static readonly HashSet<int> before = new HashSet<int>();
+
+        internal static void Install(string[] args)
+        {
+            additive = args.Contains("-crow-gap-additive");
+            if (additive) SceneManager.sceneLoaded += Arrived;
+        }
 
         static bool On
         {
@@ -469,11 +484,44 @@ namespace CrowCompat
         static void AssetsUnloaded(AsyncOperation operation)
         {
             long assets = clock.ElapsedMilliseconds;
+            Prewarm.ProBuilder();  // the inventory's ProBuilder meshes, once (Prewarm.cs)
             GC.Collect();
             string name = target;
             target = null;
-            Debug.Log("CROW_GAP assets unloaded after " + assets + " ms, collected after " + clock.ElapsedMilliseconds + " ms; loading " + name);
-            SceneManager.LoadScene(name, LoadSceneMode.Single);
+            Debug.Log("CROW_GAP assets unloaded after " + assets + " ms, collected after " + clock.ElapsedMilliseconds + " ms; loading " + name +
+                      (additive ? " additively" : ""));
+            if (!additive)
+            {
+                SceneManager.LoadScene(name, LoadSceneMode.Single);
+                return;
+            }
+            before.Clear();
+            Scene gap = SceneManager.GetSceneByName(Scene);
+            if (gap.IsValid())
+                foreach (GameObject root in gap.GetRootGameObjects()) before.Add(root.GetInstanceID());
+            arriving = name;
+            SceneManager.LoadScene(name, LoadSceneMode.Additive);
+        }
+
+        // -crow-gap-additive: the area in, before the other sceneLoaded handlers (hooked at startup).
+        static void Arrived(Scene scene, LoadSceneMode mode)
+        {
+            if (arriving == null || mode != LoadSceneMode.Additive || scene.name != arriving) return;
+            arriving = null;
+            SceneManager.SetActiveScene(scene);
+            Scene gap = SceneManager.GetSceneByName(Scene);
+            int moved = 0;
+            if (gap.IsValid() && gap != scene)
+            {
+                foreach (GameObject root in gap.GetRootGameObjects())
+                {
+                    if (before.Contains(root.GetInstanceID())) continue;
+                    SceneManager.MoveGameObjectToScene(root, scene);
+                    moved++;
+                }
+                SceneManager.UnloadSceneAsync(gap);
+            }
+            Debug.Log("CROW_GAP " + scene.name + " in after " + clock.ElapsedMilliseconds + " ms (additive, " + moved + " objects its load made moved in from the gap)");
         }
     }
 

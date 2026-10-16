@@ -2,6 +2,7 @@ using System;
 using System.Linq;
 using System.Reflection;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 // The camera's post-processing chain (com.sfbgames.crowcountry.CrowCountryCamEffect), at half size on
 // the PS Vita. The game renders the camera at 1248x702, reads it into a 550x400 texture (SFB filter),
@@ -126,6 +127,11 @@ namespace CrowCompat
             FieldInfo size = type.GetField("camTargetSize", Fields);
             // CamTargetSize.S1248x702 = 0, S624x351 = 1.
             if (Convert.ToInt32(size.GetValue(effect)) == 0) size.SetValue(effect, Enum.ToObject(size.FieldType, 1));
+            if (!hooked)
+            {
+                hooked = true;
+                SceneManager.sceneUnloaded += scene => ForgetDestroyed();
+            }
             effects.Add(effect);
             CameraTarget(effect, type);
             Replace(effect, type, "texB1248x702", new RenderTexture(624, 351, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
@@ -135,6 +141,33 @@ namespace CrowCompat
                 var material = type.GetField(name, Fields).GetValue(effect) as Material;
                 if (material != null) material.SetTexture("_BlurTex", blur);
             }
+        }
+
+        // The effects list held every camera effect ever woken, so the effects of unloaded scenes kept
+        // their six render textures (about 7 MB each set, the unused 1248x702 camera target included):
+        // a static's references keep them through Resources.UnloadUnusedAssets. One set more per scene
+        // with a camera of its own (Logos, Title, Driving Intro, Roadside), about 21 MB by Station Square,
+        // where the user's game ran out of main memory. An effect destroyed with its scene now has its
+        // render textures destroyed and leaves the list.
+        static readonly string[] Textures = { "camRenderTexture1", "camRenderTexture2", "texA550x400", "texB1248x702", "texC1248x702", "texD416x234" };
+        static bool hooked;
+
+        static void ForgetDestroyed()
+        {
+            foreach (Component effect in effects)
+            {
+                if (effect != null) continue;
+                foreach (string name in Textures)
+                {
+                    FieldInfo field = effect.GetType().GetField(name, Fields);
+                    var texture = field == null ? null : field.GetValue(effect) as RenderTexture;
+                    if (texture == null) continue;
+                    texture.Release();
+                    UnityEngine.Object.Destroy(texture);
+                    field.SetValue(effect, null);
+                }
+            }
+            effects.RemoveAll(e => e == null);
         }
 
         static RenderTexture Replace(Component effect, Type type, string name, RenderTexture texture)

@@ -48,6 +48,15 @@ using UnityEngine.SceneManagement;
 //                               Vita's default; see RewiredPad)
 //   -crow-player-split game|ui  ui (the PS Vita's default) makes the player's menus a hierarchy of their
 //                               own (see PlayerSplit)
+//   -crow-scaled-colliders game|box|report
+//                               box (the PS Vita's default) gives each mesh collider whose scale keeps
+//                               changing a box instead (see ScaledColliders); report only logs them
+//                               (CROW_SCALED); -crow-cycle takes scaled=
+//   -crow-scene-split off|on|check|report
+//                               the PS Vita build's split areas (see SceneSplit): off puts the parts
+//                               back in their places, on takes them out again (-crow-cycle takes
+//                               scenesplit=), check compares each part with its old place every second
+//                               (CROW_SPLIT_CHECK), report logs what the split would take (CROW_SPLIT)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -57,6 +66,8 @@ namespace CrowCompat
         {
             RewiredPad.Install(args);
             PlayerSplit.Install(args);
+            ScaledColliders.Install(args);
+            SceneSplit.Install(args);
             float moving = Quality.Number(args, "-crow-moving-report", -1f);
             if (moving > 0f) MovingReport.Install(moving);
             float particles = Quality.Number(args, "-crow-particles-report", -1f);
@@ -130,6 +141,15 @@ namespace CrowCompat
                     return true;
                 case "split":
                     PlayerSplit.Set(value);
+                    return true;
+                case "scaled":
+                    ScaledColliders.Set(value);
+                    return true;
+                case "scenesplit":
+                    SceneSplit.Set(value);
+                    return true;
+                case "splittoggle":
+                    SceneSplit.Toggle(value);
                     return true;
                 case "mouse":
                     foreach (Camera camera in Camera.allCameras) camera.eventMask = value == "off" ? 0 : -1;
@@ -655,6 +675,183 @@ namespace CrowCompat
         }
     }
 
+    // A mesh collider whose transform's scale changes (its own or a parent's) is cooked again from its
+    // mesh by PhysX at the next physics step (PhysicsManager::SyncTransforms -> MeshCollider::ScaleChanged
+    // -> ExtractMeshGeometry -> PhysX cooking), every frame for one that animates. Station Square's
+    // bunting: 18 ProBuilder flags (PrismPentagon, with ProBuilder's default mesh collider) under
+    // swinging and stretching parents, about 12 ms of the PS Vita's main thread a frame in
+    // FixedUpdate.PhysicsFixedUpdate (with Physics.autoSyncTransforms on, the same time went to the
+    // scripts' first physics query instead). Two seconds after each scene load the loaded scenes'
+    // non-trigger mesh colliders are listed (on or off), and then and every 15 s after, those that are
+    // on are watched for 40 frames (nothing allocated); each whose shape (the world matrix's axis
+    // lengths and angles) changed in 10 of them or more (the flags' sway pauses now and then) gets a
+    // BoxCollider of its mesh's bounds on the same GameObject (same layer and rigidbody, same physics
+    // material) and is switched off. A box takes a scale change as a shape update,
+    // without cooking. Left alone: triggers, and colliders of non-kinematic rigidbodies (their shape
+    // drives the simulation).
+    static class ScaledColliders
+    {
+        const int Frames = 40, Often = 10;  // watched frames; changes that count as animated
+        static string mode = "game";
+        static bool hooked;
+        static float next = -1f;
+        static int frame = -1;
+        static bool rescan;
+        static readonly List<MeshCollider> candidates = new List<MeshCollider>();
+        static float[] shapes = new float[0];
+        static int[] changes = new int[0];
+        static bool[] watching = new bool[0];
+        static readonly float[] shape = new float[6];
+        static readonly Dictionary<MeshCollider, BoxCollider> swapped = new Dictionary<MeshCollider, BoxCollider>();
+
+        public static void Install(string[] args)
+        {
+            string value = Perf.Value(args, "-crow-scaled-colliders");
+            if (value != null) Set(value);
+            else if (Application.platform == RuntimePlatform.PSP2) Set("box");
+        }
+
+        internal static void Set(string value)
+        {
+            mode = value;
+            if (mode == "game")
+            {
+                int restored = 0;
+                foreach (KeyValuePair<MeshCollider, BoxCollider> pair in swapped)
+                {
+                    if (pair.Value != null) UnityEngine.Object.Destroy(pair.Value);
+                    if (pair.Key == null) continue;
+                    pair.Key.enabled = true;
+                    restored++;
+                }
+                swapped.Clear();
+                frame = -1;
+                Debug.Log("CROW_SCALED game: " + restored + " mesh colliders back");
+                return;
+            }
+            next = Time.realtimeSinceStartup;
+            rescan = true;
+            if (hooked) return;
+            hooked = true;
+            SceneManager.sceneLoaded += (scene, loadMode) =>
+            {
+                next = Time.realtimeSinceStartup + 2f;
+                rescan = true;
+                frame = -1;
+            };
+            Application.onBeforeRender += Tick;
+        }
+
+        static void Tick()
+        {
+            if (mode == "game") return;
+            if (frame < 0)
+            {
+                if (next < 0f || Time.realtimeSinceStartup < next) return;
+                next = Time.realtimeSinceStartup + 15f;
+                if (rescan) List();
+                rescan = false;
+                // The candidates that are on now; nothing allocated.
+                int on = 0;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    MeshCollider collider = candidates[i];
+                    Rigidbody body = collider == null ? null : collider.attachedRigidbody;
+                    watching[i] = collider != null && collider.enabled && collider.gameObject.activeInHierarchy && !collider.isTrigger &&
+                                  !swapped.ContainsKey(collider) && (body == null || body.isKinematic);
+                    changes[i] = 0;
+                    if (!watching[i]) continue;
+                    Shape(collider.transform, i);
+                    on++;
+                }
+                if (on > 0) frame = 0;
+                return;
+            }
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (!watching[i] || candidates[i] == null) continue;
+                if (Shape(candidates[i].transform, i)) changes[i]++;
+            }
+            if (++frame < Frames) return;
+            frame = -1;
+            List<string> found = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                MeshCollider collider = candidates[i];
+                if (!watching[i] || collider == null || changes[i] < Often) continue;
+                if (found == null) found = new List<string>();
+                if (mode == "box") Swap(collider);
+                Bounds bounds = collider.enabled ? collider.bounds : swapped[collider].bounds;
+                if (found.Count < 12)
+                    found.Add(Perf.Path(collider.transform, 5) + "(" + collider.sharedMesh.vertexCount + "v" + (collider.convex ? ",convex" : "") + ",layer" +
+                              collider.gameObject.layer + ",y" + bounds.min.y.ToString("F2", CultureInfo.InvariantCulture) + ".." +
+                              bounds.max.y.ToString("F2", CultureInfo.InvariantCulture) + ")");
+            }
+            if (found == null) return;
+            // The player's body for comparison: the rigidbody in DontDestroyOnLoad that isn't kinematic.
+            string player = "";
+            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                if (!body.isKinematic && body.gameObject.scene.name == "DontDestroyOnLoad")
+                {
+                    var bounds = new Bounds(body.position, Vector3.zero);
+                    foreach (Collider collider in body.GetComponentsInChildren<Collider>()) if (collider.attachedRigidbody == body) bounds.Encapsulate(collider.bounds);
+                    player = " player=" + Perf.Path(body.transform, 2) + "(y" + bounds.min.y.ToString("F2", CultureInfo.InvariantCulture) + ".." +
+                             bounds.max.y.ToString("F2", CultureInfo.InvariantCulture) + ")";
+                    break;
+                }
+            Debug.Log("CROW_SCALED scene=" + SceneManager.GetActiveScene().name.Replace(' ', '_') + " candidates=" + candidates.Count +
+                      " animated=" + changes.Count(c => c >= Often) + (mode == "box" ? " boxed" : " (report)") + " total=" + swapped.Count + player +
+                      " " + string.Join(" ", found.ToArray()));
+        }
+
+        // Once per area load: the loaded scenes' non-trigger mesh colliders, on or off (allocates once).
+        static void List()
+        {
+            foreach (MeshCollider gone in swapped.Keys.Where(c => c == null).ToList()) swapped.Remove(gone);
+            candidates.Clear();
+            foreach (MeshCollider collider in Resources.FindObjectsOfTypeAll<MeshCollider>())
+                if (collider.gameObject.scene.IsValid() && !collider.isTrigger && collider.sharedMesh != null) candidates.Add(collider);
+            shapes = new float[candidates.Count * 6];
+            changes = new int[candidates.Count];
+            watching = new bool[candidates.Count];
+        }
+
+        // What a scale change alters and a rotation or move doesn't: the axes' squared lengths and dot
+        // products. Stores them for candidate i; whether they changed.
+        static bool Shape(Transform transform, int i)
+        {
+            Matrix4x4 m = transform.localToWorldMatrix;
+            Vector3 x = m.GetColumn(0), y = m.GetColumn(1), z = m.GetColumn(2);
+            shape[0] = x.sqrMagnitude;
+            shape[1] = y.sqrMagnitude;
+            shape[2] = z.sqrMagnitude;
+            shape[3] = Vector3.Dot(x, y);
+            shape[4] = Vector3.Dot(x, z);
+            shape[5] = Vector3.Dot(y, z);
+            // Relative to the largest axis: small props have world scales of a few hundredths.
+            float tolerance = 1e-6f * Mathf.Max(shape[0], Mathf.Max(shape[1], shape[2]));
+            bool changed = false;
+            for (int k = 0; k < 6; k++)
+            {
+                if (Mathf.Abs(shape[k] - shapes[i * 6 + k]) > tolerance) changed = true;
+                shapes[i * 6 + k] = shape[k];
+            }
+            return changed;
+        }
+
+        static void Swap(MeshCollider mesh)
+        {
+            Bounds bounds = mesh.sharedMesh.bounds;
+            BoxCollider box = mesh.gameObject.AddComponent<BoxCollider>();
+            box.center = bounds.center;
+            box.size = Vector3.Max(bounds.size, new Vector3(0.001f, 0.001f, 0.001f));
+            box.sharedMaterial = mesh.sharedMaterial;
+            box.contactOffset = mesh.contactOffset;
+            mesh.enabled = false;
+            swapped[mesh] = box;
+        }
+    }
+
     // -crow-cycle: one run measures several settings in turn.
     static class Cycle
     {
@@ -690,6 +887,216 @@ namespace CrowCompat
                 Quality.Change(sets[step]);
             }
             else Debug.Log("CROW_CYCLE done");
+        }
+    }
+
+    // An area is one transform hierarchy of 20,000 transforms or more under its root (Station Square
+    // 21,600, Pool 22,400), and a few of its parts move every frame (bunting, crows, flies, an NPC's
+    // breathing, the pool's swirl). Each engine system that follows transform changes then walks the
+    // whole hierarchy every frame: the renderers' update (PostLateUpdate.UpdateAllRenderers), physics'
+    // transform sync (FixedUpdate.PhysicsFixedUpdate) and the particle systems. The PS Vita build takes
+    // the parts nothing acts on out to the scene's root as it writes each scene (Merge.Split, called by
+    // DowngradeBuild's CrowMergeScenes; CROW_SPLIT=on, the default, or off), each with a SplitPart
+    // naming its old parent and place; below objects the game switches on and off, a SplitHolder in
+    // the part's place switches it. A first run-time test that took out every subtree that didn't move
+    // in 60 frames: main thread Station Square 30.6 -> 26.8 ms, Pool 31.0 -> 24.4 ms.
+    //   -crow-scene-split off|on|check|report
+    //       off: after each area load, every part goes back where it was (its old parent, place,
+    //       sibling index and activity), for A/B runs on one build; on: out again (-crow-cycle takes
+    //       scenesplit=off|on, now); check: every second and at each switch of a holder, whether each
+    //       part is active exactly when it would be in its old place and where it would be there
+    //       (CROW_SPLIT_CHECK, once per part that differs, and a count every 30 s); report: log what
+    //       Merge.Split would take out of each area (for builds made without it); apply, apply-check:
+    //       split each area as it loads, as the build would (and check)
+    public class SplitPart : MonoBehaviour
+    {
+        public Transform parent;
+        public int sibling;
+        public Vector3 position, scale;
+        public Quaternion rotation;
+        public bool active;  // its own activity before the split
+        public SplitHolder holder;  // its place below a switched object, or none
+    }
+
+    // A split part's place below objects the game switches on and off: it stands for the part there
+    // (its activeSelf is the part's own, so ActivateChildren on its parent switches it as it would the
+    // part), and the part, built switched off, is on exactly while this is. While this is off because
+    // of its parents, own keeps the part's own activity; switched off itself, the part is on again
+    // when it is.
+    public class SplitHolder : MonoBehaviour
+    {
+        public GameObject part;
+        public bool own = true;
+
+        void OnEnable()
+        {
+            if (part == null) return;
+            part.SetActive(own);
+            SceneSplit.Switched(this);
+        }
+
+        void OnDisable()
+        {
+            if (part == null) return;
+            // Torn down (its scene unloading, the game quitting) rather than switched off: then nothing
+            // here or above is off itself (scene.isLoaded can still be true), and nothing is done.
+            bool switchedOff = !gameObject.activeSelf;
+            for (Transform t = transform.parent; t != null && !switchedOff; t = t.parent) switchedOff = !t.gameObject.activeSelf;
+            if (!switchedOff) return;
+            own = !gameObject.activeSelf || part.activeSelf;
+            if (part.activeSelf) part.SetActive(false);
+            SceneSplit.Switched(this);
+        }
+    }
+
+    static class SceneSplit
+    {
+        static string mode;
+        static bool hooked, checking;
+        static float nextCheck, lastSummary;
+        static int checks, differences, switches;
+        static readonly HashSet<SplitPart> reported = new HashSet<SplitPart>();
+        static readonly List<SplitPart> found = new List<SplitPart>();
+
+        internal static void Install(string[] args)
+        {
+            string value = Perf.Value(args, "-crow-scene-split");
+            if (value != null) Set(value);
+        }
+
+        internal static void Set(string value)
+        {
+            mode = value;
+            Apply();
+            if (hooked) return;
+            hooked = true;
+            SceneManager.sceneLoaded += (scene, loadMode) =>
+            {
+                bool area = scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara" && scene.name != "CrowGap";
+                if (area && (mode == "report" || mode.StartsWith("apply"))) Debug.Log("CROW_" + Merge.Split(scene, mode != "report"));
+                else Apply();
+            };
+            checking = mode == "check" || mode == "apply-check";
+            if (checking) Application.onBeforeRender += Check;
+        }
+
+        static void Apply()
+        {
+            if (mode != "off" && mode != "on") return;
+            int count = 0;
+            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
+            {
+                if (part == null || part.parent == null || !part.gameObject.scene.IsValid()) continue;
+                Transform transform = part.transform;
+                SplitHolder holder = part.holder;
+                if (mode == "off" && transform.parent != part.parent)
+                {
+                    // Its own activity: the holder's, and below it the part's (or what the holder kept).
+                    bool own = holder == null ? part.gameObject.activeSelf || (part.active && !part.parent.gameObject.activeInHierarchy)
+                        : holder.gameObject.activeSelf && (holder.gameObject.activeInHierarchy ? part.gameObject.activeSelf : holder.own);
+                    if (holder != null)
+                    {
+                        holder.part = null;
+                        holder.gameObject.SetActive(false);
+                        holder.transform.SetAsLastSibling();
+                    }
+                    transform.SetParent(part.parent, false);
+                    transform.SetSiblingIndex(part.sibling);
+                    transform.localPosition = part.position;
+                    transform.localRotation = part.rotation;
+                    transform.localScale = part.scale;
+                    part.gameObject.SetActive(own);
+                    count++;
+                }
+                else if (mode == "on" && transform.parent == part.parent)
+                {
+                    bool own = part.gameObject.activeSelf;
+                    if (holder != null || (own && !part.parent.gameObject.activeInHierarchy)) part.gameObject.SetActive(false);
+                    transform.SetParent(null, true);
+                    if (holder != null)
+                    {
+                        holder.transform.SetSiblingIndex(part.sibling);
+                        holder.own = true;
+                        holder.part = part.gameObject;
+                        holder.gameObject.SetActive(own);
+                    }
+                    count++;
+                }
+            }
+            Debug.Log("CROW_SPLIT " + mode + ": " + count + " parts " + (mode == "off" ? "back in their places" : "out"));
+        }
+
+        // -crow-cycle splittoggle=parents-off|parents-on|self-off|self-on: every held part's old parent (as
+        // an ancestor's ActivateGameObject would) or its holder (as ActivateChildren on its parent would)
+        // switched off, or back as it was; with -crow-scene-split check, a test of the holders.
+        static readonly List<KeyValuePair<GameObject, bool>> toggled = new List<KeyValuePair<GameObject, bool>>();
+
+        internal static void Toggle(string value)
+        {
+            if (value.EndsWith("-on"))
+            {
+                for (int i = toggled.Count - 1; i >= 0; i--) if (toggled[i].Key != null) toggled[i].Key.SetActive(toggled[i].Value);
+                Debug.Log("CROW_SPLIT toggle " + value + ": " + toggled.Count + " objects back");
+                toggled.Clear();
+                return;
+            }
+            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
+            {
+                // Held parts only; parents: its old parent, also with the parts back in place (off).
+                if (part == null || part.holder == null || part.parent == null || !part.gameObject.scene.IsValid()) continue;
+                GameObject target = value.StartsWith("parents") ? part.parent.gameObject : part.holder.gameObject;
+                toggled.Add(new KeyValuePair<GameObject, bool>(target, target.activeSelf));
+                target.SetActive(false);
+            }
+            Debug.Log("CROW_SPLIT toggle " + value + ": " + toggled.Count + " objects off");
+        }
+
+        // From a holder's OnEnable and OnDisable: with check, the part against its place right away.
+        internal static void Switched(SplitHolder holder)
+        {
+            if (!checking) return;
+            switches++;
+            var part = holder.part.GetComponent<SplitPart>();
+            if (part != null) Compare(part);
+        }
+
+        // -crow-scene-split check: each part against its old place.
+        static void Check()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < nextCheck) return;
+            nextCheck = now + 1f;
+            found.Clear();
+            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
+                if (part != null && part.parent != null && part.gameObject.scene.IsValid() && part.transform.parent != part.parent) found.Add(part);
+            foreach (SplitPart part in found) Compare(part);
+            if (now - lastSummary < 30f) return;
+            lastSummary = now;
+            Debug.Log("CROW_SPLIT_CHECK " + found.Count + " parts, " + checks + " checks, " + switches + " holder switches, " + differences + " differences, " +
+                      reported.Count + " parts differed");
+        }
+
+        // Active exactly when it would be in its old place (its holder's, or its parents' with its own
+        // activity), and where it would be there.
+        static void Compare(SplitPart part)
+        {
+            checks++;
+            SplitHolder holder = part.holder;
+            bool active = part.gameObject.activeInHierarchy;
+            // Nothing names a part's root, so it is on exactly while its holder, or its old parents with
+            // its own first activity, would show it.
+            bool wanted = holder != null ? holder.gameObject.activeInHierarchy : part.parent.gameObject.activeInHierarchy && part.active;
+            Matrix4x4 there = holder != null ? holder.transform.localToWorldMatrix
+                : part.parent.localToWorldMatrix * Matrix4x4.TRS(part.position, part.rotation, part.scale);
+            Matrix4x4 here = part.transform.localToWorldMatrix;
+            bool placed = true;
+            for (int i = 0; i < 16; i++)
+                if (Mathf.Abs(here[i] - there[i]) > 1e-3f * Mathf.Max(1f, Mathf.Abs(there[i]))) placed = false;
+            if (active == wanted && placed) return;
+            differences++;
+            if (!reported.Add(part)) return;
+            Debug.Log("CROW_SPLIT_CHECK " + Perf.Path(part.transform, 3) + " (from " + Perf.Path(part.parent, 3) + "): " +
+                      (active == wanted ? "" : "active " + active + " where it would be " + wanted + " ") + (placed ? "" : "moved from its place"));
         }
     }
 

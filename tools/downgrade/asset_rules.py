@@ -1177,9 +1177,9 @@ def i2_font_overlay(exported: Path, overlay: dict, excluded: set):
 # of the Windows player's managed heap at the title, the second largest holder after PlayMaker. They
 # can't be left out: in the export, 842 of the prefab's MeshFilters have no mesh, because ProBuilder
 # builds those meshes at run time from its own copy. Left out on the PS Vita, Mara's body and the
-# prefab's other ProBuilder parts drew nothing (only her pistol, a plain mesh, showed). To save that
-# memory, the meshes would have to be built into the project instead (e.g. by the build script, with
-# ProBuilder's API) before the components are dropped.
+# prefab's other ProBuilder parts drew nothing (only her pistol, a plain mesh, showed). The PS Vita
+# build now builds those meshes with ProBuilder's own code as it writes the player's scene, and drops
+# the components there (unity/ProBuilderMeshes.cs); this rule stays off.
 PROBUILDER_MESH_SCRIPT = script_file_id('UnityEngine.ProBuilder', 'ProBuilderMesh')
 PLATFORM_STRIPPED_SCRIPTS: dict[str, set[int]] = {}
 

@@ -315,7 +315,8 @@ namespace CrowCompat
         };
 
         // HutongGames.PlayMaker.ParamDataType values.
-        const int ObjectReference = 5, FsmGameObject = 19, FsmOwnerDefault = 20, FsmObject = 24, GameObjectParam = 27, FsmProperty = 36, FsmArray = 41;
+        const int ObjectReference = 5, FsmBool = 17, FsmGameObject = 19, FsmOwnerDefault = 20, FsmObject = 24, GameObjectParam = 27, FsmProperty = 36,
+            FsmArray = 41;
 
         static string ShortName(string full)
         {
@@ -698,7 +699,8 @@ namespace CrowCompat
                         int position = Convert.ToInt32(positions[p]);
                         string list = kind == FsmGameObject ? "fsmGameObjectParams" : kind == FsmOwnerDefault ? "fsmOwnerDefaultParams"
                             : kind == ObjectReference || kind == GameObjectParam ? "unityObjectParams" : kind == FsmObject ? "fsmObjectParams"
-                            : kind == FsmProperty ? "fsmPropertyParams" : kind == FsmArray ? "fsmArrayParams" : null;
+                            : kind == FsmProperty ? "fsmPropertyParams" : kind == FsmArray ? "fsmArrayParams"
+                            : kind == FsmBool && action == "ActivateGameObject" ? "fsmBoolParams" : null;
                         if (list == null) continue;
                         var items = Field(data, list) as IList;
                         if (items == null || position < 0 || position >= items.Count) continue;
@@ -747,6 +749,12 @@ namespace CrowCompat
                 // placed directly under it too, with the rest); the others count or search them.
                 Mark mark = AnchorActions.Contains(action) || action.StartsWith("DOTweenTransform") || action == "ActivateChildren" || action == "DestroyChildren"
                     ? Mark.Anchor : OwnActions.Contains(action) ? Mark.Own : ChildActions.Contains(action) ? Mark.NoChild : Mark.None;
+                // A recursive ActivateGameObject switches every object below its target too (Split
+                // stops there; the merge treats it as any switch).
+                foreach (KeyValuePair<string, object> parameter in entry.Value)
+                    if (parameter.Key == FsmBool + ":recursive" &&
+                        ((bool)(Field(parameter.Value, "useVariable") ?? true) || (bool)(Field(parameter.Value, "value") ?? true)))
+                        action = "ActivateGameObjectRecursive";
                 if (action == "SetProperty")
                 {
                     foreach (KeyValuePair<string, object> parameter in entry.Value)
@@ -814,6 +822,181 @@ namespace CrowCompat
             }
             object own = Field(fsmGameObject, "value");
             if (own != null) yield return own;
+        }
+
+        // ---------------------------------------------------------------- split (Perf.cs's SceneSplit)
+
+        // The still parts of an area's big hierarchies made hierarchies of their own (each engine system
+        // that follows transform changes walks a whole hierarchy whenever anything in it moves). From
+        // each root of 1,000 transforms or more down, a child subtree of 32 transforms or more is taken
+        // out to the scene's root when:
+        //   - nothing on the way down to it moves, is destroyed or reparented, searches or counts its
+        //     children (GetChild, GetChildCount...), switches what is below it recursively (a recursive
+        //     ActivateGameObject), or is a script the rules don't know, an Animator, Animation, LOD group,
+        //     joint, particle system or UI; objects that are only switched on and off (ActivateGameObject,
+        //     ActivateChildren and the game's switching scripts) may be on the way;
+        //   - its own root is not marked at all (nothing names it to switch, move or search it);
+        //   - nothing inside it is excluded (an unknown script might look up through its parents) or
+        //     taken by a MeshCombineStudio combiner's search (which would no longer find it).
+        // What moves inside a part keeps its parents. Below switched objects a SplitHolder takes the
+        // part's place (its local pose, sibling index and activity) and switches the part with it; the
+        // part is built switched off. Elsewhere a part whose ancestors are off for good is switched off
+        // itself. A part whose world transform can't be kept (a skewed parent) stays. Each part gets a
+        // SplitPart with its old parent and place. apply false only reports.
+        public static string Split(Scene scene, bool apply)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            Analysis analysis = Analyze(scene, new Dictionary<string, int>(), false);
+            long analysed = clock.ElapsedMilliseconds;
+            int before = 0, moved = 0, parts = 0, held = 0, skewed = 0, off = 0, fsms = 0;
+            var stops = new Dictionary<string, int>();
+            foreach (GameObject root in Roots(scene))
+            {
+                if (root.transform.hierarchyCount < 1000) continue;
+                before += root.transform.hierarchyCount;
+                Transform[] all = root.GetComponentsInChildren<Transform>(true);
+                var index = new Dictionary<Transform, int>(all.Length);
+                for (int i = 0; i < all.Length; i++) index[all[i]] = i;
+                var size = new int[all.Length];
+                var inside = new bool[all.Length];  // something below or on it may not leave its parents
+                for (int i = all.Length - 1; i >= 0; i--)
+                {
+                    size[i]++;
+                    Mark mark;
+                    string why;
+                    if (analysis.marks.TryGetValue(all[i], out mark) &&
+                        ((mark & Mark.Exclude) != 0 || ((mark & Mark.Own) != 0 && analysis.why.TryGetValue(all[i], out why) && why.Contains("MeshCombiner"))))
+                        inside[i] = true;
+                    int parent;
+                    if (i == 0 || !index.TryGetValue(all[i].parent, out parent)) continue;
+                    size[parent] += size[i];
+                    inside[parent] |= inside[i];
+                }
+                // Each node on the way, and whether something on the way is switched.
+                var cuts = new List<KeyValuePair<Transform, bool>>();
+                var queue = new Queue<KeyValuePair<Transform, bool>>();
+                bool rootSwitched;
+                if (Way(root.transform, analysis, stops, all.Length, out rootSwitched)) queue.Enqueue(new KeyValuePair<Transform, bool>(root.transform, rootSwitched));
+                while (queue.Count > 0)
+                {
+                    KeyValuePair<Transform, bool> node = queue.Dequeue();
+                    foreach (Transform child in node.Key)
+                    {
+                        int i = index[child];
+                        bool switched;
+                        if (size[i] < MinSplit || !Way(child, analysis, stops, size[i], out switched)) continue;
+                        if (!inside[i] && !analysis.marks.ContainsKey(child)) cuts.Add(new KeyValuePair<Transform, bool>(child, node.Value));
+                        else queue.Enqueue(new KeyValuePair<Transform, bool>(child, node.Value || switched));
+                    }
+                }
+                foreach (KeyValuePair<Transform, bool> cut in cuts)
+                {
+                    Transform part = cut.Key, parent = part.parent;
+                    if (!apply)
+                    {
+                        parts++;
+                        if (cut.Value) held++;
+                        moved += size[index[part]];
+                        continue;
+                    }
+                    Matrix4x4 world = part.localToWorldMatrix;
+                    int sibling = part.GetSiblingIndex();
+                    Vector3 position = part.localPosition, scale = part.localScale;
+                    Quaternion rotation = part.localRotation;
+                    // Switched off first where it must be (below a holder, or below parents off for
+                    // good), so that leaving its parents doesn't wake it up.
+                    bool active = part.gameObject.activeSelf, switchOff = active && (cut.Value || !parent.gameObject.activeInHierarchy);
+                    if (switchOff) part.gameObject.SetActive(false);
+                    part.SetParent(null, true);
+                    if (!Same(part.localToWorldMatrix, world))
+                    {
+                        part.SetParent(parent, false);
+                        part.SetSiblingIndex(sibling);
+                        part.localPosition = position;
+                        part.localRotation = rotation;
+                        part.localScale = scale;
+                        part.gameObject.SetActive(active);
+                        skewed++;
+                        continue;
+                    }
+                    SplitHolder holder = null;
+                    if (cut.Value)
+                    {
+                        var place = new GameObject(part.name + " (split)");
+                        place.SetActive(false);
+                        place.transform.SetParent(parent, false);
+                        place.transform.localPosition = position;
+                        place.transform.localRotation = rotation;
+                        place.transform.localScale = scale;
+                        place.transform.SetSiblingIndex(sibling);
+                        holder = place.AddComponent<SplitHolder>();
+                        holder.part = part.gameObject;
+                        place.SetActive(active);  // last: playing (-crow-scene-split apply), it switches the part on
+                        held++;
+                    }
+                    else if (switchOff) off++;
+                    var record = part.gameObject.AddComponent<SplitPart>();
+                    record.parent = parent;
+                    record.sibling = sibling;
+                    record.position = position;
+                    record.rotation = rotation;
+                    record.scale = scale;
+                    record.active = active;
+                    record.holder = holder;
+                    fsms += part.GetComponentsInChildren<Component>(true).Count(c => c != null && c.GetType().Name == "PlayMakerFSM");
+                    parts++;
+                    moved += size[index[part]];
+                }
+            }
+            return "SPLIT " + scene.name.Replace(' ', '_') + (apply ? "" : " (report)") + ": " + parts + " parts of " + moved + " transforms out of big roots of " +
+                   before + " (" + (before - moved) + " left), " + held + " with a holder below switched objects (" + fsms + " FSMs in parts), " + skewed +
+                   " kept for a skewed parent, " + off + " switched off with their parents; analysis " + analysed + " ms, all " + clock.ElapsedMilliseconds +
+                   " ms; stopped at: " + string.Join(" ", stops.OrderByDescending(p => p.Value).Take(12).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray());
+        }
+
+        const int MinSplit = 32;
+        // What only switches its target on and off (non-recursively): the split may go below it.
+        static readonly HashSet<string> Switches = new HashSet<string>
+        {
+            "ActivateGameObject", "ActivateChildren", "PMGlobalBoolToState", "RandomNumberEnabled", "LightFlicker", "DeactivateSelf",
+            "RandomVariant", "PlaySourceThenDeactivate",
+        };
+
+        // Whether the split may go below this object (switched: only because it is switched); counts the
+        // transforms it stops at by reason.
+        static bool Way(Transform t, Analysis analysis, Dictionary<string, int> stops, int size, out bool switched)
+        {
+            switched = false;
+            Mark mark;
+            string why = null;
+            if (analysis.marks.TryGetValue(t, out mark) && (mark & (Mark.Anchor | Mark.Exclude | Mark.NoChild)) != 0)
+            {
+                string[] reasons = analysis.why[t].Split('+');
+                switched = (mark & (Mark.Exclude | Mark.NoChild)) == 0 && reasons.All(r => Switches.Contains(r) || !AnchorReason(r));
+                if (!switched) why = reasons.First(r => !Switches.Contains(r) && AnchorReason(r) || (mark & (Mark.Exclude | Mark.NoChild)) != 0);
+            }
+            else if (t is RectTransform) why = "UI";
+            else if (t.GetComponent<ParticleSystem>() != null) why = "ParticleSystem";
+            if (why == null) return true;
+            int count;
+            stops.TryGetValue(why, out count);
+            stops[why] = count + size;
+            return false;
+        }
+
+        // Reasons that only mark a renderer (own) don't stop the split.
+        static bool AnchorReason(string reason)
+        {
+            return !OwnActions.Contains(reason) && reason != "MeshCombiner" && reason != "SetMaterial" && reason != "DeactivateRenderer" &&
+                   reason != "VideoPlayer" && reason != "UnityEngine_Video_VideoPlayer" && reason != "RandomMaterial" && reason != "SkinnedMeshRenderer" &&
+                   reason != "ParticleSystem" && reason != "SetProperty";
+        }
+
+        static bool Same(Matrix4x4 a, Matrix4x4 b)
+        {
+            for (int i = 0; i < 16; i++)
+                if (Mathf.Abs(a[i] - b[i]) > 1e-4f * Mathf.Max(1f, Mathf.Abs(b[i]))) return false;
+            return true;
         }
 
         // ---------------------------------------------------------------- grouping and merging

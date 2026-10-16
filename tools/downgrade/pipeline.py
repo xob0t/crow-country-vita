@@ -276,6 +276,7 @@ COMPAT_SOURCES = [
             'Alloc',
             'IdleAudio',
             'VitaLit',
+            'Prewarm',
         )
     ),
 ]

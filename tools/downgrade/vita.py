@@ -22,13 +22,17 @@ the VPK in VitaShell); after that:
   shot [out.png]        system screenshot of whatever is displayed (any build)
   reboot                reboot the console
   perf                  clocks, CPU load per core, frame rate and battery (vitacompanion)
-  log [--tail N]        print the player's log (ux0:data/crow/log.txt, CrowCompat Diag)
+  log [--tail N] [--prev [N]]  print the player's log (ux0:data/crow/log.txt, CrowCompat Diag);
+                        --prev the run before's (log.prev.txt), --prev 2 the one before that
   args [flags...]       set the probe's -crow-* flags for the next launch (none clears)
   files [folder]        list the files under a console folder with their sizes and times (default
                         the game's saves and settings, ux0:data/CrowCountry, compat/Saves.cs)
   crashes [--pull] [--thread NAME]  list crash dumps in ux0:data, newest last; --pull fetches the
                         newest and prints the crashed thread's symbolized call chain
-                        (needs the SDK's psp2bin and the build's SymbolFiles)
+                        (needs the SDK's psp2bin and the build's SymbolFiles; sync, install and
+                        seed keep a copy of the game module's symbols per build in
+                        artifacts/vita/symbols, and the copy whose fingerprint the dump lists is
+                        used); --dump FILE reads a local dump
 
 The commands that change the console's state (sync, install, launch, quit, run, do,
 reboot, args) refuse while someone else holds the vita-device lock (lock.py): they run inside
@@ -238,6 +242,7 @@ def seed(build: Path):
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps({name: digest for name, _, digest in digests(build)}, indent=0))
     pipeline.log(f'Recorded {build} as installed')
+    keep_symbols(build)
 
 
 def sync(build: Path):
@@ -274,9 +279,61 @@ def sync(build: Path):
             synced[name] = digest
             changed += 1
             manifest_path.write_text(json.dumps(synced, indent=0))  # progress survives an interrupted sync
+            if name == MODULE:
+                keep_symbols(build)
     finally:
         connection.close()
     pipeline.log(f'Synced {changed} of {total} files to {APP}')
+
+
+# Copies of the IL2CPP module's symbols, one per build sent to the console, named by the module's
+# fingerprint (its NID, which crash dumps list), so `crashes --pull` reads a dump with the symbols of
+# the build that crashed even after the next quickcode has replaced SymbolFiles. About 55 MB each.
+MODULE = 'Media/Modules/il2CppAssemblies.suprx'
+SYMBOLS = pipeline.ROOT / 'artifacts' / 'vita' / 'symbols'
+KEEP_SYMBOLS = 5
+SYNCED = 'synced.txt'  # in each copy's folder: when it was last sent (seconds since the epoch)
+
+
+def fingerprint(data: bytes):
+    """The IL2CPP module's fingerprint from its sce_module_info (attributes, version, the name
+    LIBIL2CPP_PRX at +4, the fingerprint at +0x34), or None."""
+    at = data.find(b'LIBIL2CPP_PRX\0')
+    return int.from_bytes(data[at + 0x30 : at + 0x34], 'little') if at >= 4 else None
+
+
+def keep_symbols(build: Path):
+    """Copies the build's SymbolFiles module into SYMBOLS/<fingerprint> when it matches the module
+    sent, and drops all but the newest KEEP_SYMBOLS copies."""
+    import shutil
+
+    source = build / 'SymbolFiles' / 'il2CppAssemblies.suprx'
+    if not source.exists() or not (build / MODULE).exists():
+        return
+    data = source.read_bytes()
+    kept, sent = fingerprint(data), fingerprint((build / MODULE).read_bytes())
+    if kept is None or kept != sent:
+        pipeline.log(f'SymbolFiles do not match the module sent ({kept} vs {sent}): no copy kept for crash dumps')
+        return
+    folder = SYMBOLS / f'{kept:08x}'
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / source.name
+    if not target.exists() or target.stat().st_size != len(data):
+        part = target.with_name(target.name + '.part')
+        part.write_bytes(data)
+        part.replace(target)
+    (folder / SYNCED).write_text(f'{time.time():.0f}\n')
+    copies = sorted((p for p in SYMBOLS.iterdir() if (p / SYNCED).exists()), key=synced_at)
+    for old in copies[:-KEEP_SYMBOLS]:
+        shutil.rmtree(old, ignore_errors=True)
+    pipeline.log(f'Kept the symbols of module {kept:08x} in {folder.relative_to(pipeline.ROOT)}')
+
+
+def synced_at(folder: Path):
+    try:
+        return float((folder / SYNCED).read_text().strip())
+    except (OSError, ValueError):
+        return 0.0
 
 
 PARSE_CORE_COMMIT = '644b5f081c5f3c9b205180793ab8f4209dfd9d97'
@@ -332,14 +389,123 @@ def addr2line(binary: Path, addresses):
     return names
 
 
+def module_fingerprints(core):
+    """{module name: fingerprint} from the dump's MODULE_INFO (each module: a 0x50-byte head with
+    the name at +0x24, the fingerprint at +0x48 and the segment count at +0x4c, its segments, a foot)."""
+    data, found = core.notes['MODULE_INFO'], {}
+    offset = 8
+    for _ in range(int.from_bytes(data[4:8], 'little')):
+        head = bytes(data[offset : offset + 0x50])
+        name = head[0x24:0x44].split(b'\0')[0].decode('latin-1')
+        found[name] = int.from_bytes(head[0x48:0x4C], 'little')
+        offset += 0x50 + 0x14 * int.from_bytes(head[0x4C:0x50], 'little') + 0x10
+    return found
+
+
+def game_symbols(build: Path, wanted: int | None, dump: Path):
+    """The symbols of the IL2CPP module the dump ran: the build's when its fingerprint matches, else a
+    copy kept at a sync (keep_symbols), else the newest copy sent before the dump, with a warning."""
+    current = build / 'SymbolFiles' / 'il2CppAssemblies.suprx'
+    if wanted is None or (current.exists() and fingerprint(current.read_bytes()) == wanted):
+        return current, True
+    kept = SYMBOLS / f'{wanted:08x}' / current.name
+    if kept.exists():
+        print(f"game symbols: {kept.relative_to(pipeline.ROOT)} (the dump's module {wanted:08x})")
+        return kept, True
+    try:
+        crashed = int(dump.name.split('-')[1])  # psp2core-<seconds since the epoch>-...
+    except (IndexError, ValueError):
+        crashed = dump.stat().st_mtime
+    copies = SYMBOLS.glob('*') if SYMBOLS.exists() else []
+    before = [p for p in copies if (p / current.name).exists() and synced_at(p) <= crashed]
+    chosen = max(before, key=synced_at) / current.name if before else current
+    print(
+        f"WARNING: no symbols of the dump's module {wanted:08x}; game frames are mapped onto "
+        f'{chosen.relative_to(pipeline.ROOT)} through the two exception indexes (marked ~)'
+    )
+    return chosen, False
+
+
+def prel31(word, at):
+    """The address an .ARM.exidx entry's first word points at."""
+    offset = word & 0x7FFFFFFF
+    return at + (offset - 0x80000000 if offset & 0x40000000 else offset)
+
+
+def function_starts(data: bytes, base: int, start: int = 0):
+    """The function starts (module offsets) in the .ARM.exidx table at or after data[start:], with
+    data at module offset base: its first entry points at the module's first function, and the
+    functions ascend."""
+    for k in range(start, len(data) - 8, 4):
+        word = int.from_bytes(data[k : k + 4], 'little')
+        if word & 0x80000000 or not 0 <= prel31(word, base + k) < 0x10:
+            continue
+        starts = []
+        while k + 8 <= len(data):
+            address = prel31(int.from_bytes(data[k : k + 4], 'little'), base + k)
+            if starts and address <= starts[-1]:
+                break
+            starts.append(address)
+            k += 8
+        if len(starts) > 1000:
+            return starts
+    return None
+
+
+def exidx_remap(core, module, symbols: Path):
+    """For a dump whose IL2CPP module has no symbols: a function from the dump's module offsets to
+    those of the module in `symbols`, or None. The dump keeps the module's .ARM.exidx (the stack
+    unwinder's table), which lists every function's start; aligning the two lists by function sizes
+    (difflib) matches the functions that didn't change, and the PC's offset into its function carries
+    over. On the 17:24 crash it put module_start and module_stop exactly on __module_start/stop."""
+    import difflib
+    import itertools
+
+    segment = module.segments[0]
+    dumped = [s for s in core.segments if segment.start <= s.vaddr < segment.start + segment.size]
+    old = None
+    for chunk in sorted(dumped, key=lambda s: -s.size):
+        old = function_starts(bytes(chunk.data), chunk.vaddr - segment.start)
+        if old:
+            break
+    data = symbols.read_bytes()
+    at = data.find(b'LIBIL2CPP_PRX\0')
+    if not old or at < 4:
+        return None
+    # The fself's segment 0: after the SCE header (its length at +0x10), at the first program
+    # header's p_offset (the program headers' place at +0x48).
+    phdrs = int.from_bytes(data[0x48:0x50], 'little')
+    text = int.from_bytes(data[0x10:0x18], 'little') + int.from_bytes(data[phdrs + 4 : phdrs + 8], 'little')
+    top, end = (int.from_bytes(data[at + o : at + o + 4], 'little') for o in (0x48, 0x4C))  # exidx_top, exidx_end
+    new = function_starts(data[text + top : text + end], top)
+    if not new:
+        return None
+    sizes = [[b - a for a, b in itertools.pairwise(starts)] for starts in (old, new)]
+    matched = {}
+    for block in difflib.SequenceMatcher(None, *sizes, autojunk=False).get_matching_blocks():
+        for k in range(block.size):
+            matched[block.a + k] = block.b + k
+    print(f'  {len(matched)} of {len(old)} functions matched')
+
+    def remap(offset):
+        import bisect
+
+        k = bisect.bisect_right(old, offset) - 1
+        return new[matched[k]] + offset - old[k] if k in matched else None
+
+    return remap
+
+
 def symbolize(dump: Path, build: Path, thread_name: str | None = None):
     """Prints the crashed thread's PC, LR and the return addresses on its stack, resolved
     against the Unity player's symbols and the build's IL2CPP module. Stack scanning also
     finds stale return addresses; read the chain from the top."""
     core = parse_core(dump)
     player = pipeline.editor_data(pipeline.TARGET) / 'PlaybackEngines' / 'PSP2Player' / 'PSP2Player_Il2cpp.self'
-    symbols = {'LIBIL2CPP_PRX': build / 'SymbolFiles' / 'il2CppAssemblies.suprx'}
+    game, exact = game_symbols(build, module_fingerprints(core).get('LIBIL2CPP_PRX'), dump)
+    symbols = {'LIBIL2CPP_PRX': game}
     modules = {m.name: m for m in core.modules}
+    remap = None if exact else exidx_remap(core, modules['LIBIL2CPP_PRX'], game)
     engine = next(name for name in modules if name.startswith('UnityPlayer'))
     symbols[engine] = player
 
@@ -347,7 +513,12 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
         for name in symbols:
             segment = modules[name].segments[0]
             if segment.start <= address < segment.start + segment.size:
-                return name, ENGINE_BASE + address - segment.start
+                offset = address - segment.start
+                if name == 'LIBIL2CPP_PRX' and remap:
+                    offset = remap(offset)
+                    if offset is None:
+                        return name, None
+                return name, ENGINE_BASE + offset
         return None, None
 
     if thread_name:
@@ -374,12 +545,14 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
             frames.append((f'sp+{4 * k:x}', name, link))
     names = {}
     for name in symbols:
-        wanted = sorted({link & ~1 for _, n, link in frames if n == name})
+        wanted = sorted({link & ~1 for _, n, link in frames if n == name and link is not None})
         for address, symbol in addr2line(symbols[name], wanted).items():
             names[name, address] = symbol
     for where, name, link in frames:
         if name:
-            print(f'{where:>8} {"engine" if name == engine else "game":6} {names.get((name, link & ~1), "?")[:160]}')
+            kind = 'engine' if name == engine else 'game~' if remap else 'game'
+            symbol = '? (a function the symbols lack)' if link is None else names.get((name, link & ~1), '?')
+            print(f'{where:>8} {kind:6} {symbol[:160]}')
 
 
 def crash_dumps(connection):
@@ -399,8 +572,11 @@ def crashes(pull: bool, build: Path, thread_name: str | None = None):
         if pull and dumps:
             out = pipeline.ROOT / 'artifacts' / 'vita' / dumps[-1][1]
             out.parent.mkdir(parents=True, exist_ok=True)
-            with out.open('wb') as handle:
+            # Into a part file first: a failed transfer used to leave an earlier copy empty.
+            part = out.with_name(out.name + '.part')
+            with part.open('wb') as handle:
                 connection.retrbinary(f'RETR ux0:/data/{dumps[-1][1]}', handle.write)
+            part.replace(out)
             print(f'saved {out}')
     if pull and dumps:
         symbolize(out, build, thread_name)
@@ -479,6 +655,10 @@ def run_command():
     parser.add_argument('--tail', type=int, default=0, metavar='N', help="log: only the log's last N lines")
     parser.add_argument('--pull', action='store_true', help='crashes: fetch and symbolize the newest dump')
     parser.add_argument('--thread', help='crashes --pull: symbolize this thread (part of its name), not the crashed')
+    parser.add_argument(
+        '--prev', type=int, nargs='?', const=1, default=0, metavar='N', help='log: the log of the run N before (1 or 2)'
+    )
+    parser.add_argument('--dump', type=Path, help='crashes: symbolize this local dump instead (no console needed)')
     # The options may come anywhere; everything else after the command is its arguments, in order
     # (the probe flags of args, the chain of do, the file of shot and screenshot).
     args, args.rest = parser.parse_known_args()
@@ -505,14 +685,17 @@ def run_command():
     if args.command == 'reboot':
         print(command('reboot', timeout=2))
     if args.command == 'log':
-        lines = read(f'{REMOTE}/log.txt').decode(errors='replace').splitlines()
+        name = 'log.txt' if not args.prev else 'log.prev.txt' if args.prev == 1 else f'log.prev{args.prev}.txt'
+        lines = read(f'{REMOTE}/{name}').decode(errors='replace').splitlines()
         print('\n'.join(lines[-args.tail :] if args.tail else lines))
     if args.command == 'args':
         with ftp() as connection:
             makedirs(connection, REMOTE, set())
         write(f'{REMOTE}/args.txt', ' '.join(args.rest).encode())
         print('args.txt: ' + (' '.join(args.rest) or '(empty)'))
-    if args.command == 'crashes':
+    if args.command == 'crashes' and args.dump:
+        symbolize(args.dump, build, args.thread)
+    elif args.command == 'crashes':
         crashes(args.pull, build, args.thread)
     if args.command == 'files':
         files(args.rest[0] if args.rest else SAVES)

@@ -35,7 +35,11 @@ namespace CrowCompat
         const int Keys = 8;
         static bool on, hooked, log;
         static Shader lit, standard;
-        static readonly Dictionary<Material, Shader> swapped = new Dictionary<Material, Shader>();
+        // The swapped materials' original shaders, by instance ID: a static that holds an asset can keep
+        // it, and what it references, through Resources.UnloadUnusedAssets (IL2CPP's liveness pass starts
+        // from the statics; CamEffect's list of camera effects kept their render textures that way). The
+        // areas' materials were not seen to stay with the Material keys, but nothing here needs them held.
+        static readonly Dictionary<int, Shader> swapped = new Dictionary<int, Shader>();
         static readonly Dictionary<Light, KeyValuePair<int, LightShadows>> keyed = new Dictionary<Light, KeyValuePair<int, LightShadows>>();
         static readonly Dictionary<Light, LightRenderMode> forced = new Dictionary<Light, LightRenderMode>();
         static readonly List<Light> keys = new List<Light>();
@@ -115,13 +119,14 @@ namespace CrowCompat
             }
             else
             {
-                foreach (KeyValuePair<Material, Shader> pair in swapped)
-                    if (pair.Key != null)
-                    {
-                        int queue = pair.Key.renderQueue;
-                        pair.Key.shader = pair.Value;
-                        pair.Key.renderQueue = queue;
-                    }
+                foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
+                {
+                    Shader shader;
+                    if (material.shader != lit || !swapped.TryGetValue(material.GetInstanceID(), out shader)) continue;
+                    int queue = material.renderQueue;
+                    material.shader = shader;
+                    material.renderQueue = queue;
+                }
                 swapped.Clear();
                 foreach (Light light in keyed.Keys.ToList()) Unkey(light);
                 foreach (KeyValuePair<Light, LightRenderMode> pair in forced)
@@ -161,7 +166,7 @@ namespace CrowCompat
             {
                 Shader shader = material.shader;
                 if (shader == null || shader == lit || !(shader == standard || shader.name == "Standard")) continue;
-                swapped[material] = shader;
+                swapped[material.GetInstanceID()] = shader;
                 // Setting a shader resets the material's render queue to the shader's (Geometry): the
                 // game's Fade and Transparent materials (queue 3000, no depth writes) were then drawn
                 // before the ground, which covered them (Roadside's car glass). Keep the queue.

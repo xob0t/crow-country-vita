@@ -17,7 +17,8 @@ namespace CrowCompat
         const string Help =
             "-crow-scene <name>       load this scene once the Title and the player's scene (CrowMara) have loaded (an area)\n" +
             "-crow-scene-then <name> <s>  s seconds (default 30) after that scene loaded, load this one as the game's\n" +
-            "                         area changes do (PlayMaker's LoadScene action), with the player in play\n" +
+            "                         area changes do (PlayMaker's LoadScene action), with the player in play;\n" +
+            "                         \"A>B>C\" loads them in turn, each s seconds after the one before\n" +
             "-crow-heartbeat <s>      every s seconds, log frame times, GC and memory, visible renderers and lights\n" +
             "-crow-quit-after <s>     quit s seconds after the probe starts\n" +
             "-crow-shot <s> <path>    save a screenshot s seconds after the last scene load\n" +
@@ -115,11 +116,13 @@ namespace CrowCompat
         {
             while (true)
             {
-                System.Threading.Thread.Sleep(250);
+                System.Threading.Thread.Sleep(Math.Max(10, Math.Min(250, (int)(stallDump * 250f))));  // a quarter of the limit: short stalls too
                 long started = System.Threading.Interlocked.Read(ref frameStartTicks);
                 if (started == 0) continue;
                 double seconds = (clock.ElapsedTicks - started) / (double)System.Diagnostics.Stopwatch.Frequency;
                 if (seconds < stallDump || frameStartTime < stallAfter) continue;
+                Debug.Log("CROW_STALL_DUMP a frame has taken " + seconds.ToString("F1") + " s: crashing for a dump");
+                ProbeFiles.Flush(3000);  // the queued lines, before the crash loses them
                 System.Runtime.InteropServices.Marshal.WriteInt32(new IntPtr(16), 0);  // unmapped: a data abort
                 Environment.FailFast("CrowCompat stall dump");
             }
@@ -194,9 +197,12 @@ namespace CrowCompat
             }
             if (sceneThen != null && sceneRequested && now - lastLoad >= sceneThenAfter && SceneManager.GetActiveScene().name == sceneToLoad)
             {
-                string next = sceneThen;
-                sceneThen = null;
+                // "A>B>C": a chain of area loads, each s seconds after the one before.
+                int split = sceneThen.IndexOf('>');
+                string next = split < 0 ? sceneThen : sceneThen.Substring(0, split);
+                sceneThen = split < 0 ? null : sceneThen.Substring(split + 1);
                 Debug.Log("CROW_DIAG loading " + next + " from " + sceneToLoad);
+                sceneToLoad = next;
                 ScenePrefetch.LoadScene(next, LoadSceneMode.Single);
             }
             float delta = Time.unscaledDeltaTime * 1000f;

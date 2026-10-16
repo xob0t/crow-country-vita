@@ -36,6 +36,8 @@ using UnityEngine.SceneManagement;
 //                           default 6; Boehm's own is 3).
 //   -crow-gc-reserve <MB>   the main memory the GC heap's cap leaves to Unity (PS Vita default 16; 0:
 //                           no cap). See GcSettings.
+//   -crow-gc-max <MB>       also never past this size: the heap collects instead of growing (an area's
+//                           load leaves garbage the heap grows into, and the heap never shrinks).
 //   -crow-no-phycont-heap   keep the GC heap out of the PHYCONT memory (see PhyContPool).
 // MeshRelease, below, frees what MeshCombineStudio keeps after combining (on the PS Vita).
 // Part of CrowCompat; see Compat2018.cs.
@@ -204,8 +206,9 @@ namespace CrowCompat
                 if (retries > 0) GC_set_max_retries((UIntPtr)(uint)retries);
                 if (divisor > 0) GC_set_free_space_divisor((UIntPtr)(uint)divisor);
                 int reserve = IntArg(args, "-crow-gc-reserve", VitaReserveMB);
+                maxHeap = IntArg(args, "-crow-gc-max", 0) * 1048576L;
                 Debug.Log("CROW_GC max_retries=" + (ulong)GC_get_max_retries() + " free_space_divisor=" + (ulong)GC_get_free_space_divisor() +
-                          " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve);
+                          " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve + " maxMB=" + maxHeap / 1048576L);
                 if (reserve > 0) Governor(reserve);
             }
             catch (Exception e)
@@ -217,6 +220,8 @@ namespace CrowCompat
         // Every 100 ms on a thread of its own (scene loads allocate on the loading thread while the main
         // thread waits): the heap's cap from the free main memory. Logs when the cap starts and stops
         // holding the heap at its size.
+        static long maxHeap;  // -crow-gc-max, bytes (0: none)
+
         static void Governor(int reserveMB)
         {
             Type diagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
@@ -250,6 +255,7 @@ namespace CrowCompat
                         // Not by slivers: each section is a memory block of its own, and Boehm has a
                         // fixed number of section slots.
                         if (room < 4 * 1048576L) room = 0;
+                        if (maxHeap > 0 && heap + room > maxHeap) room = Math.Max(0L, maxHeap - heap);
                         GC_set_max_heap_size((UIntPtr)(ulong)(heap + room));
                         bool holds = room == 0;
                         if (holds != held)
