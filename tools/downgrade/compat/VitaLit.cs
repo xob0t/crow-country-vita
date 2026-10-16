@@ -9,7 +9,10 @@ using UnityEngine.SceneManagement;
 // light after the main directional one (ForwardAdd): Roadside's one spot light (the daylight pool,
 // range 25 m) adds a pass to 260 of its 281 renderers. On the PS Vita each of those draws costs the
 // main thread about as much as the object itself, and the GPU a second fill of its pixels. With vita,
-// the game's Standard materials draw with CrowVita/Lit (vita_shaders/CrowLit.shader: Standard's
+// the game's Standard materials (and SFBStandard's: SFB's copy of Standard, with the same properties,
+// on one material, Entrance's "tiles floor" path; left to it, that path lost the key lights, which
+// light nothing else, and its decompiled shadow read is the PC's screen-space one, so it drew nearly
+// black) draw with CrowVita/Lit (vita_shaders/CrowLit.shader: Standard's
 // simple form, no ForwardAdd pass), which draws the main directional light, the harmonics and the 4
 // point lights Unity gives each object per vertex, and up to 8 key lights set here as globals per
 // pixel, Lambert only: the spot and point lights that reach the camera's view (spots first), on the
@@ -18,7 +21,8 @@ using UnityEngine.SceneManagement;
 // pixel lights (directional lights are Important, so the brightest is in the base pass). The game's
 // PlayMaker actions keep driving the lights: the globals follow each key light's intensity, colour,
 // range, angle, position and enabled state every frame, and the key set is chosen again every
-// 0.25 s. On the PS Vita in Roadside: 61-62 -> 38 ms a frame, the main thread 34-35 -> 24 ms.
+// 0.25 s and in the frame a spot light comes on (the guns' laser sights as aiming starts). On the
+// PS Vita in Roadside: 61-62 -> 38 ms a frame, the main thread 34-35 -> 24 ms.
 //   -crow-lit game|vita    game keeps Standard and the game's lights (the default on other players);
 //                          vita as above (the PS Vita's default)
 //   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 8)
@@ -151,12 +155,23 @@ namespace CrowCompat
                 swapPasses++;
                 Swap();
             }
-            if (now >= nextSelect)
+            if (now >= nextSelect || Woken())
             {
                 nextSelect = now + 0.25f;
                 Select();
             }
             Upload();
+        }
+
+        // A watched spot light that came on since the last Select (this runs before Unity culls the frame's lights).
+        static bool Woken()
+        {
+            for (int i = 0; i < watched.Count; i++)
+            {
+                Light light = watched[i];
+                if (light != null && light.isActiveAndEnabled && light.intensity > 0f) return true;
+            }
+            return false;
         }
 
         static void Swap()
@@ -165,7 +180,7 @@ namespace CrowCompat
             foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
             {
                 Shader shader = material.shader;
-                if (shader == null || shader == lit || !(shader == standard || shader.name == "Standard")) continue;
+                if (shader == null || shader == lit || !(shader == standard || shader.name == "Standard" || shader.name == "SFBStandard")) continue;
                 swapped[material.GetInstanceID()] = shader;
                 // Setting a shader resets the material's render queue to the shader's (Geometry): the
                 // game's Fade and Transparent materials (queue 3000, no depth writes) were then drawn
@@ -215,7 +230,13 @@ namespace CrowCompat
         // Select runs every 0.25 s in play, so it allocates nothing (strings only with -crow-lit-log): the
         // scene's lights are listed again every 2 s and after each load, the buffers are reused, and the
         // key lights are picked by hand.
-        static Light[] lights = new Light[0];
+        // The list has the lights that are off too, and the spot lights among them that would be key
+        // lights are watched every frame (Woken): a spot light that isn't a key light is Unity's, per
+        // vertex, where Unity drops its cone and lights everything in its range as a point light. The
+        // guns' laser sights (red, green or blue spots of 1.5 degrees, 20 m, intensity 10) switch on as
+        // aiming starts; listed only while on, the handgun's lit the wall in front of Mara red for up to
+        // 2 s each time she aimed. Now it is a key light the frame it comes on.
+        static readonly List<Light> lights = new List<Light>(), watched = new List<Light>();
         static float nextList;
         static readonly Plane[] frustum = new Plane[6];
         static readonly List<Light> candidates = new List<Light>(), chosen = new List<Light>(), scratch = new List<Light>();
@@ -228,7 +249,10 @@ namespace CrowCompat
             if (now >= nextList)
             {
                 nextList = now + 2f;
-                lights = UnityEngine.Object.FindObjectsOfType<Light>();
+                // The scenes' lights, on or off (FindObjectsOfType lists only those on); not prefabs'.
+                lights.Clear();
+                foreach (Light light in Resources.FindObjectsOfTypeAll<Light>())
+                    if (light != null && light.gameObject.scene.IsValid()) lights.Add(light);
             }
             Light main = null;
             foreach (Light light in lights)
@@ -244,19 +268,27 @@ namespace CrowCompat
             candidates.Clear();
             scores.Clear();
             excluded.Clear();
+            watched.Clear();
             Light fill = null;
             foreach (Light light in lights)
             {
                 if (light == null) continue;
-                if (light.type == LightType.Directional)
+                LightType type = light.type;
+                if (type == LightType.Directional)
                 {
                     // Every directional light stays Important: Unity puts the brightest in the base pass.
                     if (!forced.ContainsKey(light)) forced[light] = light.renderMode;
                     if (light.renderMode != LightRenderMode.ForcePixel) light.renderMode = LightRenderMode.ForcePixel;
                 }
-                if (!light.isActiveAndEnabled || light.intensity <= 0f || light.type == LightType.Area || light == main) continue;
+                if (type == LightType.Area || light == main) continue;
                 KeyValuePair<int, LightShadows> saved;
                 int mask = keyed.TryGetValue(light, out saved) ? saved.Key : light.cullingMask;
+                if (!light.isActiveAndEnabled || light.intensity <= 0f)
+                {
+                    // Off: a spot light that could be a key light is picked the frame it comes on.
+                    if (type == LightType.Spot && (mask & world) == world) watched.Add(light);
+                    continue;
+                }
                 if ((mask & world) != world)
                 {
                     if (log) excluded.Add(light.type + ":" + Perf.Path(light.transform, 2) + "@" + light.range.ToString("F1") + "/mask=" + mask.ToString("X"));

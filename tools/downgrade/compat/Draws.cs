@@ -21,7 +21,10 @@ using UnityEngine.SceneManagement;
 //                             every 10 s (renderers come and go): off (all), flat (flat horizontal
 //                             renderers: floors, ceilings, roads), small:<m> (bounds diagonal under m
 //                             metres), player (all but the player's own: Mara keeps her shadow; the
-//                             PS Vita's default, see Quality.cs), game (none).
+//                             PS Vita's default, see Quality.cs), game (none). A shadows-only renderer
+//                             the rule takes is switched off: with its casting off it would be drawn
+//                             with its material (Entrance's tutorial paper got its hidden caster box,
+//                             a cube with the colour atlas; Ocean Kingdom has 354 of them).
 //                             -crow-ab takes casters=<rule> too.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
@@ -90,9 +93,13 @@ namespace CrowCompat
             {
                 if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
                 if (renderer.shadowCastingMode == ShadowCastingMode.Off) continue;
+                bool shadowsOnly = renderer.shadowCastingMode == ShadowCastingMode.ShadowsOnly;
+                if (shadowsOnly && !renderer.enabled) continue;
                 casters++;
                 if (!CasterOff(renderer, casterRule)) continue;
-                renderer.shadowCastingMode = ShadowCastingMode.Off;
+                // A shadows-only renderer is the game's invisible shadow caster: Off would draw it.
+                if (shadowsOnly) renderer.enabled = false;
+                else renderer.shadowCastingMode = ShadowCastingMode.Off;
                 turnedOff.Add(renderer);
                 changed++;
             }
