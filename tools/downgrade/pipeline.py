@@ -860,6 +860,7 @@ def build(
         sys.exit(f'Unity reported success but IL2CPP failed; see {log_path}')
     if platform == 'vita':
         native_plugins(output)
+        boot_config(output)
     if scenes:
         folder = output if platform == 'vita' else output.parent
         folder.with_name(folder.name + '.txt').write_text('\n'.join(scenes) + '\n', encoding='utf-8')
@@ -1106,6 +1107,7 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
         shutil.copy2(module, target)
     shutil.copy2(metadata, output / 'Media' / 'Metadata' / 'global-metadata.dat')
     native_plugins(output)
+    boot_config(output)
     log(f'Updated the code of {output} in {time.time() - started:.0f}s; vita.py sync uploads it')
 
 
@@ -1125,6 +1127,23 @@ def native_plugins(output: Path):
         for file in files:
             shutil.copy2(WORK / 'native' / name / file, folder / file)
     log(f'Native plugins in {folder}: {", ".join(f for files in NATIVE_PLUGINS.values() for f in files)}')
+
+
+# The PS Vita player's graphics jobs: the 2018.2 editor has no setting for them on the PS Vita, but its
+# player reads gfx-enable-gfx-jobs from Media/boot.config at start and then records the camera's draws in
+# Unity's job workers beside its render thread (Station Square, main thread: standing 24.9 -> 22.1 ms,
+# steady real fight 59.1 -> 55.2). CROW_GFX_JOBS=on (the default) or off; build and quickcode write it.
+def boot_config(output: Path):
+    path = output / 'Media' / 'boot.config'
+    if not path.exists():
+        return
+    lines = path.read_text(encoding='utf-8').splitlines()
+    lines = [line for line in lines if not line.startswith('gfx-enable-gfx-jobs=')]
+    jobs = os.environ.get('CROW_GFX_JOBS', 'on') != 'off'
+    if jobs:
+        lines.insert(0, 'gfx-enable-gfx-jobs=1')
+    path.write_bytes(('\n'.join(lines) + '\n').encode('utf-8'))
+    log(f'Graphics jobs {"on" if jobs else "off"} in {path}')
 
 
 # Build log lines worth a look; the summary prints each distinct one with its count, the first

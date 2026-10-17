@@ -237,10 +237,11 @@ namespace CrowCompat
             bool same = cameras.Count == filming.Count && cameras.All(c => old.ContainsKey(c) && old[c].Target == c.targetTexture);
             float now = Time.realtimeSinceStartup;
             // The renderers showing the textures, switched on or off (Arcade's cabinet screens are off
-            // until a cabinet is played, their cameras filming all along): again when the cameras change,
-            // else every 30 s (the pass allocates and walks every renderer, the inactive ones too).
+            // until a cabinet is played, their cameras filming all along): after each load and when the
+            // cameras change, not periodically: the pass walks every renderer, the inactive ones too, and
+            // took a 190-240 ms frame on the PS Vita in Arcade and Office Pike.
             if (same && now < nextShown) return;
-            nextShown = now + 30f;
+            nextShown = float.MaxValue;
             filming.Clear();
             if (cameras.Count == 0) return;
             var targets = new Dictionary<Texture, Filming>();
