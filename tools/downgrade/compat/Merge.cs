@@ -45,18 +45,40 @@ using UnityEngine.SceneManagement;
 // objects and colliders stay, so scripts that reference them work as before; with Drop (the build's
 // default) the parts' meshes nothing else in the scene uses leave their MeshFilters.
 //
+// Enemies (the "Enemy <Type>" roots: rigidbodies whose parts the game's FSMs animate) merge their own
+// way when Enemies is on (the build's default; CROW_MERGE_ENEMIES=off keeps them as they are; at run time
+// -crow-merge-enemies): the parts below each anchor of an enemy become one renderer with a submesh per
+// material, whatever their materials, lights and cell (they move); the enemy's MeshCombineStudio combiner,
+// which would otherwise combine them per material when the enemy first switches on, is switched off; and
+// its random materials, rotations and scales are picked once at build time even where the game picks them
+// again at each OnEnable (a fixed look per build, accepted for the PS Vita). Their own budget is
+// EnemyMaxBytes per scene, their part size EnemyMaxPartVertices. When the build drops the parts' meshes
+// (CROW_MERGE=on) it also removes the enemies' merged parts that are bare leaves (Strip below; not with
+// CROW_MERGE_ENEMY_STRIP=off).
+//
 // The PS Vita build merges while it writes each scene (DowngradeBuild's CrowMergeScenes calls
 // Process); other players can merge at run time, from readable meshes only.
 //   -crow-merge report|on|off|merged  report: Analyze each area once it has loaded and log what would
 //                               merge (CROW_MERGE lines: candidates, parts and groups, what leaves
 //                               renderers out); on: merge at run time as the build does; off: the
 //                               build's merged renderers off and their parts on (a build made with
-//                               CROW_MERGE=ab, which keeps the parts' meshes), merged: back.
+//                               CROW_MERGE=ab, which keeps the parts' meshes), with the enemies'
+//                               MeshCombineStudio combiners back on; merged: back (not the combiners).
 //                               -crow-cycle takes merge=<value> (now, in the loaded scenes).
 //   -crow-merge-cell <m>, -crow-merge-max-vertices <n>, -crow-merge-max-kb <n>, -crow-merge-drop
 //                               the run-time merge's cell, part size, memory budget, and Drop
+//   -crow-merge-enemies         the enemy mode at run time (the build's default)
+//   -crow-merge-enemy-strip     what the build does with CROW_MERGE=on, after each scene loads: the
+//                               merged enemy parts that are bare leaves (a Transform, MeshFilter and
+//                               MeshRenderer, inert scripts and random picks made once only; no
+//                               children, no tag but MeshCombineEnemy) and that nothing in the scene
+//                               names (no FSM's object or string, no mark of the analysis) destroyed,
+//                               so the enemies' hierarchies are smaller
+//   -crow-merge-materials       the report lists the enemies' merged materials (CROW_MERGE_MATERIALS=1
+//                               for the build)
 //   -crow-merge-check           every second, each merged renderer's parts: still there, active with
-//                               it, where they were relative to it, their own renderers off; the parts
+//                               it, where they were relative to it, their own renderers off, their
+//                               materials the same; the parts
 //                               that differ are logged once each (CROW_MERGE_CHECK)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
@@ -69,11 +91,12 @@ namespace CrowCompat
 
     // -crow-merge-check: every second, whether each merged renderer still stands for its parts: each
     // part still there, active exactly when the merged object is, where it was relative to it (from
-    // the first look after its scene loaded) and its own renderer still off. CROW_MERGE_CHECK lines
-    // name the parts that differ (once each) and count the checks.
+    // the first look after its scene loaded), its own renderer still off and its materials the same.
+    // CROW_MERGE_CHECK lines name the parts that differ (once each) and count the checks.
     static class Check
     {
         static readonly Dictionary<Renderer, Matrix4x4> relative = new Dictionary<Renderer, Matrix4x4>();
+        static readonly Dictionary<Renderer, Material[]> materials = new Dictionary<Renderer, Material[]>();
         static readonly HashSet<Renderer> reported = new HashSet<Renderer>();
         static float next, lastSummary;
         static int checks, differences;
@@ -84,6 +107,7 @@ namespace CrowCompat
             SceneManager.sceneLoaded += (scene, mode) =>
             {
                 relative.Clear();
+                materials.Clear();
                 next = Time.realtimeSinceStartup + 3f;
             };
         }
@@ -111,11 +135,14 @@ namespace CrowCompat
                         Matrix4x4 now2 = group.transform.worldToLocalMatrix * part.transform.localToWorldMatrix;
                         Matrix4x4 first;
                         if (!relative.TryGetValue(part, out first)) relative[part] = first = now2;
+                        Material[] looks;
+                        if (!materials.TryGetValue(part, out looks)) materials[part] = looks = part.sharedMaterials;
                         float moved = 0f;
                         for (int i = 0; i < 16; i++) moved = Math.Max(moved, Math.Abs(now2[i] - first[i]));
                         if (part.gameObject.activeInHierarchy != active) why = "active=" + part.gameObject.activeInHierarchy + " merged=" + active;
                         else if (moved > 0.001f) why = "moved " + moved.ToString("0.###", CultureInfo.InvariantCulture);
                         else if (part.enabled) why = "its renderer is on";
+                        else if (!part.sharedMaterials.SequenceEqual(looks)) why = "material " + string.Join(",", part.sharedMaterials.Select(m => m == null ? "null" : m.name).ToArray());
                     }
                     if (why == null || part == null && reported.Contains(group.transform.GetComponent<Renderer>())) continue;
                     differences++;
@@ -143,6 +170,10 @@ namespace CrowCompat
         // while it loads).
         public static long MaxBytes = 1536L << 10;
         const int MaxVertices = 65000;
+        // The enemy mode (see above): in the editor (the build) on unless CROW_MERGE_ENEMIES=off.
+        public static bool Enemies = Application.isEditor && Environment.GetEnvironmentVariable("CROW_MERGE_ENEMIES") != "off";
+        public static long EnemyMaxBytes = 8L << 20;
+        public static int EnemyMaxPartVertices = 4000;
         static string mode;
 
         internal static void Install(string[] args)
@@ -157,14 +188,25 @@ namespace CrowCompat
             if (limit >= 0 && limit + 1 < args.Length && int.TryParse(args[limit + 1], out vertices)) MaxPartVertices = vertices;
             if (args.Contains("-crow-merge-check")) Check.Install();
             if (args.Contains("-crow-merge-drop")) Drop = true;
+            if (args.Contains("-crow-merge-enemies")) Enemies = true;
+            bool strip = args.Contains("-crow-merge-enemy-strip");
+            if (strip) Enemies = true;
             int budgetAt = Array.IndexOf(args, "-crow-merge-max-kb");
             int kilobytes;
             if (budgetAt >= 0 && budgetAt + 1 < args.Length && int.TryParse(args[budgetAt + 1], out kilobytes)) MaxBytes = kilobytes * 1024L;
-            if (mode == null) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
-                Set(mode, scene);
+                if (mode != null) Set(mode, scene);
+                if (!strip) return;
+                try
+                {
+                    Debug.Log(Strip(scene));
+                }
+                catch (Exception exception)
+                {
+                    Debug.Log("CROW_MERGE strip failed: " + exception);
+                }
             };
         }
 
@@ -214,7 +256,26 @@ namespace CrowCompat
                         parts++;
                     }
             }
-            Debug.Log("CROW_MERGE " + scene.name.Replace(' ', '_') + " " + (merged ? "merged" : "off") + ": " + groups + " merged renderers, " + parts + " parts");
+            // Off: the enemies' MeshCombineStudio combiners the build switched off back on too (before
+            // their Start they combine as the game's do; once on, merged again doesn't undo that).
+            int combiners = 0;
+            Type combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
+            if (!merged && combinerType != null)
+            {
+                var analysis = new Analysis();
+                foreach (GameObject root in scene.GetRootGameObjects())
+                    foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
+                        if (body.name.StartsWith("Enemy ", StringComparison.Ordinal)) analysis.enemies.Add(body.transform);
+                foreach (GameObject root in scene.GetRootGameObjects())
+                    foreach (Component combiner in root.GetComponentsInChildren(combinerType, true))
+                    {
+                        if (((Behaviour)combiner).enabled || !EnemyCombiner(combiner, analysis)) continue;
+                        ((Behaviour)combiner).enabled = true;
+                        combiners++;
+                    }
+            }
+            Debug.Log("CROW_MERGE " + scene.name.Replace(' ', '_') + " " + (merged ? "merged" : "off") + ": " + groups + " merged renderers, " + parts + " parts" +
+                      (merged ? "" : ", " + combiners + " enemy combiners"));
         }
 
         // ---------------------------------------------------------------- analysis
@@ -234,7 +295,63 @@ namespace CrowCompat
             public readonly Dictionary<Transform, Mark> marks = new Dictionary<Transform, Mark>();
             public readonly Dictionary<Transform, string> why = new Dictionary<Transform, string>();
             public readonly Dictionary<string, int> unknownTargets = new Dictionary<string, int>();
+            // Global GameObject variables: what the scene's FSMs (SetGameObject into a variable the FSM
+            // doesn't own) and SetPMGlobalGameObject scripts put in each, and what the FSMs do through
+            // each (resolved once every FSM is read: the FSM that moves ElevatorRoom isn't the one that
+            // stores it). A global use left without a value is counted in unresolved.
+            public readonly Dictionary<string, List<object>> globalValues = new Dictionary<string, List<object>>();
+            public readonly List<KeyValuePair<string, KeyValuePair<Mark, string>>> globalUses = new List<KeyValuePair<string, KeyValuePair<Mark, string>>>();
+            public readonly Dictionary<string, int> unresolved = new Dictionary<string, int>();
+
+            public void GlobalValue(string name, IEnumerable<object> values)
+            {
+                List<object> list;
+                if (!globalValues.TryGetValue(name, out list)) globalValues[name] = list = new List<object>();
+                list.AddRange(values.Where(v => v != null));
+            }
+
+            public void ResolveGlobals()
+            {
+                foreach (KeyValuePair<string, KeyValuePair<Mark, string>> use in globalUses)
+                {
+                    List<object> values;
+                    if (globalValues.TryGetValue(use.Key, out values) && values.Count > 0)
+                        foreach (object value in values)
+                        {
+                            if (MoverDebug && use.Value.Key == Mark.Anchor)
+                            {
+                                var go = value as GameObject;
+                                var c = value as Component;
+                                Transform t = go != null ? go.transform : c != null ? c.transform : null;
+                                if (t != null) Debug.Log("CROW_SPLIT_GLOBAL " + use.Key + " -> " + Perf.Path(t, 4) + " (" + t.GetComponentsInChildren<Transform>(true).Length + ") " + use.Value.Value);
+                            }
+                            Add(value, use.Value.Key, use.Value.Value);
+                        }
+                    else if (use.Value.Key == Mark.Anchor)
+                    {
+                        int count;
+                        string key = use.Key + ":" + use.Value.Value;
+                        unresolved.TryGetValue(key, out count);
+                        unresolved[key] = count + 1;
+                    }
+                }
+            }
             public int fsms, actions, globals, baked, combined;
+            // The enemy mode: the enemies' roots, and the MeshCombiners that search only enemies (Process
+            // switches them off when it merges, before their Start combines).
+            public readonly HashSet<Transform> enemies = new HashSet<Transform>();
+            public readonly List<Behaviour> enemyCombiners = new List<Behaviour>();
+            // Strip's: every object (as its transform) and string any FSM of the scene names.
+            public readonly HashSet<Transform> referenced = new HashSet<Transform>();
+            public readonly HashSet<string> names = new HashSet<string>();
+
+            public bool InEnemy(Transform t)
+            {
+                if (enemies.Count == 0) return false;
+                for (; t != null; t = t.parent)
+                    if (enemies.Contains(t)) return true;
+                return false;
+            }
             // Animation scripts PlatformSpecificAnimation switches off for good on the PS Vita.
             public readonly HashSet<Component> stillAnimations = new HashSet<Component>();
 
@@ -333,7 +450,12 @@ namespace CrowCompat
         static Analysis Analyze(Scene scene, Dictionary<string, int> scripts, bool bake)
         {
             var analysis = new Analysis();
+            lastAnalysis = analysis;
             Type combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
+            if (Enemies)
+                foreach (GameObject root in Roots(scene))
+                    foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
+                        if (body.name.StartsWith("Enemy ", StringComparison.Ordinal)) analysis.enemies.Add(body.transform);
             // PlatformSpecificAnimation (PatchPlatformAnimation): the PS Vita takes the Switch's choice
             // (onNS), so the animation scripts it lists stay off, unless an AnimationState lists them.
             if (bake || Application.platform == RuntimePlatform.PSP2)
@@ -385,6 +507,9 @@ namespace CrowCompat
                         continue;
                     }
                     if (InertScripts.Contains(name) || (name.StartsWith("PlayMaker") && name != "PlayMakerFSM")) continue;
+                    // MeshCombineStudio's bookkeeping on its combined objects (a run-time merge of enemies it
+                    // combined already).
+                    if (name == "CachedComponents" && analysis.InEnemy(transform)) continue;
                     if (Known(component, name, analysis, bake)) continue;
                     // Any other script: it, and what it references, stay as they are.
                     analysis.Add(transform, Mark.Exclude, name);
@@ -394,7 +519,24 @@ namespace CrowCompat
                     scripts.TryGetValue(name, out count);
                     scripts[name] = count + 1;
                 }
+            analysis.ResolveGlobals();
             return analysis;
+        }
+
+        // The enemy mode: a random pick on an enemy's part made once (at build time; at run time the game's
+        // pick stays) and the script's picks at Awake and OnEnable off. False when not an enemy's or the
+        // script can't be run.
+        static bool EnemyPick(Component component, Transform transform, Analysis analysis, bool bake)
+        {
+            if (!analysis.InEnemy(transform)) return false;
+            MethodInfo random = component.GetType().GetMethod("DoRandom", Instance);
+            FieldInfo awake = component.GetType().GetField("onAwake", Instance), enable = component.GetType().GetField("onEnable", Instance);
+            if (random == null || awake == null) return false;
+            if (bake) random.Invoke(component, null);
+            awake.SetValue(component, false);
+            if (enable != null) enable.SetValue(component, false);
+            analysis.baked++;
+            return true;
         }
 
         // A MeshCombiner's renderers: what its own search (MeshCombiner.ValidObject with its search
@@ -404,6 +546,20 @@ namespace CrowCompat
         static MethodInfo validObject;
         static Type objectType;
 
+        // The enemy mode: a combiner on an enemy, or searching only enemies.
+        static bool EnemyCombiner(Component combiner, Analysis analysis)
+        {
+            if (analysis.enemies.Count == 0) return false;
+            if (analysis.InEnemy(combiner.transform)) return true;
+            object options = Field(combiner, "searchOptions");
+            var parents = new List<GameObject>();
+            var one = Field(options, "parent") as GameObject;
+            if (one != null) parents.Add(one);
+            var many = Field(options, "parentGOs") as GameObject[];
+            if (many != null) parents.AddRange(many.Where(p => p != null));
+            return parents.Count > 0 && parents.All(p => analysis.InEnemy(p.transform));
+        }
+
         static void Combiner(Component combiner, Analysis analysis)
         {
             object options = Field(combiner, "searchOptions");
@@ -412,6 +568,11 @@ namespace CrowCompat
             if (one != null) parents.Add(one);
             var many = Field(options, "parentGOs") as GameObject[];
             if (many != null) parents.AddRange(many.Where(p => p != null));
+            if (EnemyCombiner(combiner, analysis))
+            {
+                analysis.enemyCombiners.Add((Behaviour)combiner);  // the merge's to replace
+                return;
+            }
             if (validObject == null)
             {
                 validObject = combiner.GetType().GetMethod("ValidObject", Instance);
@@ -472,6 +633,7 @@ namespace CrowCompat
                     var target = Field(component, "target") as Transform;
                     if (target == null) target = transform;
                     bool onAwake = (bool)(Field(component, "onAwake") ?? true), onEnable = (bool)(Field(component, "onEnable") ?? false);
+                    if (EnemyPick(component, transform, analysis, bake)) return true;
                     if (onEnable) analysis.Add(target, Mark.Anchor, name);
                     else if (onAwake && bake)
                     {
@@ -517,6 +679,7 @@ namespace CrowCompat
                     if (many != null) foreach (object item in many) targets.Add(item);
                     if (targets.All(t => t == null)) targets.Add(transform);
                     Mark mark = name == "RandomMaterial" ? Mark.Own : Mark.Anchor;
+                    if (EnemyPick(component, transform, analysis, bake)) return true;
                     if (onEnable || (onAwake && !bake && !Application.isPlaying))
                         foreach (object target in targets) analysis.Add(target, mark, name);
                     else if (onAwake && bake)
@@ -588,6 +751,11 @@ namespace CrowCompat
                     // Puts its object in a global variable. The game's FSMs only move what globals name
                     // (ElevatorRoom, MineCartRoom, the player, the camera: SetPosition, DOTween...).
                     analysis.Add(Field(component, "gameObject"), Mark.Anchor, name);
+                    foreach (string field in new[] { "pmGlobalGameObject" })
+                    {
+                        var global = Field(component, field) as string;
+                        if (!string.IsNullOrEmpty(global)) analysis.GlobalValue(global, new[] { Field(component, "gameObject") });
+                    }
                     return true;
                 case "RandomDeactivateBehaviour":  // switch another behaviour (judged on its own) on or off
                 case "EnableBehaviourAfter":
@@ -655,6 +823,7 @@ namespace CrowCompat
             var states = Field(fsm, "states") as Array;
             if (states == null) return;
             analysis.fsms++;
+            if (collectReferences) References(fsm, states, analysis);
             var locals = new Dictionary<string, List<object>>();
             var variables = Field(Field(fsm, "variables"), "gameObjectVariables") as Array;
             if (variables != null)
@@ -663,6 +832,7 @@ namespace CrowCompat
                     string name = Field(variable, "name") as string;
                     if (name != null) locals[name] = new List<object> { Field(variable, "value") };
                 }
+            var own = new HashSet<string>(locals.Keys);  // the rest are globals
             var arrays = Field(Field(fsm, "variables"), "arrayVariables") as Array;
             var arrayItems = new List<object>();
             if (arrays != null)
@@ -734,7 +904,12 @@ namespace CrowCompat
                             foreach (KeyValuePair<string, object> target in parameters)
                                 if (target.Key.StartsWith(FsmOwnerDefault + ":")) parents.AddRange(OwnerTargets(target.Value, owner, locals));
                         }
-                        else if (copies) values.AddRange(Values(source, locals));
+                        else if (copies)
+                        {
+                            List<object> copied = Values(source, locals).ToList();
+                            values.AddRange(copied);
+                            if (!own.Contains(name)) analysis.GlobalValue(name, copied);
+                        }
                         else if (fromArray) values.AddRange(arrayItems);
                         // Children found by GetChild and FindChild are below an object marked exclude;
                         // created objects are new.
@@ -787,12 +962,29 @@ namespace CrowCompat
                     string name = variable ? Field(value, "name") as string : null;
                     if (variable && !string.IsNullOrEmpty(name))
                     {
-                        if (!locals.ContainsKey(name))
+                        if (!own.Contains(name))
                         {
-                            analysis.globals++;
-                            analysis.Unknown("global " + name + " " + action);
+                            // A global (or a variable only a found or copied object is put in here):
+                            // what the scene's FSMs put in the global gets this too, once all are read.
+                            analysis.globalUses.Add(new KeyValuePair<string, KeyValuePair<Mark, string>>(name, new KeyValuePair<Mark, string>(mark, action)));
+                            if (!locals.ContainsKey(name))
+                            {
+                                analysis.globals++;
+                                analysis.Unknown("global " + name + " " + action);
+                            }
                         }
-                        else if (found.Contains(name)) analysis.Unknown(ownerPath + " " + action + " " + name);
+                        else if (found.Contains(name))
+                        {
+                            analysis.Unknown(ownerPath + " " + action + " " + name);
+                            if (mark == Mark.Anchor)
+                            {
+                                // Moved or switched through what a raycast, trigger or property found: anything.
+                                int count;
+                                string key = "found " + name + ":" + action;
+                                analysis.unresolved.TryGetValue(key, out count);
+                                analysis.unresolved[key] = count + 1;
+                            }
+                        }
                         List<object> parents;
                         if (mark != Mark.NoChild && foundUnder.TryGetValue(name, out parents))
                             foreach (object parent in parents) analysis.Add(parent, Mark.Exclude, action + " found child");
@@ -800,6 +992,175 @@ namespace CrowCompat
                     foreach (object target in Values(value, locals)) analysis.Add(target, mark, action);
                 }
             }
+        }
+
+        // Strip's: whatever an FSM names, by object or by string, in its variables and its actions' parameters
+        // (ParamDataType's lists, whatever the action).
+        static bool collectReferences;
+        static Analysis lastAnalysis;
+
+        static void References(object fsm, Array states, Analysis analysis)
+        {
+            Action<object> reference = item =>
+            {
+                var gameObject = item as GameObject;
+                var component = item as Component;
+                if (gameObject != null) analysis.referenced.Add(gameObject.transform);
+                else if (component != null) analysis.referenced.Add(component.transform);
+            };
+            Action<object> name = item =>
+            {
+                var text = item as string;
+                if (!string.IsNullOrEmpty(text)) analysis.names.Add(text);
+            };
+            Action<object> array = item =>
+            {
+                var objects = Field(item, "objectReferences") as Array;
+                if (objects != null) foreach (object o in objects) reference(o);
+                var strings = Field(item, "stringValues") as Array;
+                if (strings != null) foreach (object o in strings) name(o);
+            };
+            object variables = Field(fsm, "variables");
+            foreach (string list in new[] { "gameObjectVariables", "objectVariables", "stringVariables", "arrayVariables" })
+            {
+                var items = Field(variables, list) as Array;
+                if (items == null) continue;
+                foreach (object item in items)
+                    if (list == "arrayVariables") array(item);
+                    else if (list == "stringVariables") name(Field(item, "value"));
+                    else reference(Field(item, "value"));
+            }
+            foreach (object state in states)
+            {
+                object data = Field(state, "actionData");
+                if (data == null) continue;
+                foreach (string list in new[]
+                         {
+                             "fsmGameObjectParams", "fsmOwnerDefaultParams", "unityObjectParams", "fsmObjectParams", "fsmEventTargetParams", "fsmVarParams",
+                             "fsmArrayParams", "fsmStringParams", "stringParams", "fsmPropertyParams",
+                         })
+                {
+                    var items = Field(data, list) as IList;
+                    if (items == null) continue;
+                    foreach (object item in items)
+                    {
+                        if (item == null) continue;
+                        switch (list)
+                        {
+                            case "fsmGameObjectParams":
+                            case "fsmObjectParams":
+                                reference(Field(item, "value"));
+                                break;
+                            case "fsmOwnerDefaultParams":
+                                reference(Field(Field(item, "gameObject"), "value"));
+                                break;
+                            case "fsmEventTargetParams":
+                                reference(Field(Field(Field(item, "gameObject"), "gameObject"), "value"));
+                                break;
+                            case "fsmVarParams":
+                                reference(Field(item, "objectReference"));
+                                name(Field(item, "stringValue"));
+                                break;
+                            case "fsmArrayParams":
+                                array(item);
+                                break;
+                            case "fsmStringParams":
+                                name(Field(item, "value"));
+                                break;
+                            case "fsmPropertyParams":
+                                reference(Field(Field(item, "TargetObject"), "value"));
+                                break;
+                            case "stringParams":
+                                name(item);
+                                break;
+                            default:
+                                reference(item);
+                                break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // -crow-merge-enemy-strip (see the top): returns the CROW_MERGE strip line.
+        static string Strip(Scene scene)
+        {
+            collectReferences = true;
+            try
+            {
+                Analyze(scene, new Dictionary<string, int>(), false);
+            }
+            finally
+            {
+                collectReferences = false;
+            }
+            return Strip(scene, lastAnalysis, Resources.FindObjectsOfTypeAll<MergedRenderer>(), false);
+        }
+
+        // The build's (immediate: DestroyImmediate, with the analysis Process made with references) and the
+        // run-time flag's.
+        static string Strip(Scene scene, Analysis analysis, IEnumerable<MergedRenderer> groups, bool immediate)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var kept = new Dictionary<string, int>();
+            int stripped = 0, parts = 0, transforms = 0;
+            foreach (Transform enemy in analysis.enemies) transforms += enemy.GetComponentsInChildren<Transform>(true).Length;
+            foreach (MergedRenderer group in groups)
+            {
+                if (group == null || group.gameObject.scene != scene || group.parts == null || !analysis.InEnemy(group.transform)) continue;
+                var left = new List<Renderer>();
+                foreach (Renderer part in group.parts)
+                {
+                    if (part == null) continue;
+                    parts++;
+                    string why = StripBlocker(part, analysis);
+                    if (why == null)
+                    {
+                        if (immediate) UnityEngine.Object.DestroyImmediate(part.gameObject);
+                        else UnityEngine.Object.Destroy(part.gameObject);
+                        stripped++;
+                        continue;
+                    }
+                    left.Add(part);
+                    int count;
+                    kept.TryGetValue(why, out count);
+                    kept[why] = count + 1;
+                }
+                group.parts = left.ToArray();
+            }
+            return "CROW_MERGE strip scene=" + scene.name.Replace(' ', '_') + " enemies=" + analysis.enemies.Count + " transforms=" + transforms + " parts=" + parts +
+                   " stripped=" + stripped + " referenced=" + analysis.referenced.Count + " names=" + analysis.names.Count + " ms=" + clock.ElapsedMilliseconds +
+                   " kept: " + string.Join(" ", kept.OrderByDescending(k => k.Value).Select(k => k.Key + "=" + k.Value).ToArray());
+        }
+
+        static string StripBlocker(Renderer part, Analysis analysis)
+        {
+            GameObject gameObject = part.gameObject;
+            if (gameObject.transform.childCount > 0) return "children";
+            foreach (Component component in gameObject.GetComponents<Component>())
+            {
+                if (component is Transform || component is MeshFilter || component is MeshRenderer) continue;
+                if (component == null) return "missing";
+                string name = component.GetType().Name;
+                if (InertScripts.Contains(name)) continue;
+                // A random pick made once (EnemyPick): the script does nothing more.
+                if (name.StartsWith("Random", StringComparison.Ordinal) && !(bool)(Field(component, "onAwake") ?? true) && !(bool)(Field(component, "onEnable") ?? true)) continue;
+                return name;
+            }
+            // MeshCombineEnemy: the enemies' MeshCombineStudio search's (the merge's now; PlatformSpecificAnimation
+            // only clears it).
+            if (gameObject.tag != "Untagged" && gameObject.tag != "MeshCombineEnemy") return "tag:" + gameObject.tag;
+            if (analysis.names.Contains(gameObject.name)) return "named";
+            if (analysis.referenced.Contains(gameObject.transform)) return "referenced";
+            if (analysis.marks.ContainsKey(gameObject.transform)) return "marked";
+            // What counts or searches the children of a parent (GetChild...), or an unknown script's.
+            for (Transform t = gameObject.transform.parent; t != null; t = t.parent)
+            {
+                Mark mark;
+                if (analysis.marks.TryGetValue(t, out mark) && (mark & (Mark.NoChild | Mark.Exclude)) != 0) return "parent";
+                if (analysis.enemies.Contains(t)) break;
+            }
+            return null;
         }
 
         static IEnumerable<object> OwnerTargets(object ownerDefault, Component owner, Dictionary<string, List<object>> locals)
@@ -843,12 +1204,32 @@ namespace CrowCompat
         // part is built switched off. Elsewhere a part whose ancestors are off for good is switched off
         // itself. A part whose world transform can't be kept (a skewed parent) stays. Each part gets a
         // SplitPart with its old parent and place. apply false only reports.
+        // SplitMovers (-crow-scene-split apply-movers; CROW_SPLIT=movers for the build): also the parts that
+        // move on their own, whatever their size: a subtree whose own root only the movers in
+        // MoverReasons move (DOTween transform tweens, SetPosition/SetRotation/Rotate/LookAt actions, the
+        // game's animation and spin scripts; it may also be switched or destroyed itself), with nothing
+        // excluded inside, goes out below a new root of its own that keeps its old parent's world pose
+        // (its "split parent"), so a move in its parent's space lands where it did; the split parent is
+        // the SplitPart (in the old place it would stand at the parent's origin). And the way down may
+        // go below objects the game destroys (DestroyObject, DestroySelf), with a SplitHolder in the
+        // part's place: destroying the holder destroys its part. A moving part in a big hierarchy made
+        // the engine walk the whole hierarchy every frame (Pool: a breathing creature and a few
+        // animation scripts in a root of 16,000 transforms). A moving object of BigMover transforms or
+        // more (Station Square's and the underground areas' whole levels, which the elevator moves as
+        // the player rides it) isn't taken whole: the way goes on below it as below a switched object,
+        // and the parts taken out below it follow it at run time (Perf.cs's SplitFollow puts each part
+        // back at its place below its old parent in any frame that parent moved), so they stay put as
+        // they would have and the level isn't walked while it stands still.
+        public static bool SplitMovers;
+        const int BigMover = 1000;
+
         public static string Split(Scene scene, bool apply)
         {
+            bool movers = SplitMovers;
             var clock = System.Diagnostics.Stopwatch.StartNew();
             Analysis analysis = Analyze(scene, new Dictionary<string, int>(), false);
             long analysed = clock.ElapsedMilliseconds;
-            int before = 0, moved = 0, parts = 0, held = 0, skewed = 0, off = 0, fsms = 0;
+            int before = 0, moved = 0, parts = 0, held = 0, skewed = 0, off = 0, fsms = 0, moving = 0;
             var stops = new Dictionary<string, int>();
             foreach (GameObject root in Roots(scene))
             {
@@ -859,6 +1240,9 @@ namespace CrowCompat
                 for (int i = 0; i < all.Length; i++) index[all[i]] = i;
                 var size = new int[all.Length];
                 var inside = new bool[all.Length];  // something below or on it may not leave its parents
+                // The same for the movers' split, where MeshCombineStudio's CachedComponents (references
+                // for its combiner, no code) doesn't count.
+                var insideMover = new bool[all.Length];
                 for (int i = all.Length - 1; i >= 0; i--)
                 {
                     size[i]++;
@@ -866,17 +1250,22 @@ namespace CrowCompat
                     string why;
                     if (analysis.marks.TryGetValue(all[i], out mark) &&
                         ((mark & Mark.Exclude) != 0 || ((mark & Mark.Own) != 0 && analysis.why.TryGetValue(all[i], out why) && why.Contains("MeshCombiner"))))
+                    {
                         inside[i] = true;
+                        insideMover[i] = analysis.why[all[i]] != "CachedComponents";
+                    }
                     int parent;
                     if (i == 0 || !index.TryGetValue(all[i].parent, out parent)) continue;
                     size[parent] += size[i];
                     inside[parent] |= inside[i];
+                    insideMover[parent] |= insideMover[i];
                 }
                 // Each node on the way, and whether something on the way is switched.
                 var cuts = new List<KeyValuePair<Transform, bool>>();
                 var queue = new Queue<KeyValuePair<Transform, bool>>();
+                var moverCuts = new HashSet<Transform>();
                 bool rootSwitched;
-                if (Way(root.transform, analysis, stops, all.Length, out rootSwitched)) queue.Enqueue(new KeyValuePair<Transform, bool>(root.transform, rootSwitched));
+                if (Way(root.transform, analysis, stops, all.Length, out rootSwitched, movers)) queue.Enqueue(new KeyValuePair<Transform, bool>(root.transform, rootSwitched));
                 while (queue.Count > 0)
                 {
                     KeyValuePair<Transform, bool> node = queue.Dequeue();
@@ -884,20 +1273,56 @@ namespace CrowCompat
                     {
                         int i = index[child];
                         bool switched;
-                        if (size[i] < MinSplit || !Way(child, analysis, stops, size[i], out switched)) continue;
-                        if (!inside[i] && !analysis.marks.ContainsKey(child)) cuts.Add(new KeyValuePair<Transform, bool>(child, node.Value));
+                        if (movers && MoverDebug && analysis.why.ContainsKey(child) && analysis.why[child].Contains("DOTween"))
+                            Debug.Log("CROW_SPLIT_MOVER " + Perf.Path(child, 4) + " inside=" + insideMover[i] + " mover=" + Mover(child, analysis) + " why=" + analysis.why[child] +
+                                      " excluded: " + string.Join(" ", child.GetComponentsInChildren<Transform>(true).Where(d => analysis.marks.ContainsKey(d) &&
+                                          ((analysis.marks[d] & Mark.Exclude) != 0 || analysis.why[d].Contains("MeshCombiner"))).Take(4)
+                                          .Select(d => d.name.Replace(' ', '_') + "=" + analysis.why[d]).ToArray()));
+                        if (movers && !insideMover[i] && size[i] < BigMover && Mover(child, analysis))
+                        {
+                            cuts.Add(new KeyValuePair<Transform, bool>(child, node.Value));
+                            moverCuts.Add(child);
+                            continue;
+                        }
+                        // With movers the way goes into small subtrees too (a moving part of any size counts), but
+                        // only subtrees of MinSplit transforms or more leave still.
+                        bool small = size[i] < MinSplit;
+                        if ((small && !movers) || !Way(child, analysis, small ? new Dictionary<string, int>() : stops, size[i], out switched, movers)) continue;
+                        if (!small && !inside[i] && !analysis.marks.ContainsKey(child)) cuts.Add(new KeyValuePair<Transform, bool>(child, node.Value));
                         else queue.Enqueue(new KeyValuePair<Transform, bool>(child, node.Value || switched));
                     }
                 }
                 foreach (KeyValuePair<Transform, bool> cut in cuts)
                 {
+                    if (MoverDebug)
+                    {
+                        var way = new System.Text.StringBuilder("CROW_SPLIT_WAY ").Append(Perf.Path(cut.Key, 8)).Append(':');
+                        for (Transform t = cut.Key.parent; t != null; t = t.parent)
+                            way.Append(' ').Append(t.name.Replace(' ', '_')).Append('=').Append(analysis.why.ContainsKey(t) ? analysis.why[t] : "-");
+                        Debug.Log(way.ToString());
+                    }
                     Transform part = cut.Key, parent = part.parent;
+                    bool mover = moverCuts.Contains(part);
                     if (!apply)
                     {
                         parts++;
                         if (cut.Value) held++;
+                        if (mover) moving++;
                         moved += size[index[part]];
                         continue;
+                    }
+                    int moverSize = size[index[part]];
+                    if (mover)
+                    {
+                        // The split parent: in the part's place at the old parent's origin, the part below it
+                        // with its local pose as it was; from here on it stands for the part.
+                        var split = new GameObject(part.name + " (split parent)");
+                        split.layer = part.gameObject.layer;
+                        split.transform.SetParent(parent, false);
+                        split.transform.SetSiblingIndex(part.GetSiblingIndex());
+                        part.SetParent(split.transform, false);
+                        moving++;
+                        part = split.transform;
                     }
                     Matrix4x4 world = part.localToWorldMatrix;
                     int sibling = part.GetSiblingIndex();
@@ -916,6 +1341,15 @@ namespace CrowCompat
                         part.localRotation = rotation;
                         part.localScale = scale;
                         part.gameObject.SetActive(active);
+                        if (mover)
+                        {
+                            // The moving part back in its place, the split parent gone.
+                            Transform own = part.GetChild(0);
+                            own.SetParent(parent, false);
+                            own.SetSiblingIndex(sibling);
+                            UnityEngine.Object.DestroyImmediate(part.gameObject);
+                            moving--;
+                        }
                         skewed++;
                         continue;
                     }
@@ -945,13 +1379,15 @@ namespace CrowCompat
                     record.holder = holder;
                     fsms += part.GetComponentsInChildren<Component>(true).Count(c => c != null && c.GetType().Name == "PlayMakerFSM");
                     parts++;
-                    moved += size[index[part]];
+                    moved += mover ? moverSize : size[index[part]];
                 }
             }
-            return "SPLIT " + scene.name.Replace(' ', '_') + (apply ? "" : " (report)") + ": " + parts + " parts of " + moved + " transforms out of big roots of " +
+            return "SPLIT " + scene.name.Replace(' ', '_') + (apply ? "" : " (report)") + (movers ? " (movers: " + moving + " moving parts)" : "") + ": " + parts + " parts of " + moved + " transforms out of big roots of " +
                    before + " (" + (before - moved) + " left), " + held + " with a holder below switched objects (" + fsms + " FSMs in parts), " + skewed +
                    " kept for a skewed parent, " + off + " switched off with their parents; analysis " + analysed + " ms, all " + clock.ElapsedMilliseconds +
-                   " ms; stopped at: " + string.Join(" ", stops.OrderByDescending(p => p.Value).Take(12).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray());
+                   " ms; stopped at: " + string.Join(" ", stops.OrderByDescending(p => p.Value).Take(12).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()) +
+                   "; moves through globals with no value here or found objects: " + (analysis.unresolved.Count == 0 ? "none" :
+                       string.Join(" ", analysis.unresolved.OrderByDescending(p => p.Value).Take(12).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
         }
 
         const int MinSplit = 32;
@@ -962,9 +1398,9 @@ namespace CrowCompat
             "RandomVariant", "PlaySourceThenDeactivate",
         };
 
-        // Whether the split may go below this object (switched: only because it is switched); counts the
-        // transforms it stops at by reason.
-        static bool Way(Transform t, Analysis analysis, Dictionary<string, int> stops, int size, out bool switched)
+        // Whether the split may go below this object (switched: only because it is switched, or with
+        // movers destroyed); counts the transforms it stops at by reason.
+        static bool Way(Transform t, Analysis analysis, Dictionary<string, int> stops, int size, out bool switched, bool movers = false)
         {
             switched = false;
             Mark mark;
@@ -972,7 +1408,9 @@ namespace CrowCompat
             if (analysis.marks.TryGetValue(t, out mark) && (mark & (Mark.Anchor | Mark.Exclude | Mark.NoChild)) != 0)
             {
                 string[] reasons = analysis.why[t].Split('+');
-                switched = (mark & (Mark.Exclude | Mark.NoChild)) == 0 && reasons.All(r => Switches.Contains(r) || !AnchorReason(r));
+                switched = (mark & (Mark.Exclude | Mark.NoChild)) == 0 &&
+                           reasons.All(r => Switches.Contains(r) || !AnchorReason(r) ||
+                                            (movers && (r == "DestroyObject" || r == "DestroySelf" || (size >= BigMover && MoverReason(r)))));
                 if (!switched) why = reasons.First(r => !Switches.Contains(r) && AnchorReason(r) || (mark & (Mark.Exclude | Mark.NoChild)) != 0);
             }
             else if (t is RectTransform) why = "UI";
@@ -982,6 +1420,39 @@ namespace CrowCompat
             stops.TryGetValue(why, out count);
             stops[why] = count + size;
             return false;
+        }
+
+        // What moves only the object it acts on, in its parent's space or the world's (a split parent keeps
+        // both): the movers' split takes such an object out with its subtree.
+        static readonly HashSet<string> MoverReasons = new HashSet<string>
+        {
+            "SetPosition", "SetRotation", "SetScale", "Rotate", "LookAt", "SmoothLookAt", "SmoothLookAt2d", "SmoothLookAtDirection",
+            "SmoothLookAtWithLimit", "MoveTowards", "SetRandomRotation", "SpinGameObject", "SetRotationEveryFrame", "RotateAroundAxis",
+            "RotationAnimationScript", "ScaleAnimationScript", "PositionAnimationScript", "TransformLock",
+            "SetProperty:position", "SetProperty:localPosition", "SetProperty:rotation", "SetProperty:localRotation", "SetProperty:eulerAngles",
+            "SetProperty:localEulerAngles", "SetProperty:localScale",
+        };
+
+        static bool MoverReason(string reason)
+        {
+            return MoverReasons.Contains(reason) || reason.StartsWith("DOTweenTransform", StringComparison.Ordinal);
+        }
+
+        // A subtree the movers' split takes out whole: its root is moved only by MoverReasons (and maybe
+        // switched or destroyed itself, which it still is out there), and nothing marks it excluded.
+        internal static bool MoverDebug;
+
+        static bool Mover(Transform t, Analysis analysis)
+        {
+            Mark mark;
+            if (!analysis.marks.TryGetValue(t, out mark) || (mark & Mark.Exclude) != 0) return false;
+            bool moves = false;
+            foreach (string reason in analysis.why[t].Split('+'))
+            {
+                if (MoverReasons.Contains(reason) || reason.StartsWith("DOTweenTransform", StringComparison.Ordinal)) moves = true;
+                else if (!Switches.Contains(reason) && AnchorReason(reason) && reason != "DestroyObject" && reason != "DestroySelf") return false;
+            }
+            return moves && !(t is RectTransform) && t.GetComponent<ParticleSystem>() == null;
         }
 
         // Reasons that only mark a renderer (own) don't stop the split.
@@ -1044,7 +1515,18 @@ namespace CrowCompat
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var scripts = new Dictionary<string, int>();
-            Analysis analysis = Analyze(scene, scripts, bake);
+            // The build strips the enemies' bare merged parts when it drops the parts' meshes.
+            bool strip = apply && bake && Drop && Enemies && Environment.GetEnvironmentVariable("CROW_MERGE_ENEMY_STRIP") != "off";
+            collectReferences = strip;
+            Analysis analysis;
+            try
+            {
+                analysis = Analyze(scene, scripts, bake);
+            }
+            finally
+            {
+                collectReferences = false;
+            }
             var lights = new List<Light>();
             foreach (GameObject root in Roots(scene))
                 foreach (Light light in root.GetComponentsInChildren<Light>(true))
@@ -1064,6 +1546,7 @@ namespace CrowCompat
                     var filter = renderer.GetComponent<MeshFilter>();
                     Mesh mesh = filter == null ? null : filter.sharedMesh;
                     Material[] materials = renderer.sharedMaterials;
+                    bool enemy = why == null && analysis.InEnemy(renderer.transform);
                     if (why == null)
                     {
                         if (mesh == null || mesh.vertexCount == 0) why = "no mesh";
@@ -1074,7 +1557,7 @@ namespace CrowCompat
                         else if (Enumerable.Range(0, mesh.subMeshCount).Any(s => mesh.GetTopology(s) != MeshTopology.Triangles)) why = "topology";
                         else if (canRead == null ? !mesh.isReadable : !canRead(mesh)) why = "unreadable";
                         else if (renderer.probeAnchor != null) why = "probe anchor";
-                        else if (mesh.vertexCount > MaxPartVertices) why = "big";
+                        else if (mesh.vertexCount > (enemy ? EnemyMaxPartVertices : MaxPartVertices)) why = "big";
                     }
                     bool drawn = Application.isPlaying && renderer.isVisible;
                     if (drawn) seen++;
@@ -1102,9 +1585,12 @@ namespace CrowCompat
                     string common = (anchor == null ? 0 : anchor.GetInstanceID()) + "|" + renderer.gameObject.layer + "|" + (int)renderer.shadowCastingMode + "|" +
                                     renderer.receiveShadows + "|" + (int)renderer.lightProbeUsage + "|" + (int)renderer.reflectionProbeUsage + "|" +
                                     Channels(mesh) + "|" + lit + "|" + cell;
+                    if (enemy)  // one group per anchor, across materials (submeshes); lights and cells mean nothing for what moves
+                        common = "E|" + (anchor == null ? 0 : anchor.GetInstanceID()) + "|" + renderer.gameObject.layer + "|" + (int)renderer.shadowCastingMode + "|" +
+                                 renderer.receiveShadows + "|" + (int)renderer.lightProbeUsage + "|" + (int)renderer.reflectionProbeUsage + "|" + Channels(mesh);
                     for (int s = 0; s < materials.Length; s++)
                     {
-                        string key = materials[s].GetInstanceID() + "|" + common;
+                        string key = (enemy ? "" : materials[s].GetInstanceID() + "|") + common;
                         List<Slot> slots;
                         if (!groups.TryGetValue(key, out slots)) groups[key] = slots = new List<Slot>();
                         slots.Add(new Slot { renderer = renderer, mesh = mesh, subMesh = s, material = materials[s], anchor = anchor });
@@ -1123,7 +1609,8 @@ namespace CrowCompat
                          " singles by anchor: " + string.Join(" ", groups.Values.Where(g => g.Count == 1).GroupBy(g => g[0].anchor).OrderByDescending(g => g.Count()).Take(12)
                              .Select(g => (g.Key == null ? "scene" : Perf.Path(g.Key, 2) + "(" + why(analysis, g.Key) + ")") + "=" + g.Count()).ToArray());
             }
-            var merging = groups.Values.Where(g => g.Count > 1).ToList();
+            Func<List<Slot>, bool> single = g => g.Count < 2 || g.All(x => x.renderer == g[0].renderer);  // one renderer's slots (an enemy part's materials)
+            var merging = groups.Values.Where(g => !single(g)).ToList();
             var slotsOf = new Dictionary<MeshRenderer, int>();
             foreach (List<Slot> group in groups.Values)
                 foreach (Slot slot in group)
@@ -1134,12 +1621,12 @@ namespace CrowCompat
                 }
             var merged = new HashSet<MeshRenderer>();
             foreach (List<Slot> group in merging) foreach (Slot slot in group) merged.Add(slot.renderer);
-            foreach (List<Slot> group in groups.Values.Where(g => g.Count == 1))
+            foreach (List<Slot> group in groups.Values.Where(single))
                 merged.Remove(group[0].renderer);
             for (int i = 0; i < merging.Count; i++)
             {
                 merging[i] = merging[i].Where(s => merged.Contains(s.renderer)).ToList();
-                if (merging[i].Count < 2)
+                if (single(merging[i]))
                 {
                     foreach (Slot slot in merging[i]) merged.Remove(slot.renderer);
                     merging.RemoveAt(i--);
@@ -1147,27 +1634,29 @@ namespace CrowCompat
             }
             // A renderer left with some slots unmerged (its other slots' groups shrank) stays whole.
             foreach (List<Slot> group in merging) group.RemoveAll(s => !merged.Contains(s.renderer));
-            merging.RemoveAll(g => g.Count < 2);
+            merging.RemoveAll(g => single(g));
             // The memory budget: estimated from the parts' meshes (vertices of the slot's submesh range
             // at most the mesh's, 40 bytes each, and 2 per index).
-            long budget = 0;
+            long budget = 0, enemyBudget = 0;
             int overBudget = 0;
             var kept = new List<List<Slot>>();
             foreach (List<Slot> group in merging.OrderByDescending(g => (g.Count - 1) / (double)Math.Max(1L, Estimate(g))))
             {
                 long estimate = Estimate(group);
-                if (budget + estimate > MaxBytes)
+                bool enemyGroup = analysis.InEnemy(group[0].renderer.transform);
+                if ((enemyGroup ? enemyBudget : budget) + estimate > (enemyGroup ? EnemyMaxBytes : MaxBytes))
                 {
                     overBudget += group.Count;
                     foreach (Slot slot in group) merged.Remove(slot.renderer);
                     continue;
                 }
-                budget += estimate;
+                if (enemyGroup) enemyBudget += estimate;
+                else budget += estimate;
                 kept.Add(group);
             }
             merging = kept;
             foreach (List<Slot> group in merging) group.RemoveAll(s => !merged.Contains(s.renderer));
-            merging.RemoveAll(g => g.Count < 2);
+            merging.RemoveAll(g => single(g));
             merged.Clear();
             foreach (List<Slot> group in merging) foreach (Slot slot in group) merged.Add(slot.renderer);
             if (overBudget > 0)
@@ -1180,12 +1669,13 @@ namespace CrowCompat
             var report = new StringBuilder();
             string sceneName = scene.name.Replace(' ', '_');
             int partCount = merged.Count;
-            long vertices = 0, bytes = 0;
+            long vertices = 0, bytes = 0, enemyBytes = 0;
             int meshes = 0, dropped = 0;
             long droppedBytes = 0;
             var created = new List<GameObject>();
             if (apply)
             {
+                foreach (Behaviour combiner in analysis.enemyCombiners) combiner.enabled = false;
                 foreach (List<Slot> group in merging)
                 {
                     long groupBytes;
@@ -1193,6 +1683,7 @@ namespace CrowCompat
                     created.AddRange(Build(scene, group, out groupVertices, out groupBytes));
                     vertices += groupVertices;
                     bytes += groupBytes;
+                    if (analysis.InEnemy(group[0].renderer.transform)) enemyBytes += groupBytes;
                 }
                 foreach (MeshRenderer renderer in merged) renderer.enabled = false;
                 meshes = created.Count;
@@ -1203,9 +1694,20 @@ namespace CrowCompat
                 .Append(" candidates=").Append(candidates).Append(" parts=").Append(partCount).Append(" groups=").Append(merging.Count)
                 .Append(" meshes=").Append(meshes).Append(" vertices=").Append(vertices).Append(" bytes=").Append(bytes).Append(" dropped=").Append(dropped).Append(" droppedBytes=").Append(droppedBytes)
                 .Append(" lights=").Append(lights.Count).Append(" cell=").Append(Cell.ToString(CultureInfo.InvariantCulture))
-                .Append(" baked=").Append(analysis.baked).Append(" forMeshCombiner=").Append(analysis.combined).Append(" fsms=").Append(analysis.fsms).Append(" actions=").Append(analysis.actions).Append(" marked=").Append(analysis.marks.Count)
+                .Append(" baked=").Append(analysis.baked).Append(" enemies=").Append(analysis.enemies.Count)
+                .Append(" enemyCombiners=").Append(analysis.enemyCombiners.Count).Append(" enemyParts=").Append(merged.Count(r => analysis.InEnemy(r.transform)))
+                .Append(" enemyGroups=").Append(merging.Count(g => analysis.InEnemy(g[0].renderer.transform))).Append(" enemyBytes=").Append(enemyBytes)
+                .Append(" enemySubmeshes=").Append(merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).Sum(g => g.Select(x => x.material).Distinct().Count()))
+                .Append(" enemyMaterials=").Append(merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).SelectMany(g => g.Select(x => x.material)).Distinct().Count()).Append(" forMeshCombiner=").Append(analysis.combined).Append(" fsms=").Append(analysis.fsms).Append(" actions=").Append(analysis.actions).Append(" marked=").Append(analysis.marks.Count)
                 .Append(" ms=").Append(clock.ElapsedMilliseconds).Append('\n');
             if (spread.Length > 0) report.Append("CROW_MERGE ").Append(sceneName).Append(spread).Append('\n');
+            // -crow-merge-materials (or CROW_MERGE_MATERIALS=1 in the build): the enemies' merged materials.
+            if (Environment.GetEnvironmentVariable("CROW_MERGE_MATERIALS") == "1" || Array.IndexOf(ProbeFiles.Args ?? new string[0], "-crow-merge-materials") >= 0)
+                foreach (Material m in merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).SelectMany(g => g.Select(x => x.material)).Distinct())
+                    report.Append("CROW_MERGE ").Append(sceneName).Append(" enemy material ").Append(m.name).Append(" shader=").Append(m.shader.name)
+                        .Append(" texture=").Append(m.mainTexture == null ? "-" : m.mainTexture.name + "(" + m.mainTexture.width + "x" + m.mainTexture.height + ")")
+                        .Append(" color=").Append(m.HasProperty("_Color") ? m.color.ToString() : "-").Append(" keywords=").Append(string.Join(",", m.shaderKeywords))
+                        .Append(" slots=").Append(merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).Sum(g => g.Count(x => x.material == m))).Append('\n');
             report.Append("CROW_MERGE ").Append(sceneName).Append(" left out: ")
                 .Append(string.Join(" ", blockers.OrderByDescending(p => p.Value).Take(30).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray())).Append('\n');
             if (seen > 0)
@@ -1217,6 +1719,8 @@ namespace CrowCompat
                 .Append(string.Join(" | ", analysis.unknownTargets.OrderByDescending(p => p.Value).Take(15).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray())).Append('\n');
             report.Append("CROW_MERGE ").Append(sceneName).Append(" biggest groups: ")
                 .Append(string.Join(" ", merging.OrderByDescending(g => g.Count).Take(12).Select(g => g[0].material.name.Replace(' ', '_') + "=" + g.Count).ToArray())).Append('\n');
+            // Last: the report above reads the parts this destroys.
+            if (strip) report.Append(Strip(scene, analysis, created.Select(go => go.GetComponent<MergedRenderer>()), true)).Append('\n');
             return report.ToString();
         }
 
@@ -1291,21 +1795,25 @@ namespace CrowCompat
             var colors = new List<Color32>();
             var uv0 = new List<Vector2>();
             var uv1 = new List<Vector2>();
-            var indices = new List<int>();
+            // A submesh per material, in the order the materials first come (one for a material group).
+            var materialOrder = group.Select(s => s.material).Distinct().ToList();
+            var subIndices = materialOrder.Select(m => new List<int>()).ToList();
             var parts = new List<Renderer>();
             string channels = Channels(first.mesh);
             bool hasN = channels.Contains("n"), hasT = channels.Contains("t"), hasC = channels.Contains("c"), has0 = channels.Contains("0"), has1 = channels.Contains("1");
             Action flush = () =>
             {
-                if (indices.Count == 0) return;
-                var mesh = new Mesh { name = "CrowMerged " + first.material.name };
+                if (subIndices.All(l => l.Count == 0)) return;
+                var used = Enumerable.Range(0, materialOrder.Count).Where(i => subIndices[i].Count > 0).ToList();
+                var mesh = new Mesh { name = "CrowMerged " + first.material.name + (used.Count > 1 ? " +" + (used.Count - 1) : "") };
                 mesh.SetVertices(positions);
                 if (hasN) mesh.SetNormals(normals);
                 if (hasT) mesh.SetTangents(tangents);
                 if (hasC) mesh.SetColors(colors);
                 if (has0) mesh.SetUVs(0, uv0);
                 if (has1) mesh.SetUVs(1, uv1);
-                mesh.SetTriangles(indices, 0);
+                mesh.subMeshCount = used.Count;
+                for (int i = 0; i < used.Count; i++) mesh.SetTriangles(subIndices[used[i]], i);
                 mesh.RecalculateBounds();
                 var go = new GameObject("CrowMerged");
                 if (anchor != null) go.transform.SetParent(anchor, false);
@@ -1313,7 +1821,7 @@ namespace CrowCompat
                 go.layer = first.renderer.gameObject.layer;
                 go.AddComponent<MeshFilter>().sharedMesh = mesh;
                 var renderer = go.AddComponent<MeshRenderer>();
-                renderer.sharedMaterial = first.material;
+                renderer.sharedMaterials = used.Select(i => materialOrder[i]).ToArray();
                 renderer.shadowCastingMode = first.renderer.shadowCastingMode;
                 renderer.receiveShadows = first.renderer.receiveShadows;
                 renderer.lightProbeUsage = first.renderer.lightProbeUsage;
@@ -1321,14 +1829,14 @@ namespace CrowCompat
                 go.AddComponent<MergedRenderer>().parts = parts.Distinct().ToArray();
                 created.Add(go);
                 vertexSum += positions.Count;
-                byteSum += positions.Count * (12L + (hasN ? 12 : 0) + (hasT ? 16 : 0) + (hasC ? 4 : 0) + (has0 ? 8 : 0) + (has1 ? 8 : 0)) + indices.Count * 2L;
+                byteSum += positions.Count * (12L + (hasN ? 12 : 0) + (hasT ? 16 : 0) + (hasC ? 4 : 0) + (has0 ? 8 : 0) + (has1 ? 8 : 0)) + subIndices.Sum(l => l.Count) * 2L;
                 positions.Clear();
                 normals.Clear();
                 tangents.Clear();
                 colors.Clear();
                 uv0.Clear();
                 uv1.Clear();
-                indices.Clear();
+                foreach (List<int> list in subIndices) list.Clear();
                 parts.Clear();
             };
             var cache = new Dictionary<Mesh, MeshData>();
@@ -1345,6 +1853,7 @@ namespace CrowCompat
                 Matrix4x4 normalMatrix = matrix.inverse.transpose;
                 bool flip = matrix.determinant < 0f;
                 int offset = positions.Count;
+                List<int> indices = subIndices[materialOrder.IndexOf(slot.material)];
                 foreach (KeyValuePair<int, int> pair in map.OrderBy(p => p.Value))
                 {
                     int v = pair.Key;

@@ -45,6 +45,11 @@ Shader "CrowVita/Lit"
         [HideInInspector] _ZWrite ("__zw", Float) = 1.0
         // What compat/VitaLit.cs checks before using the shader (its globals are this version's).
         [HideInInspector] _CrowLitV3 ("", Float) = 0
+        // A material the PS Vita build saved with this shader (asset_rules.vita_lit_overlay): the shader
+        // it had, 1 Standard, 2 SFBStandard, 3 Legacy Shaders/Diffuse (0: made so at run time or a
+        // variant keeper), and a Legacy Diffuse material's own colour; -crow-lit game puts them back.
+        [HideInInspector] _CrowLitFrom ("", Float) = 0
+        [HideInInspector] _CrowLitColor ("", Color) = (1,1,1,1)
     }
 
     CGINCLUDE

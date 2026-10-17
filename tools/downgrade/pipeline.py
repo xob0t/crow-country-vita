@@ -282,6 +282,10 @@ COMPAT_SOURCES = [
             'ActionProfile',
             'FixedStep',
             'EnemySplit',
+            'FastPaths',
+            'EnemyChores',
+            'Cameras',
+            'Decor',
         )
     ),
 ]
@@ -294,6 +298,7 @@ COMPAT_MODULES = [
     'VideoModule',
     'ScreenCaptureModule',
     'PhysicsModule',  # compat/Memory.cs: MeshCollider.sharedMesh
+    'AnimationModule',  # compat/Decor.cs: Animator, Animation
 ]
 REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',
@@ -310,6 +315,8 @@ REWRITER_SOURCES = [
             'PlayMakerData',
             'ActionProfile',
             'EnemySplit',
+            'FastPaths',
+            'Decor',
         )
     ),
 ]
@@ -703,7 +710,7 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(canvas_channel_overlay(exported, overlay))
         overlay.update(rewired_vita_overlay(exported, overlay, platform))
         overlay.update(material_keyword_overlay(exported, game, overlay))
-        overlay.update(vita_lit_overlay(overlay))
+        overlay.update(vita_lit_overlay(exported, overlay, platform))
         overlay[Path('Assets') / 'link.xml'] = link_xml(assemblies, platform).encode()
         overlay[Path('Assets') / 'link.xml.meta'] = stable_meta('asset', 'link.xml', 'TextScriptImporter').encode()
         overlay.update(texture_overlay(exported, game, platform))

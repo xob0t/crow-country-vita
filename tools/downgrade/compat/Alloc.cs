@@ -28,6 +28,10 @@ using UnityEngine.SceneManagement;
 //                            and class into alloc-stacks.txt beside the player's executable (or the
 //                            path after -crow-alloc-file) at each report; tools/downgrade/allocreport.py
 //                            names and sums them.
+//   -crow-alloc-clones <s>   every s seconds, the "(Clone)" objects made since the last report, by name
+//                            (CROW_CLONES; any player)
+//   -crow-alloc-share game   delegates and DOTween's shortcut closures made new each time, as the game
+//                            does (SharedClosures, below; on by default on every player)
 // The callbacks run inside the allocator and the collector, so they allocate nothing and only touch
 // arrays made beforehand.
 // Part of CrowCompat; see Compat2018.cs.
@@ -119,6 +123,8 @@ namespace CrowCompat
         {
             int gcLog = Array.IndexOf(args, "-crow-gc-log"), alloc = Array.IndexOf(args, "-crow-alloc");
             GcPace.Install(args);
+            float clones = Quality.Number(args, "-crow-alloc-clones", -1f);
+            if (clones > 0f) Clones.Install(clones);
             if (gcLog < 0 && alloc < 0) return;
             if (gcLog >= 0) longFrameMs = Quality.Number(args, "-crow-gc-log", 200f);
             if (alloc >= 0) reportEvery = Quality.Number(args, "-crow-alloc", 10f);
@@ -488,6 +494,49 @@ namespace CrowCompat
             }
         }
     }
+    // -crow-alloc-clones <s>: what the game instantiates in play (each Instantiate of a prefab with FSMs
+    // deserializes their actions: the fight's biggest allocation). Every s seconds (CROW_CLONES) the
+    // objects in the loaded scenes named "...(Clone)" made since the last report (by instance ID), by
+    // name, with how many of each are alive.
+    static class Clones
+    {
+        static float every, next;
+        static readonly HashSet<int> seen = new HashSet<int>();
+
+        internal static void Install(float seconds)
+        {
+            every = seconds;
+            next = Time.realtimeSinceStartup + seconds;
+            Canvas.willRenderCanvases += Tick;
+        }
+
+        static void Tick()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (now < next) return;
+            next = now + every;
+            var made = new Dictionary<string, int>();
+            var alive = new Dictionary<string, int>();
+            foreach (Transform transform in UnityEngine.Object.FindObjectsOfType<Transform>())
+            {
+                string name = transform.name;
+                if (!name.EndsWith("(Clone)", StringComparison.Ordinal)) continue;
+                int count;
+                alive.TryGetValue(name, out count);
+                alive[name] = count + 1;
+                if (!seen.Add(transform.GetInstanceID())) continue;
+                made.TryGetValue(name, out count);
+                made[name] = count + 1;
+            }
+            var line = new StringBuilder("CROW_CLONES t=").Append(now.ToString("0.0", Inv)).Append(" scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
+            foreach (KeyValuePair<string, int> pair in made.OrderByDescending(p => p.Value).Take(20))
+                line.Append(" | ").Append(pair.Key.Replace(' ', '_')).Append(" +").Append(pair.Value).Append(" alive ").Append(alive[pair.Key]);
+            Debug.Log(line.ToString());
+        }
+
+        static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+    }
+
     // When the garbage collector runs, on the PS Vita (-crow-gc-pace off leaves it to Boehm; on other
     // IL2CPP players -crow-gc-pace on). A collection stops the game for 0.8 s in Roadside and 1.0 s in
     // Station Square (it marks all 75-95 MB of live data, on one core). In play Boehm runs one each
@@ -599,6 +648,50 @@ namespace CrowCompat
             int index = Array.IndexOf(args, "-crow-tween-recycle");
             string mode = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
             return mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "on";
+        }
+    }
+
+    // Delegates and closures the game made again for every tween and every state entry (rewriter/Alloc.cs:
+    // CacheBoundDelegates, CacheStaticDelegates, ShareShortcutClosures say which): made once and kept. On
+    // by default on every player; -crow-alloc-share game (or -crow-cycle/-crow-ab share=game) makes them
+    // new each time, as the game does. Find hands a DOTween shortcut's closure factory the closure made
+    // before for the same target (by the closure class's number and the target's instance ID), Keep
+    // remembers a new one; the table is emptied when a scene unloads, and when it passes 8,192 closures.
+    public static class SharedClosures
+    {
+        public static bool On = Perf.Value(ProbeFiles.Args, "-crow-alloc-share") != "game";
+        static readonly Dictionary<long, object> closures = new Dictionary<long, object>();
+        static bool hooked;
+
+        public static object Find(int kind, object target)
+        {
+            var unity = target as UnityEngine.Object;
+            if (!On || (object)unity == null) return null;
+            object found;
+            return closures.TryGetValue(((long)kind << 32) | (uint)unity.GetInstanceID(), out found) ? found : null;
+        }
+
+        public static void Keep(int kind, object closure, object target)
+        {
+            var unity = target as UnityEngine.Object;
+            if (!On || (object)unity == null) return;
+            if (!hooked)
+            {
+                hooked = true;
+                SceneManager.sceneUnloaded += scene => closures.Clear();
+            }
+            if (closures.Count >= 8192) closures.Clear();
+            closures[((long)kind << 32) | (uint)unity.GetInstanceID()] = closure;
+        }
+
+        // -crow-cycle / -crow-ab share=on|game
+        internal static bool Change(string key, string value)
+        {
+            if (key != "share") return false;
+            On = value != "game";
+            closures.Clear();
+            Debug.Log("CROW_ALLOC share=" + value);
+            return true;
         }
     }
 }

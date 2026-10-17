@@ -21,7 +21,8 @@ using UnityEngine.SceneManagement;
 //                             every 10 s (renderers come and go): off (all), flat (flat horizontal
 //                             renderers: floors, ceilings, roads), small:<m> (bounds diagonal under m
 //                             metres), player (all but the player's own: Mara keeps her shadow; the
-//                             PS Vita's default, see Quality.cs), game (none). A shadows-only renderer
+//                             PS Vita's default, see Quality.cs), player:<m> (the player's parts of m
+//                             metres or more keep theirs), game (none). A shadows-only renderer
 //                             the rule takes is switched off: with its casting off it would be drawn
 //                             with its material (Entrance's tutorial paper got its hidden caster box,
 //                             a cube with the colour atlas; Ocean Kingdom has 354 of them).
@@ -44,6 +45,7 @@ namespace CrowCompat
             else if (Application.platform == RuntimePlatform.PSP2) Casters("player");
             StaticBatch.Install(args);
             Merge.Install(args);
+            Cameras.Install(args);  // Cameras.cs: -crow-rt-cameras, -crow-camera-report
             if (every <= 0f) return;
             SceneManager.sceneLoaded += (scene, mode) => detail = true;
             Application.onBeforeRender += Tick;
@@ -125,6 +127,14 @@ namespace CrowCompat
             if (rule == "player") return !PlayerRoot(renderer.transform.root);
             Bounds bounds = renderer.bounds;
             Vector3 size = bounds.size;
+            // player:<m>: the player's parts of m metres (bounds diagonal) or more (Mara has 39 casters:
+            // 7 under 0.1 m, 7 under 0.2, 22 under 0.4, 3 larger).
+            if (rule.StartsWith("player:"))
+            {
+                float least;
+                return !PlayerRoot(renderer.transform.root) ||
+                       (float.TryParse(rule.Substring(7), NumberStyles.Float, CultureInfo.InvariantCulture, out least) && size.magnitude < least);
+            }
             if (rule == "flat") return Flat(size);
             if (rule.StartsWith("small:"))
             {

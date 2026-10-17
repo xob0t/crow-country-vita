@@ -677,7 +677,10 @@ namespace CrowCompat
             if (entry.Set) return;
             foreach (string[] setting in settings)
             {
-                if (kernelName.IndexOf(setting[0], StringComparison.OrdinalIgnoreCase) < 0) continue;
+                // By the kernel's name or as CROW_THREADS shows it (spaces as underscores: Unity's job
+                // workers are "Worker Thread", and the flag's value can't hold a space).
+                if (kernelName.IndexOf(setting[0], StringComparison.OrdinalIgnoreCase) < 0 &&
+                    Short(kernelName).IndexOf(setting[0], StringComparison.OrdinalIgnoreCase) < 0) continue;
                 entry.Set = true;
                 int priority, mask = 0;
                 int.TryParse(setting[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out priority);

@@ -76,6 +76,8 @@ namespace CrowCompat
             EnemyCost.Install(ProbeFiles.Args);  // the enemies' costs (PS Vita defaults)
             FixedStep.Install(ProbeFiles.Args);  // -crow-fixed-dt: the physics step
             EnemySplit.Install(ProbeFiles.Args);  // -crow-enemy-split: the enemies' inactive parts out
+            FastPaths.Install(ProbeFiles.Args);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
+            Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene") ?? Fight.Scene;

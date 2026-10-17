@@ -68,6 +68,7 @@ namespace CrowCompat
         // From Diag.Install (every player, flags or not).
         internal static void Install(string[] args)
         {
+            EnemyChores.Install(args);
             int flag = Array.IndexOf(args, "-crow-audio-velocity");
             string mode = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
             dynamicVelocity = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "dynamic";
@@ -285,6 +286,7 @@ namespace CrowCompat
         // Quality.Change's last resort: true when the key is one of these.
         internal static bool Change(string key, string value)
         {
+            if (EnemyChores.Change(key, value)) return true;
             switch (key)
             {
                 case "eaudio":

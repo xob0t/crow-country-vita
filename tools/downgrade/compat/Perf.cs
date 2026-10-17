@@ -57,6 +57,8 @@ using UnityEngine.SceneManagement;
 //                               back in their places, on takes them out again (-crow-cycle takes
 //                               scenesplit=), check compares each part with its old place every second
 //                               (CROW_SPLIT_CHECK), report logs what the split would take (CROW_SPLIT)
+//   -crow-split-follow off      the split parts no longer follow their old places when those move (see
+//                               SplitFollow); -crow-cycle takes splitfollow=
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -148,6 +150,9 @@ namespace CrowCompat
                 case "scenesplit":
                     SceneSplit.Set(value);
                     return true;
+                case "splitfollow":
+                    SplitFollow.Set(value);
+                    return true;
                 case "splittoggle":
                     SceneSplit.Toggle(value);
                     return true;
@@ -198,7 +203,7 @@ namespace CrowCompat
                     return true;
                 }
                 default:
-                    return false;
+                    return Cameras.Change(key, value);  // rtcams= (Cameras.cs)
             }
             Debug.Log("CROW_PERF " + key + "=" + value + " (fixed=" + Time.fixedDeltaTime.ToString("R", CultureInfo.InvariantCulture) +
                       " maxdt=" + Time.maximumDeltaTime.ToString("R", CultureInfo.InvariantCulture) + " iter=" + Physics.defaultSolverIterations +
@@ -311,7 +316,7 @@ namespace CrowCompat
             foreach (string name in value.Split('+'))
             {
                 // Children's names with '_' for a space.
-                string part = name == "ui" ? "UI_Canvases" : null;
+                string part = name == "ui" ? "UI_Canvases" : name == "camera" ? "camera_follow_player" : null;
                 if (part != null && !parts.Contains(part)) parts.Add(part);
             }
             if (parts.Count == 0) return;
@@ -907,7 +912,9 @@ namespace CrowCompat
     //       part is active exactly when it would be in its old place and where it would be there
     //       (CROW_SPLIT_CHECK, once per part that differs, and a count every 30 s); report: log what
     //       Merge.Split would take out of each area (for builds made without it); apply, apply-check:
-    //       split each area as it loads, as the build would (and check)
+    //       split each area as it loads, as the build would (and check); report-movers,
+    //       apply-movers, apply-movers-check: the same with Merge.Split's movers (the parts that move on
+    //       their own, below split parents, and the way below destroyed objects)
     public class SplitPart : MonoBehaviour
     {
         public Transform parent;
@@ -935,6 +942,13 @@ namespace CrowCompat
             SceneSplit.Switched(this);
         }
 
+        // Destroyed with what is above it (the game's DestroyObject, DestroySelf), the part goes too, as
+        // it would have in its old place (the movers' split goes below destroyed objects).
+        void OnDestroy()
+        {
+            if (part != null && gameObject.scene.isLoaded) Destroy(part);
+        }
+
         void OnDisable()
         {
             if (part == null) return;
@@ -946,6 +960,142 @@ namespace CrowCompat
             own = !gameObject.activeSelf || part.activeSelf;
             if (part.activeSelf) part.SetActive(false);
             SceneSplit.Switched(this);
+        }
+    }
+
+    // The split parts' old places followed: in any frame an old parent's world pose changed (an elevator
+    // moving the whole level, anything the split's analysis couldn't see), each part taken out from below
+    // it is put back where it would be there (its old local pose below the old parent's world pose), so
+    // it moves as it did before the split. Checked just before rendering, once per old parent: a matrix
+    // read and a comparison. -crow-split-follow off (or -crow-cycle splitfollow=off) leaves the parts where
+    // they are, for A/B; CROW_SPLIT_FOLLOW logs each old parent the first time it moves, and a count every
+    // 30 s while any did.
+    static class SplitFollow
+    {
+        sealed class Place
+        {
+            public Transform Old;
+            public Matrix4x4 Last;
+            public readonly List<SplitPart> Parts = new List<SplitPart>();
+            public bool Logged;
+            public int Moves;
+        }
+
+        static bool on = true, hooked, dirty = true;
+        static readonly List<Place> places = new List<Place>();
+        static int moves, followed;
+        static float summaryAt;
+
+        internal static void Install(string[] args)
+        {
+            if (Perf.Value(args, "-crow-split-follow") == "off") on = false;
+            if (hooked) return;
+            hooked = true;
+            // Collected in the frame after a load: the split (at run time) and the holders' switching
+            // happen while the scene loads.
+            SceneManager.sceneLoaded += (scene, mode) => Dirty();
+            SceneManager.sceneUnloaded += scene => Dirty();
+            Application.onBeforeRender += Tick;
+        }
+
+        static int collectFrame;
+
+        // Whether the parts are where following keeps them (not between a load and the next frame's step).
+        internal static bool Ready
+        {
+            get { return !on || !dirty; }
+        }
+
+        static void Dirty()
+        {
+            dirty = true;
+            collectFrame = Time.frameCount + 1;
+        }
+
+        internal static void Set(string value)
+        {
+            on = value != "off";
+            Dirty();
+            Debug.Log("CROW_SPLIT follow " + (on ? "on" : "off"));
+        }
+
+        static void Collect()
+        {
+            dirty = false;
+            places.Clear();
+            var byParent = new Dictionary<Transform, Place>();
+            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
+            {
+                if (part == null || part.parent == null || !part.gameObject.scene.IsValid() || part.transform.parent == part.parent) continue;
+                Place place;
+                if (!byParent.TryGetValue(part.parent, out place))
+                {
+                    // Where the old parent was when the part left it (from the part and its old local
+                    // pose): it may have moved since, as the elevator rooms do while the area starts.
+                    Matrix4x4 then = part.transform.localToWorldMatrix * Matrix4x4.TRS(part.position, part.rotation, part.scale).inverse;
+                    byParent[part.parent] = place = new Place { Old = part.parent, Last = then };
+                    places.Add(place);
+                }
+                place.Parts.Add(part);
+            }
+            if (places.Count > 0) Debug.Log("CROW_SPLIT_FOLLOW watching " + places.Count + " old parents of " + places.Sum(p => p.Parts.Count) + " parts");
+        }
+
+        internal static void Tick()
+        {
+            if (!on) return;
+            try
+            {
+                if (dirty)
+                {
+                    if (Time.frameCount < collectFrame) return;
+                    Collect();
+                }
+                for (int i = 0; i < places.Count; i++)
+                {
+                    Place place = places[i];
+                    if (place.Old == null) continue;
+                    Matrix4x4 now = place.Old.localToWorldMatrix;
+                    if (now == place.Last) continue;
+                    place.Last = now;
+                    moves++;
+                    place.Moves++;
+                    // Each part where it would be below the old parent: its old local position through the
+                    // parent's matrix, its rotation after the parent's (Unity's world rotation, also below a
+                    // mirroring parent). Its scale stays: the rooms move and turn, they don't scale.
+                    Quaternion rotation = place.Old.rotation;
+                    int count = 0;
+                    foreach (SplitPart part in place.Parts)
+                    {
+                        if (part == null) continue;
+                        Transform t = part.transform;
+                        if (t.parent == part.parent) continue;  // put back (-crow-scene-split off)
+                        t.SetPositionAndRotation(now.MultiplyPoint3x4(part.position), rotation * part.rotation);
+                        count++;
+                    }
+                    followed += count;
+                    if (!place.Logged && count > 0)
+                    {
+                        place.Logged = true;
+                        Debug.Log("CROW_SPLIT_FOLLOW " + Perf.Path(place.Old, 4) + " moved: " + count + " parts taken out from below it follow it");
+                    }
+                }
+                float time = Time.realtimeSinceStartup;
+                if (moves > 0 && time >= summaryAt)
+                {
+                    summaryAt = time + 30f;
+                    Debug.Log("CROW_SPLIT_FOLLOW " + places.Count + " old parents watched, " + moves + " moves, " + followed + " parts placed; most: " +
+                              string.Join(" ", places.Where(p => p.Moves > 0 && p.Old != null).OrderByDescending(p => p.Moves).Take(4)
+                                  .Select(p => Perf.Path(p.Old, 3) + "=" + p.Moves).ToArray()));
+                    moves = followed = 0;
+                    foreach (Place p in places) p.Moves = 0;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.Log("CROW_SPLIT_FOLLOW failed: " + exception);
+                Dirty();
+            }
         }
     }
 
@@ -961,6 +1111,8 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             string value = Perf.Value(args, "-crow-scene-split");
+            Merge.MoverDebug = Array.IndexOf(args, "-crow-split-mover-log") >= 0;
+            SplitFollow.Install(args);  // first: its frame step runs before the check's
             if (value != null) Set(value);
         }
 
@@ -973,10 +1125,14 @@ namespace CrowCompat
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
                 bool area = scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara" && scene.name != "CrowGap";
-                if (area && (mode == "report" || mode.StartsWith("apply"))) Debug.Log("CROW_" + Merge.Split(scene, mode != "report"));
+                if (area && (mode.StartsWith("report") || mode.StartsWith("apply")))
+                {
+                    Merge.SplitMovers = mode.Contains("movers");
+                    Debug.Log("CROW_" + Merge.Split(scene, !mode.StartsWith("report")));
+                }
                 else Apply();
             };
-            checking = mode == "check" || mode == "apply-check";
+            checking = mode == "check" || mode.EndsWith("-check");
             if (checking) Application.onBeforeRender += Check;
         }
 
@@ -1057,6 +1213,7 @@ namespace CrowCompat
             if (!checking) return;
             switches++;
             var part = holder.part.GetComponent<SplitPart>();
+            SplitFollow.Tick();  // the parts where following puts them this frame
             if (part != null) Compare(part);
         }
 
@@ -1066,6 +1223,7 @@ namespace CrowCompat
             float now = Time.realtimeSinceStartup;
             if (now < nextCheck) return;
             nextCheck = now + 1f;
+            SplitFollow.Tick();
             found.Clear();
             foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
                 if (part != null && part.parent != null && part.gameObject.scene.IsValid() && part.transform.parent != part.parent) found.Add(part);
@@ -1080,6 +1238,7 @@ namespace CrowCompat
         // activity), and where it would be there.
         static void Compare(SplitPart part)
         {
+            if (!SplitFollow.Ready) return;  // a load's parts before following placed them
             checks++;
             SplitHolder holder = part.holder;
             bool active = part.gameObject.activeInHierarchy;
@@ -1096,7 +1255,7 @@ namespace CrowCompat
             differences++;
             if (!reported.Add(part)) return;
             Debug.Log("CROW_SPLIT_CHECK " + Perf.Path(part.transform, 3) + " (from " + Perf.Path(part.parent, 3) + "): " +
-                      (active == wanted ? "" : "active " + active + " where it would be " + wanted + " ") + (placed ? "" : "moved from its place"));
+                      (active == wanted ? "" : "active " + active + " where it would be " + wanted + " ") + (placed ? "" : "moved from its place (" + (here.GetColumn(3) - there.GetColumn(3)).magnitude.ToString("0.###", CultureInfo.InvariantCulture) + " m, parent " + (part.transform.parent == null ? "none" : part.transform.parent.name) + ")"));
         }
     }
 

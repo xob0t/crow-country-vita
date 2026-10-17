@@ -24,7 +24,9 @@ using Mono.Cecil.Cil;
 //   Patches.cs              single game methods that call CrowCompat rules (the camera's post chain)
 //   ScriptCost.cs           per-frame PlayMaker and fade work skipped where it has no effect
 //   IdleAudio.cs            AudioSource play calls and Behaviour.enabled through CrowCompat IdleAudio
-//   Alloc.cs                allocation in play: PlayMaker's DOTween tweens recyclable
+//   Alloc.cs                allocation in play: PlayMaker's DOTween tweens recyclable, delegates and
+//                           DOTween's shortcut closures made once
+//   Decor.cs                decoration off screen: DOTween's and the animation scripts' hooks
 partial class DowngradeAssemblies
 {
     // Types that exist in the target under another name.
@@ -128,9 +130,19 @@ partial class DowngradeAssemblies
         new Pass("enemysplit", Scope.Game, RouteEnemySplit),
         // Alloc.cs
         new Pass("alloc", Scope.Game, RecyclePlayMakerTweens),
+        new Pass("alloc", Scope.All, ShareShortcutClosures),
+        new Pass("alloc", Scope.All, CacheBoundDelegates),
+        new Pass("alloc", Scope.All, CacheStaticDelegates),
+        // Decor.cs
+        new Pass("decor", Scope.All, DecorTweenHooks),
+        new Pass("decor", Scope.Game, DecorAnimationScripts),
         // PlayMakerData.cs
         new Pass("playmakerdata", Scope.All, SerializeActionDataAsArrays),
         new Pass("playmakerdata", Scope.All, FastActionFields),
+        // FastPaths.cs
+        new Pass("fastpaths", Scope.All, FastPropertyAccess),
+        new Pass("fastpaths", Scope.All, TypedPropertySets),  // after FastPropertyAccess
+        new Pass("fastpaths", Scope.All, RouteObjectNames),
         // LoadStats.cs
         new Pass("loadstats", Scope.All, TimeLoadMethods),
         // ActionProfile.cs (profiling builds only: CROW_ACTION_PROFILE=1)

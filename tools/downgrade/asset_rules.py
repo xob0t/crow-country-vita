@@ -1452,6 +1452,14 @@ def native_plugin_overlay(game: Path):
 # base pass, which CrowCompat swaps in at run time. It goes in Resources (Shader.Find finds it), with
 # a material for each set of its keywords the game's Standard materials use, so that the build keeps
 # those variants (it drops the shader_feature variants no material uses).
+# The PS Vita project also has the materials saved with it (CROW_LIT_BAKE=on, the default; off keeps
+# the game's shaders and leaves the swap to run time): every Standard, SFBStandard and Legacy
+# Shaders/Diffuse material (VitaLit's set) gets CrowVita/Lit as its shader, its render queue as it
+# was (m_CustomRenderQueue is kept; -1 is Geometry for all four shaders) and _CrowLitFrom (1, 2, 3)
+# naming its old shader; a Legacy Diffuse one gets VitaLit.LegacyDiffuse's changes (its colour over
+# Standard's dielectric diffuse factor, the old colour in _CrowLitColor, smoothness and metallic 0, no
+# highlights or reflections). Run-time swapping took 150-240 ms in each area load's last frame and
+# 30-60 ms three times after it on the PS Vita.
 VITA_SHADERS = Path(__file__).resolve().parent / 'vita_shaders'
 VITA_LIT_FOLDER = Path('Assets') / 'Resources' / 'CrowVita'
 VITA_LIT_KEYWORDS = {
@@ -1489,7 +1497,85 @@ Material:
 """
 
 
-def vita_lit_overlay(overlay: dict):
+VITA_LIT_FROM = {
+    '{fileID: 46, guid: 0000000000000000f000000000000000, type: 0}': 1,  # Standard
+    '{fileID: 7, guid: 0000000000000000f000000000000000, type: 0}': 3,  # Legacy Shaders/Diffuse
+}
+DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectrics, gamma space
+
+
+def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
+    """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit."""
+    shaders = dict(VITA_LIT_FROM)
+    sfb = exported / 'Assets' / 'Shader' / 'SFBStandard.shader.meta'
+    if sfb.exists():
+        shaders[f'{{fileID: 4800000, guid: {meta_guid(sfb)}, type: 3}}'] = 2
+    shader_line = re.compile(r'^  m_Shader: (\{.*\})$', re.M)
+    result, counts = {}, [0, 0, 0, 0]
+    for path in (exported / 'Assets').rglob('*.mat'):
+        relative = path.relative_to(exported)
+        text = current_text(exported, overlay, relative)
+        found = shader_line.search(text)
+        kind = shaders.get(found.group(1)) if found else None
+        if kind is None:
+            continue
+        text = text[: found.start(1)] + f'{{fileID: 4800000, guid: {lit_guid}, type: 3}}' + text[found.end(1) :]
+        floats = {'_CrowLitFrom': '1' if kind == 1 else '2' if kind == 2 else '3'}
+        colors = {}
+        if kind == 3:
+            number = r'([-\d.e]+)'
+            color = re.search(rf'^      _Color: \{{r: {number}, g: {number}, b: {number}, a: {number}\}}$', text, re.M)
+            r, g, b, a = (float(v) for v in color.groups()) if color else (1.0, 1.0, 1.0, 1.0)
+            colors['_CrowLitColor'] = f'{{r: {r!r}, g: {g!r}, b: {b!r}, a: {a!r}}}'
+            d = DIELECTRIC_DIFFUSE
+            colors['_Color'] = f'{{r: {r / d!r}, g: {g / d!r}, b: {b / d!r}, a: {a!r}}}'
+            floats.update(_Glossiness='0', _Metallic='0')
+            keywords = re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M)
+            words = set(keywords.group(1).split()) | {'_GLOSSYREFLECTIONS_OFF', '_SPECULARHIGHLIGHTS_OFF'}
+            text = text[: keywords.start(1)] + ' ' + ' '.join(sorted(words)) + text[keywords.end(1) :]
+        text = set_properties(text, 'm_Floats', floats)
+        text = set_properties(text, 'm_Colors', colors)
+        result[relative] = text.encode('utf-8')
+        counts[kind] += 1
+    log(
+        f'CrowVita/Lit saved into {sum(counts)} materials: {counts[1]} Standard, {counts[2]} SFBStandard, '
+        f'{counts[3]} Legacy Diffuse'
+    )
+    return result
+
+
+def set_properties(text: str, block: str, values: dict):
+    """Sets m_Floats/m_Colors entries (the mapping form of serializedVersion 3), adding the missing."""
+    if not values:
+        return text
+    empty = re.search(rf'^    {block}: (\{{\}}|\[\])$', text, re.M)
+    if empty:
+        lines = ''.join(f'\n      {k}: {v}' for k, v in values.items())
+        return text[: empty.start()] + f'    {block}:' + lines + text[empty.end() :]
+    start = re.search(rf'^    {block}:\n', text, re.M)
+    if not start:
+        raise RuntimeError(f'no {block} in a material')
+    end = start.end()
+    while True:
+        line = re.match(r'      \S.*\n?', text[end:])
+        if not line:
+            break
+        end += line.end()
+    body = text[start.end() : end]
+    for key, value in values.items():
+        entry = re.search(rf'^      {re.escape(key)}: .*$', body, re.M)
+        if entry:
+            body = body[: entry.start()] + f'      {key}: {value}' + body[entry.end() :]
+        else:
+            body = body + ('' if body.endswith('\n') or not body else '\n') + f'      {key}: {value}\n'
+    if not text[end:] and body.endswith('\n') and not text[start.end() : end].endswith('\n'):
+        body = body[:-1]
+    return text[: start.end()] + body + text[end:]
+
+
+def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
+    import os
+
     from common import stable_meta
 
     standard = re.compile(r'^  m_Shader: \{fileID: 46, guid: 0000000000000000f000000000000000, type: 0\}$', re.M)
@@ -1519,4 +1605,6 @@ def vita_lit_overlay(overlay: dict):
         ).encode()
     result.update(folder_meta(VITA_LIT_FOLDER / 'Variants'))
     log(f'CrowVita/Lit: {len(sets)} keyword sets of the Standard materials')
+    if platform == 'vita' and os.environ.get('CROW_LIT_BAKE', 'on') != 'off':
+        result.update(vita_lit_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowLit.shader')))
     return result

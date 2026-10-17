@@ -100,6 +100,14 @@ namespace CrowCompat
                     return;
                 }
             }
+            // game on a build whose materials were saved with CrowVita/Lit (CROW_LIT_BAKE): they go back
+            // to their shaders, here and after each load.
+            if (!want)
+            {
+                restoreBaked = true;
+                if (lit == null) lit = Shader.Find("CrowVita/Lit");
+                if (standard == null) standard = Shader.Find("Standard");
+            }
             if (!hooked)
             {
                 hooked = true;
@@ -109,10 +117,16 @@ namespace CrowCompat
                     swapPasses = 0;
                     nextSelect = 0f;
                     nextList = 0f;
+                    nextCamera = 0f;
+                    if (!on && restoreBaked) Restore();
                 };
                 Application.onBeforeRender += Tick;
             }
-            if (want == on) return;
+            if (want == on)
+            {
+                if (!want) Restore();
+                return;
+            }
             on = want;
             if (on)
             {
@@ -125,23 +139,7 @@ namespace CrowCompat
             }
             else
             {
-                foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
-                {
-                    Shader shader;
-                    if (material.shader != lit || !swapped.TryGetValue(material.GetInstanceID(), out shader)) continue;
-                    int queue = material.renderQueue;
-                    material.shader = shader;
-                    material.renderQueue = queue;
-                    Color color;
-                    if (diffuseColors.TryGetValue(material.GetInstanceID(), out color))
-                    {
-                        material.color = color;
-                        material.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
-                        material.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
-                    }
-                }
-                swapped.Clear();
-                diffuseColors.Clear();
+                Restore();
                 foreach (Light light in keyed.Keys.ToList()) Unkey(light);
                 foreach (KeyValuePair<Light, LightRenderMode> pair in forced)
                     if (pair.Key != null) pair.Key.renderMode = pair.Value;
@@ -154,24 +152,92 @@ namespace CrowCompat
             Debug.Log("CROW_LIT " + (on ? "vita: one pass, key lights per pixel" : "game"));
         }
 
+        static bool restoreBaked;
+        static readonly Dictionary<string, Shader> originals = new Dictionary<string, Shader>();
+
+        // The materials CrowVita/Lit draws back on their own shaders: those swapped here, and those the
+        // build saved with CrowVita/Lit (their _CrowLitFrom says which shader they had; a Legacy
+        // Diffuse one's colour is in _CrowLitColor). A build saved so has those shaders only if
+        // something else uses them, so -crow-lit game wants a build made with CROW_LIT_BAKE=off.
+        static void Restore()
+        {
+            if (lit == null) return;
+            int restored = 0, missing = 0;
+            int from = Shader.PropertyToID("_CrowLitFrom"), own = Shader.PropertyToID("_CrowLitColor");
+            foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
+            {
+                if (material == null || material.shader != lit) continue;
+                Shader shader;
+                bool diffuse = diffuseColors.ContainsKey(material.GetInstanceID());
+                if (!swapped.TryGetValue(material.GetInstanceID(), out shader))
+                {
+                    float kind = material.HasProperty(from) ? material.GetFloat(from) : 0f;
+                    if (kind < 0.5f) continue;
+                    string name = kind < 1.5f ? "Standard" : kind < 2.5f ? "SFBStandard" : "Legacy Shaders/Diffuse";
+                    if (!originals.TryGetValue(name, out shader)) originals[name] = shader = Shader.Find(name);
+                    if (shader == null || !shader.isSupported)
+                    {
+                        missing++;
+                        continue;
+                    }
+                    if (kind > 2.5f) diffuseColors[material.GetInstanceID()] = material.GetColor(own);
+                    diffuse = kind > 2.5f;
+                }
+                int queue = material.renderQueue;
+                material.shader = shader;
+                material.renderQueue = queue;
+                Color color;
+                if (diffuse && diffuseColors.TryGetValue(material.GetInstanceID(), out color))
+                {
+                    material.color = color;
+                    material.DisableKeyword("_GLOSSYREFLECTIONS_OFF");
+                    material.DisableKeyword("_SPECULARHIGHLIGHTS_OFF");
+                }
+                restored++;
+            }
+            swapped.Clear();
+            diffuseColors.Clear();
+            if (restored > 0 || missing > 0)
+                Debug.Log("CROW_LIT game: " + restored + " materials back on their shaders" +
+                          (missing > 0 ? ", " + missing + " left on CrowVita/Lit (their shader is not in this build: build with CROW_LIT_BAKE=off)" : ""));
+        }
+
+        // Whether the build saved the materials with CrowVita/Lit (the first pass after a load finds
+        // them so): the later passes, for what the game creates or loads late, are then left out
+        // (what it loads is saved so too).
+        static bool baked;
+
         static void Tick()
         {
             if (!on) return;
             float now = Time.realtimeSinceStartup;
             // Materials: at once, and again 1, 3 and 10 s after a load (what the game creates or loads late).
             float since = now - sceneTime;
-            if (swapPasses == 0 || (swapPasses == 1 && since > 1f) || (swapPasses == 2 && since > 3f) || (swapPasses == 3 && since > 10f))
+            if (swapPasses == 0 || (!baked && ((swapPasses == 1 && since > 1f) || (swapPasses == 2 && since > 3f) || (swapPasses == 3 && since > 10f))))
             {
                 swapPasses++;
                 Swap();
             }
             if (now >= nextSelect || Woken())
             {
+                if (now < nextSelect) wokenSelects++;
+                selects++;
                 nextSelect = now + 0.25f;
                 Select();
             }
             Upload();
+            if (log && now >= nextSelectsLog)
+            {
+                if (nextSelectsLog > 0f) Debug.Log("CROW_LIT selects=" + selects + " woken=" + wokenSelects + " frames=" + (Time.frameCount - selectsFrame));
+                nextSelectsLog = now + 10f;
+                selects = wokenSelects = 0;
+                selectsFrame = Time.frameCount;
+            }
         }
+
+        // -crow-lit-log: key light selections every 10 s, those a watched spot light coming on started.
+        static int selects, wokenSelects, selectsFrame;
+        static float nextSelectsLog;
 
         // A watched spot light that came on since the last Select (this runs before Unity culls the frame's lights).
         static bool Woken()
@@ -186,11 +252,19 @@ namespace CrowCompat
 
         static void Swap()
         {
-            int count = 0, changedQueue = 0, transparent = 0, cutout = 0;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            int count = 0, changedQueue = 0, transparent = 0, cutout = 0, saved = 0;
+            int from = Shader.PropertyToID("_CrowLitFrom");
+            bool first = swapPasses == 1;
             foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
             {
                 Shader shader = material.shader;
-                if (shader == null || shader == lit) continue;
+                if (shader == null) continue;
+                if (shader == lit)
+                {
+                    if (first && material.GetFloat(from) > 0.5f) saved++;
+                    continue;
+                }
                 bool diffuse = false;
                 if (shader != standard)
                 {
@@ -228,10 +302,12 @@ namespace CrowCompat
             majorLayers = 0;
             for (int layer = 0; layer < 32; layer++)
                 if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
+            if (first) baked = saved > 0;
             if (log)
                 Debug.Log("CROW_LIT " + count + " materials to CrowVita/Lit (" + transparent + " transparent, " + cutout + " cutout, " + changedQueue +
-                          " render queues kept); " + litRenderers + " renderers, " + lightmapped + " lightmapped (" +
-                          LightmapSettings.lightmaps.Length + " lightmaps); layers " + majorLayers.ToString("X"));
+                          " render queues kept), " + saved + " saved so by the build; " + litRenderers + " renderers, " + lightmapped + " lightmapped (" +
+                          LightmapSettings.lightmaps.Length + " lightmaps); layers " + majorLayers.ToString("X") + "; pass " + swapPasses + " in " +
+                          clock.ElapsedMilliseconds + " ms");
         }
 
         // Legacy Shaders/Diffuse (texture times colour, Lambert; 48 untextured materials, white, red,
@@ -299,7 +375,7 @@ namespace CrowCompat
                 if (main == null || light.intensity * Luminance(light.color) > main.intensity * Luminance(main.color)) main = light;
             }
             int world = majorLayers;
-            Camera view = Camera.main;
+            Camera view = MainCamera(now);
             Vector3 camera = view != null ? view.transform.position : Vector3.zero;
             if (view != null) GeometryUtility.CalculateFrustumPlanes(view, frustum);
             candidates.Clear();
@@ -387,6 +463,25 @@ namespace CrowCompat
                 if (text != lastLog) Debug.Log(text);
                 lastLog = text;
             }
+        }
+
+        // Camera.main as Select last found it, asked again every 2 s, after each load and when that
+        // camera is gone or off. Unity 2018's Camera.main walks the scene's objects for the MainCamera
+        // tag (FindMainCamera: 3.2% of the main thread in a Station Square fight, Windows player at the
+        // PS Vita's speed), and Select runs in every frame a watched spot light comes on.
+        internal static bool CacheCamera = true;
+        static Camera mainCamera;
+        static float nextCamera;
+
+        static Camera MainCamera(float now)
+        {
+            if (!CacheCamera) return Camera.main;
+            if (mainCamera == null || now >= nextCamera || !mainCamera.isActiveAndEnabled)
+            {
+                mainCamera = Camera.main;
+                nextCamera = now + 2f;
+            }
+            return mainCamera;
         }
 
         static void Unkey(Light light)

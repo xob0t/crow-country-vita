@@ -241,12 +241,13 @@ public static class DowngradeBuild
     }
 
     // The PS Vita build's scene split (CrowCompat's Merge.Split, after the merge in CrowMergeScenes),
-    // from the CROW_SPLIT environment variable: on (the default) or off. Other platforms don't split.
+    // from the CROW_SPLIT environment variable: movers (the default: the still parts and the parts that
+    // move on their own), on (the still parts only) or off. Other platforms don't split.
     internal static string SplitMode()
     {
         if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.PSP2) return "off";
         string mode = Environment.GetEnvironmentVariable("CROW_SPLIT");
-        return string.IsNullOrEmpty(mode) ? "on" : mode;
+        return string.IsNullOrEmpty(mode) ? "movers" : mode;
     }
 
     // Whether a scene path is the scene named (its file name, or its path), in any case.
@@ -293,6 +294,9 @@ class CrowMergeScenes : UnityEditor.Build.IProcessSceneWithReport
         }
         try
         {
+            // CROW_SPLIT=movers: the parts that move on their own leave too (Merge.SplitMovers).
+            System.Reflection.FieldInfo movers = split.DeclaringType.GetField("SplitMovers");
+            if (movers != null) movers.SetValue(null, DowngradeBuild.SplitMode() == "movers");
             Debug.Log("DOWNGRADE_" + (string)split.Invoke(null, new object[] { scene, true }));
         }
         catch (Exception exception)
