@@ -52,6 +52,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -71,6 +72,7 @@ CHANGING = ('sync', 'install', 'launch', 'quit', 'run', 'do', 'reboot', 'args')
 # The vitacompanion chain that keeps the console awake, and how often it is repeated (keep_awake).
 KEEP_AWAKE = 'nosleep on; screen on'
 KEEP_AWAKE_SECONDS = 10
+WAKE_SECONDS = 5  # how long wake waits for the screen to draw again after a "screen on"
 SCREENSHOT_SECONDS = 20  # how long the probe gets to write a requested screenshot
 
 
@@ -142,10 +144,30 @@ def nudge():
         command(KEEP_AWAKE, timeout=2)
 
 
+def wake():
+    """KEEP_AWAKE, then waits (at most WAKE_SECONDS) until something on screen draws again. When the
+    console's display goes off on its idle timer, the system pauses the game (perf: "app: none", app
+    and shell at 0 fps, the GPU at 41 MHz) while FTP and the command server stay up, since
+    vitacompanion's "nosleep" holds off standby but not the display's timeout; "screen on" resumes it
+    a moment later, and nothing is lost (the game's clock leaves the pause out). A screenshot taken
+    right after "screen on" is black, and a script that quits a paused game ends its log with no
+    dump, as if it had died (17 Oct: render r3's Pool, r4's Roadside)."""
+    nudge()
+    deadline = time.time() + WAKE_SECONDS
+    while time.time() < deadline:
+        try:
+            out = command('perf', timeout=3)
+        except OSError:
+            return
+        fps = re.search(r'fps: app=([\d.]+) shell=([\d.]+)', out)
+        if not fps or float(fps.group(1)) > 0 or float(fps.group(2)) > 0:
+            return  # no perf command, or drawing
+
+
 def keep_awake():
     """Keeps the console from sleeping while this script runs. vitacompanion's "nosleep on"
-    alone does not hold: without input the console still suspends, which freezes the game
-    a few seconds into a launch. Repeating it with "screen on" from the host does."""
+    holds off standby but not the display's idle timeout, which pauses the game (see wake);
+    repeating "screen on" from the host keeps the display on."""
     global _awake
     if _awake:
         return
@@ -166,7 +188,8 @@ def shot(out: Path):
 
     require('screenshot')
     remote = 'ux0:data/vitacompanion_shot.bmp'
-    # With the display off (a few minutes without input) the screenshot is black.
+    # With the display off (its idle timeout) the screenshot was black: wake waits until it draws.
+    wake()
     print((command(f'{KEEP_AWAKE}; screenshot {remote}').splitlines() or [''])[-1])
     data = read(remote)
     with ftp() as connection:
@@ -685,6 +708,9 @@ def run_command():
     if args.command == 'reboot':
         print(command('reboot', timeout=2))
     if args.command == 'log':
+        # Scripts poll the log while a run goes on: each read keeps the display on, and wakes a game the
+        # display's idle timeout paused (see wake).
+        nudge()
         name = 'log.txt' if not args.prev else 'log.prev.txt' if args.prev == 1 else f'log.prev{args.prev}.txt'
         lines = read(f'{REMOTE}/{name}').decode(errors='replace').splitlines()
         print('\n'.join(lines[-args.tail :] if args.tail else lines))

@@ -50,6 +50,8 @@ uv run tools/downgrade/vita.py crashes --pull    # the newest crash dump, symbol
 
 When several jobs share the console, take the `vita-device` lock first (`tools/downgrade/lock.py`); a person at the console holds it as `user: <purpose>`.
 
+Unattended runs need the display kept on. vitacompanion's `nosleep` holds off standby but not the display's idle timeout, and when the display goes off the system pauses the game: `perf` shows `app: none` and 0 fps, while FTP and the command server still answer. `screen on` resumes the game where it was (its clock leaves the pause out), but a script that reads the log, finds it stalled and quits the game ends the log with no dump, which looks like a silent death (render r3's Pool and r4's Roadside on 17 Oct). `vita.py log` therefore sends `nosleep on; screen on` with every read, and `shot` waits until the screen draws again after waking it (it used to save a black frame). A script that polls the console another way should repeat `vita.py do "nosleep on; screen on"` every few seconds, as `fightbench.py` does. Never send `screen off`: with `nosleep off` the console goes into full standby, and only its power button brings it back.
+
 ## Probe flags
 
 CrowCompat, the compatibility library the pipeline adds to the game, has a measurement probe that is off unless the player gets a `-crow-*` flag. A Windows player takes the flags on its command line; on the PS Vita, which passes no command line, the player reads them from `ux0:data/crow/args.txt`, which `vita.py args` writes. They apply from the next launch. `-crow-help` logs the probe's own list.
