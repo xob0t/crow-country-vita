@@ -1132,14 +1132,16 @@ def native_plugins(output: Path):
 # The PS Vita player's graphics jobs: the 2018.2 editor has no setting for them on the PS Vita, but its
 # player reads gfx-enable-gfx-jobs from Media/boot.config at start and then records the camera's draws in
 # Unity's job workers beside its render thread (Station Square, main thread: standing 24.9 -> 22.1 ms,
-# steady real fight 59.1 -> 55.2). CROW_GFX_JOBS=on (the default) or off; build and quickcode write it.
+# steady real fight 59.1 -> 55.2). Off by default: the user's game crashed with them on, on the render
+# thread drawing with what an area change's unload freed (17 Oct; 41 changes in a loop didn't repeat it).
+# CROW_GFX_JOBS=on writes gfx-enable-gfx-jobs=1; off (the default) writes it out; build and quickcode run it.
 def boot_config(output: Path):
     path = output / 'Media' / 'boot.config'
     if not path.exists():
         return
     lines = path.read_text(encoding='utf-8').splitlines()
     lines = [line for line in lines if not line.startswith('gfx-enable-gfx-jobs=')]
-    jobs = os.environ.get('CROW_GFX_JOBS', 'on') != 'off'
+    jobs = os.environ.get('CROW_GFX_JOBS', 'off') == 'on'
     if jobs:
         lines.insert(0, 'gfx-enable-gfx-jobs=1')
     path.write_bytes(('\n'.join(lines) + '\n').encode('utf-8'))

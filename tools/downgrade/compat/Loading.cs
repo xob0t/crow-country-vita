@@ -527,6 +527,14 @@ namespace CrowCompat
     // the gap, which was active then, and moves into the area before the gap is unloaded. The areas
     // have no lightmaps or light probes, which an additive load would treat otherwise. -crow-gap-additive
     // is accepted and changes nothing.
+    // Before the old scenes go, the gap drains the renderer (-crow-gap-drain on, the default; off as
+    // before): the player's camera draws nothing (culling mask 0) and the old scenes' own cameras and
+    // canvases are switched off for two frames, then the main thread waits for the render thread to
+    // run out of commands (GetNativeTexturePtr syncs with it), and only then the unloads start; the
+    // mask comes back once the old assets are gone. The user's game
+    // crashed on the render thread (GfxDeviceGXM::DrawBuffers in SetTextures, from the device worker's
+    // queue) while the main thread was destroying Roadside's objects in UnloadSceneOperation, with
+    // graphics jobs on: the worker was still drawing the frame before with what the unload freed.
     public static class SceneGap
     {
         public const string Scene = "CrowGap";
@@ -574,6 +582,99 @@ namespace CrowCompat
             clock.Reset();
             clock.Start();
             Loading.LoadCpu.Begin();  // -crow-load-cpu
+            if (Drain)
+            {
+                StartDrain();
+                return true;
+            }
+            UnloadOld();
+            return true;
+        }
+
+        // -crow-gap-drain: see above.
+        static bool? drain;
+        static bool Drain
+        {
+            get
+            {
+                if (drain == null) drain = Perf.Value(ProbeFiles.Args, "-crow-gap-drain") != "off";
+                return drain.Value;
+            }
+        }
+
+        static readonly Dictionary<Camera, int> masks = new Dictionary<Camera, int>();
+        static int drainFrame = -1, drainCanvases;
+        static bool drainHooked;
+
+        static void StartDrain()
+        {
+            masks.Clear();
+            Quiet(Camera.allCameras);
+            // The old scenes' own canvases (screen-space overlays draw without a camera); they go with
+            // their scenes, so they stay off.
+            int canvases = 0;
+            foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
+            {
+                Scene scene = canvas.gameObject.scene;
+                if (!canvas.enabled || !scene.IsValid() || scene.name == "DontDestroyOnLoad" || scene.name == Scene) continue;
+                canvas.enabled = false;
+                canvases++;
+            }
+            drainCanvases = canvases;
+            drainFrame = Time.frameCount;
+            if (!drainHooked)
+            {
+                drainHooked = true;
+                Application.onBeforeRender += DrainTick;
+            }
+        }
+
+        static void DrainTick()
+        {
+            if (drainFrame < 0 || Time.frameCount < drainFrame + 2) return;
+            drainFrame = -1;
+            // Cameras the game switched on since: they draw nothing either.
+            Quiet(Camera.allCameras);
+            long start = clock.ElapsedMilliseconds;
+            GL.Flush();
+            Texture2D.whiteTexture.GetNativeTexturePtr();  // waits for the render thread's queue
+            Debug.Log("CROW_GAP drained the renderer after " + clock.ElapsedMilliseconds + " ms (" + (clock.ElapsedMilliseconds - start) + " ms waiting; " +
+                      masks.Count + " cameras culling nothing, " + oldCameras + " of the old scenes' cameras and " + drainCanvases + " of their canvases off)");
+            oldCameras = 0;
+            UnloadOld();
+        }
+
+        // A camera of a scene that goes is switched off (its effect's blits read render textures the
+        // unload destroys); the player's (DontDestroyOnLoad) keeps rendering, culling nothing.
+        static void Quiet(Camera[] cameras)
+        {
+            foreach (Camera camera in cameras)
+            {
+                if (masks.ContainsKey(camera)) continue;
+                Scene scene = camera.gameObject.scene;
+                if (scene.IsValid() && scene.name != "DontDestroyOnLoad" && scene.name != Scene)
+                {
+                    camera.enabled = false;
+                    oldCameras++;
+                    continue;
+                }
+                masks[camera] = camera.cullingMask;
+                camera.cullingMask = 0;
+            }
+        }
+
+        static int oldCameras;
+
+        static void RestoreMasks()
+        {
+            foreach (KeyValuePair<Camera, int> pair in masks)
+                if (pair.Key != null && pair.Key.cullingMask == 0) pair.Key.cullingMask = pair.Value;
+            masks.Clear();
+        }
+
+        static void UnloadOld()
+        {
+            string name = target;
             Scene gap = SceneManager.GetSceneByName(Scene);  // a load right after the last gap's, before it went
             if (!gap.IsValid()) gap = SceneManager.CreateScene(Scene);
             SceneManager.SetActiveScene(gap);
@@ -593,7 +694,6 @@ namespace CrowCompat
             }
             Debug.Log("CROW_GAP " + name + ": unloading " + string.Join(", ", scenes.Select(s => s.name).ToArray()) + " first");
             if (pending == 0) Unloaded(null);
-            return true;
         }
 
         // Steps on the operations' completed events (CrowCompat can't add a MonoBehaviour to run them
@@ -608,6 +708,7 @@ namespace CrowCompat
         static void AssetsUnloaded(AsyncOperation operation)
         {
             long assets = clock.ElapsedMilliseconds;
+            RestoreMasks();
             Prewarm.ProBuilder();  // the inventory's ProBuilder meshes, once (Prewarm.cs)
             GC.Collect();
             string name = target;
