@@ -164,6 +164,7 @@ namespace CrowCompat
 
         void Start()
         {
+            if (Doppler.Owns(this)) return;  // a -crow-doppler test tone's filter (Audio.cs)
             started = lastBeat = lastLoad = Time.realtimeSinceStartup;
             collections = GC.CollectionCount(0);
             SceneManager.sceneLoaded += (scene, mode) =>
@@ -181,11 +182,18 @@ namespace CrowCompat
         // -crow-audio-tap: called on FMOD's mixer thread for each block of the probe's silent source.
         void OnAudioFilterRead(float[] data, int channels)
         {
-            Audio.Tap(data, channels);
+            if (!Doppler.Filter(this, data, channels)) Audio.Tap(data, channels);
+        }
+
+        // -crow-doppler: the physics steps of each frame.
+        void FixedUpdate()
+        {
+            Doppler.Step(this);
         }
 
         void Update()
         {
+            if (Doppler.Owns(this)) return;
             Audio.Frame();
             Alloc.Frame();
             Fight.Frame();

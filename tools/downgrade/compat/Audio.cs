@@ -26,13 +26,23 @@ using Debug = UnityEngine.Debug;
 //                             highpass, chorus, echo, distortion, all (comma-separated); with idle among
 //                             them, only while their source is idle (the PS Vita's default: reverb,idle);
 //                             -crow-audio-game keeps every filter on, as the game has them.
-//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3).
+//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3), the most audible
+//                             (FilterGate); -crow-reverb-cap old applies the cap only to filters it switches
+//                             on, the rule before (filters on at the load and playing stay on).
 //   -crow-loader-cpus <cpus>  the CPUs of Unity's loading thread (UnityPreload), digits 0-2 (the PS
 //                             Vita's default: 1; - leaves it on the player's choice, CPU 2, FMOD's).
 //   -crow-dsp-buffer <n>, -crow-real-voices <n>, -crow-sample-rate <hz>
 //                             AudioSettings.Reset with these before the first scene.
 //   -crow-load-priority <p>   the loading thread's priority (High, Normal, BelowNormal, Low) for the
 //                             player's scene read in the background on the title (Loading.cs; default High).
+//   -crow-doppler [s]         every s seconds (default 5) a CROW_DOPPLER line: the pitch FMOD's mixer gives
+//                             1 kHz test tones (Doppler level 1, volume 0.02 to 500 m), measured inside the
+//                             mixer from each block's zero crossings: on Mara's body and on the nearest
+//                             moving enemy, one with velocityUpdateMode Dynamic and one Auto each, the
+//                             enemy's also switched off for 2 s and back on with a Play every 4 s (as
+//                             IdleAudio does), and a still control at pitch 1.01; with the physics steps
+//                             each frame ran. Per tone: blocks, mean/min/max pitch, the mean and largest
+//                             change from one block to the next, blocks that changed by over 0.5%.
 //   -crow-thread <name>:<priority>:<cpus>  with -crow-audio, set the priority (0 keeps it; 64 highest ..
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
@@ -129,6 +139,7 @@ namespace CrowCompat
                 every = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds) ? seconds : 2f;
             }
             outputRate = AudioSettings.outputSampleRate;
+            Doppler.Install(args);
             Threads.Install(args, every > 0f);
             tap = WantsTap && probe != null && probe.GetComponent<AudioSource>() != null;
             if (tap)
@@ -273,13 +284,19 @@ namespace CrowCompat
     // title's menu sounds did the same at New Game. FilterGate keeps each reverb filter on while its
     // source plays and for its decay time after (the tail), and off otherwise. A filter switched on
     // while its source plays joins the playing sound at the next mix.
+    // The cap holds for filters already on too: several areas have more looping ambient sounds with a
+    // reverb, playing from the load, than the mixer can afford (Corridor S and D 9, Pool 10, Dungeon 7,
+    // Crypt 6): Corridor S's nine kept the mixer at 94% of CPU 2 and the DSP clock at 37% of real time
+    // (the crackling in its corridor). When more are wanted than the cap, the most audible keep theirs:
+    // 2D sounds first, then by distance from the listener over the source's range, ranked every half
+    // second, a filter that is on counting as 30% nearer (so two alike don't swap back and forth).
     public static class FilterGate
     {
         struct Entry
         {
             public Behaviour Filter;
             public AudioSource Source;
-            public float Tail, OffAt;
+            public float Tail, OffAt, Score;
         }
 
         static readonly HashSet<string> types = new HashSet<string>();
@@ -288,8 +305,25 @@ namespace CrowCompat
         // at 444 MHz, the mixer without them 15-20%; the title's New Game sounds start five at once.
         static int max = 3;
         static readonly List<Entry> entries = new List<Entry>();
-        static float nextFind;
+        static readonly List<int> order = new List<int>();  // entries, the most audible first
+        static readonly List<bool> wants = new List<bool>();
+        static float nextFind, nextRank;
         static int switches;
+        static Transform listener;
+        static bool oldCap;  // -crow-reverb-cap old: filters already on keep theirs past the cap (the rule before)
+        // The cap adapts to the area: the mixer kept up with 3 reverbs on the title, in Driving Intro and
+        // Roadside, but in Corridor S only with 1 (2: the DSP clock at 91-96% of real time). Each area starts at
+        // -crow-reverb-max (the ceiling) or at what it came down to on an earlier visit; whenever the DSP clock
+        // ran under 97% of the wall clock over a window of 1.5 s or more, the cap goes one below the reverbs
+        // on (-crow-reverb-adapt off keeps it).
+        static int ceiling, onCount;
+        static bool adapt = true, resolve;
+        static float watchFrom;
+        static double windowDsp = -1.0;
+        static long windowTicks;
+        static readonly Stopwatch watch = Stopwatch.StartNew();
+        static readonly Dictionary<string, int> learned = new Dictionary<string, int>();
+        static string behindScene;
 
         internal static void Install(string[] args)
         {
@@ -307,10 +341,20 @@ namespace CrowCompat
             int limit = Array.IndexOf(args, "-crow-reverb-max");
             if (limit >= 0 && limit + 1 < args.Length && !int.TryParse(args[limit + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out max)) max = 3;
             if (!idleOnly) max = 0;
+            oldCap = Array.IndexOf(args, "-crow-reverb-cap") >= 0 && Array.IndexOf(args, "old") == Array.IndexOf(args, "-crow-reverb-cap") + 1;
+            adapt = !oldCap && !(Array.IndexOf(args, "-crow-reverb-adapt") >= 0 && Array.IndexOf(args, "off") == Array.IndexOf(args, "-crow-reverb-adapt") + 1);
+            ceiling = max;
             active = true;
-            SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
+            SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                nextFind = 0f;
+                // The new area's cap once it is the active scene; its first second (the load's tail) unwatched.
+                resolve = true;
+                watchFrom = Time.realtimeSinceStartup + 1f;
+                windowDsp = -1.0;
+            };
             Canvas.willRenderCanvases += Update;
-            Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
+            Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" + (oldCap ? " (the cap only for filters switched on)" : "") : ""));
         }
 
         static void Find()
@@ -335,7 +379,34 @@ namespace CrowCompat
                     var reverb = filter as AudioReverbFilter;
                     entries.Add(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f });
                 }
+            AudioListener ear = UnityEngine.Object.FindObjectOfType<AudioListener>();
+            listener = ear != null ? ear.transform : null;
             nextFind = Time.realtimeSinceStartup + 3f;
+            nextRank = 0f;
+        }
+
+        // The entries by how audible their source is, the most first (see the class comment).
+        static void Rank()
+        {
+            Vector3 ear = listener != null ? listener.position : Vector3.zero;
+            for (int i = 0; i < entries.Count; i++)
+            {
+                Entry entry = entries[i];
+                float score = float.MaxValue;
+                if (entry.Filter != null && entry.Source != null)
+                {
+                    AudioSource source = entry.Source;
+                    score = source.spatialBlend < 0.5f || listener == null
+                        ? 0f
+                        : Vector3.Distance(source.transform.position, ear) / Mathf.Max(source.maxDistance, 0.01f);
+                    if (entry.Filter.enabled) score *= 0.7f;
+                }
+                entry.Score = score;
+                entries[i] = entry;
+            }
+            order.Clear();
+            for (int i = 0; i < entries.Count; i++) order.Add(i);
+            order.Sort((a, b) => entries[a].Score.CompareTo(entries[b].Score));
         }
 
         // Canvas.willRenderCanvases: every frame, before the frame's audio update.
@@ -344,43 +415,155 @@ namespace CrowCompat
             if (!active) return;
             float now = Time.realtimeSinceStartup;
             if (now >= nextFind) Find();
-            // Filters that are on and still wanted keep their place; others get one while fewer than
-            // max are on (a sound that finds none plays dry until one frees up).
+            if (adapt) Watch(now);
+            if (now >= nextRank || order.Count != entries.Count)
+            {
+                Rank();
+                nextRank = now + 0.5f;
+            }
+            // Which filters are wanted: their source plays, or did within its tail.
+            wants.Clear();
+            for (int i = 0; i < entries.Count; i++)
+            {
+                Entry entry = entries[i];
+                bool want = false;
+                if (idleOnly && entry.Filter != null && entry.Source != null && entry.Source.isActiveAndEnabled)
+                {
+                    if (entry.Source.isPlaying)
+                    {
+                        want = true;
+                        entry.OffAt = now + entry.Tail;
+                        entries[i] = entry;
+                    }
+                    else want = now < entry.OffAt;
+                }
+                wants.Add(want);
+            }
+            // The first max wanted filters in the ranking are on, the rest off; off first, then on, so
+            // the count never goes over.
             int on = 0;
             for (int pass = 0; pass < 2; pass++)
-                for (int i = 0; i < entries.Count; i++)
+            {
+                int kept = 0;
+                foreach (int i in order)
                 {
                     Entry entry = entries[i];
                     if (entry.Filter == null) continue;
-                    bool want = false;
-                    if (idleOnly && entry.Source != null && entry.Source.isActiveAndEnabled)
-                    {
-                        if (entry.Source.isPlaying)
-                        {
-                            want = true;
-                            entry.OffAt = now + entry.Tail;
-                            entries[i] = entry;
-                        }
-                        else want = now < entry.OffAt;
-                    }
+                    bool keep = wants[i] && (kept < max || (oldCap && entry.Filter.enabled));
+                    if (keep) kept++;
                     bool enabled = entry.Filter.enabled;
                     if (pass == 0)
                     {
-                        // Keep: on and wanted. Off: anything on and no longer wanted.
-                        if (enabled && want) on++;
-                        else if (enabled)
+                        if (enabled && !keep)
                         {
                             entry.Filter.enabled = false;
                             switches++;
                         }
+                        else if (enabled) on++;
                     }
-                    else if (want && !enabled && on < max)
+                    else if (keep && !enabled && on < max)
                     {
                         entry.Filter.enabled = true;
                         switches++;
                         on++;
                     }
                 }
+            }
+            onCount = on;
+        }
+
+        // The adaptive cap (see ceiling above).
+        static void Watch(float now)
+        {
+            if (now < watchFrom) return;
+            if (resolve)
+            {
+                resolve = false;
+                int cap;
+                max = learned.TryGetValue(SceneManager.GetActiveScene().name, out cap) ? cap : ceiling;
+            }
+            double dsp = AudioSettings.dspTime;
+            long ticks = watch.ElapsedTicks;
+            if (windowDsp < 0.0)
+            {
+                windowDsp = dsp;
+                windowTicks = ticks;
+                return;
+            }
+            double wall = (ticks - windowTicks) / (double)Stopwatch.Frequency;
+            if (wall < 1.5) return;
+            double ratio = (dsp - windowDsp) / wall;
+            windowDsp = dsp;
+            windowTicks = ticks;
+            // Over 5 s: a stall or the console suspended; no advance: the output paused. Neither says how
+            // the mixer keeps up.
+            if (wall > 5.0 || ratio < 0.05 || ratio >= 0.97) return;
+            string scene = SceneManager.GetActiveScene().name;
+            if (onCount == 0)
+            {
+                // Nothing left to take off (logged once an area).
+                if (behindScene != scene)
+                    Debug.Log("CROW_AUDIO mixer behind in " + scene + " (DSP clock at " + (ratio * 100.0).ToString("F0", CultureInfo.InvariantCulture) + "% of real time) with no filters on");
+                behindScene = scene;
+                return;
+            }
+            int next = Math.Max(0, Math.Min(max, onCount) - 1);
+            Debug.Log("CROW_AUDIO mixer behind in " + scene + " (DSP clock at " + (ratio * 100.0).ToString("F0", CultureInfo.InvariantCulture) +
+                      "% of real time, " + onCount + " filters on): at most " + next + " now");
+            max = next;
+            learned[scene] = max;
+        }
+
+        // Quality.Change's keys (-crow-ab, -crow-fight-cycle), for measurements: rmax=<n> the cap; rzone=off|on
+        // the loaded scenes' AudioReverbZones; lowpass=off|on the lowpass filters (on sources and the
+        // listener) off, and the ones it switched off back on.
+        static readonly Dictionary<Type, List<Behaviour>> switchedOff = new Dictionary<Type, List<Behaviour>>();
+
+        internal static bool Change(string key, string value)
+        {
+            switch (key)
+            {
+                case "rmax":
+                    int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out max);
+                    ceiling = max;
+                    learned.Clear();
+                    Debug.Log("CROW_AUDIO rmax=" + max);
+                    return true;
+                case "rzone":
+                    Switch(typeof(AudioReverbZone), value == "on");
+                    return true;
+                case "lowpass":
+                    Switch(typeof(AudioLowPassFilter), value == "on");
+                    return true;
+            }
+            return false;
+        }
+
+        static void Switch(Type type, bool on)
+        {
+            List<Behaviour> list;
+            if (!switchedOff.TryGetValue(type, out list)) switchedOff[type] = list = new List<Behaviour>();
+            int count = 0;
+            if (on)
+            {
+                foreach (Behaviour behaviour in list)
+                    if (behaviour != null)
+                    {
+                        behaviour.enabled = true;
+                        count++;
+                    }
+                list.Clear();
+            }
+            else
+                foreach (UnityEngine.Object found in UnityEngine.Object.FindObjectsOfType(type))
+                {
+                    var behaviour = found as Behaviour;
+                    if (behaviour == null || !behaviour.enabled) continue;
+                    behaviour.enabled = false;
+                    list.Add(behaviour);
+                    count++;
+                }
+            Debug.Log("CROW_AUDIO " + type.Name + " " + (on ? "on" : "off") + ": " + count);
         }
 
         // For the probe: filters handled, and switches since the last call.
@@ -389,7 +572,7 @@ namespace CrowCompat
             if (!active) return "";
             int count = switches;
             switches = 0;
-            return " gated=" + entries.Count + "/" + count;
+            return " gated=" + entries.Count + "/" + count + " cap=" + max;
         }
     }
 
@@ -690,6 +873,375 @@ namespace CrowCompat
                 Debug.Log("CROW_THREADS set " + kernelName + " priority=" + (priority > 0 ? "0x" + priority.ToString("x") : "kept") +
                           " cpus=" + (mask > 0 ? Cpus(mask) : "kept") + (result < 0 ? " failed 0x" + result.ToString("X8") : ""));
                 return;
+            }
+        }
+    }
+
+    // -crow-doppler: the pitch the mixer gives sounds on moving bodies, measured on test tones (the header's
+    // list). A source's velocity, which FMOD's Doppler reads, comes from its movement: per physics step for
+    // an Auto source under a rigidbody (and Mara's AudioListener, under hers), per frame for a Dynamic one.
+    // The game's bodies aren't interpolated, so a transform moves only in physics steps, and a frame with no
+    // step or two reads a Dynamic source's velocity as 0 or twice what it is.
+    public static class Doppler
+    {
+        internal const float Tone = 1000f;
+        internal static int Rate;
+        static float every, nextReport, placeAt = -1f, cycleStart, windowStart;
+        static AudioClip clip;
+        static readonly List<DopplerTap> taps = new List<DopplerTap>();
+        static readonly List<DopplerTap> enemyTaps = new List<DopplerTap>();
+        static readonly List<DopplerTap> wakeTaps = new List<DopplerTap>();
+        static Transform mara, enemy, ear;
+        static Vector3 maraLast, enemyLast, earLast;
+        static float maraPath, enemyPath, earPath;
+        static readonly int[] steps = new int[4];
+        static int stepsThisFrame;
+        static bool off;
+
+        internal static void Install(string[] args)
+        {
+            int index = Array.IndexOf(args, "-crow-doppler");
+            if (index < 0) return;
+            float seconds;
+            every = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds) ? seconds : 5f;
+            Rate = AudioSettings.outputSampleRate;
+            // A second at 48 kHz, 48 samples a cycle: the loop has no seam.
+            var data = new float[48000];
+            for (int i = 0; i < data.Length; i++) data[i] = Mathf.Sin(2f * Mathf.PI * (i % 48) / 48f);
+            clip = AudioClip.Create("CrowDopplerTone", data.Length, 1, 48000, false);
+            clip.SetData(data, 0);
+            // Placed once the area has settled (Fight's setup is 12 s after the load).
+            SceneManager.sceneLoaded += (scene, mode) => placeAt = Time.realtimeSinceStartup + 14f;
+            Canvas.willRenderCanvases += Frame;
+            Debug.Log("CROW_DOPPLER probe every " + every + " s; output " + Rate + " Hz");
+        }
+
+        // Diag's instances that are test tones' filters, and their tones (Diag.cs passes them here).
+        static readonly Dictionary<Diag, DopplerTap> owners = new Dictionary<Diag, DopplerTap>();
+
+        internal static bool Owns(Diag diag)
+        {
+            if (clip == null) return false;
+            lock (owners) return owners.ContainsKey(diag);
+        }
+
+        // On the mixer thread: false for Diag's own probe (the mixer tap's source).
+        internal static bool Filter(Diag diag, float[] data, int channels)
+        {
+            if (clip == null) return false;
+            DopplerTap tap;
+            lock (owners)
+                if (!owners.TryGetValue(diag, out tap)) return false;
+            tap.Measure(data, channels);
+            return true;
+        }
+
+        // Diag's FixedUpdate: the probe's own instance counts the steps.
+        internal static void Step(Diag diag)
+        {
+            if (clip == null || Owns(diag)) return;
+            stepsThisFrame++;
+        }
+
+        static void Frame()
+        {
+            float now = Time.realtimeSinceStartup;
+            steps[Math.Min(stepsThisFrame, 3)]++;
+            stepsThisFrame = 0;
+            if (placeAt > 0f && now >= placeAt)
+            {
+                placeAt = -1f;
+                Place();
+                cycleStart = now;
+                StartWindow(now);
+                return;
+            }
+            if (taps.Count == 0) return;
+            Track(mara, ref maraLast, ref maraPath);
+            Track(enemy, ref enemyLast, ref enemyPath);
+            Track(ear, ref earLast, ref earPath);
+            // The wake tones: off for 2 s, then on and played again, every 4 s (IdleAudio's off and Wake).
+            bool wantOff = (now - cycleStart) % 4f < 2f;
+            if (wantOff != off)
+            {
+                off = wantOff;
+                foreach (DopplerTap tap in wakeTaps)
+                {
+                    if (tap.Object == null) continue;
+                    tap.Source.enabled = !off;
+                    if (off) continue;
+                    // The filter comes back with its component (a source switched on again starts without it).
+                    tap.Filter.enabled = false;
+                    tap.Filter.enabled = true;
+                    tap.Restart();
+                    tap.Source.Play();
+                }
+            }
+            if (now < nextReport) return;
+            Report(now);
+            StartWindow(now);
+        }
+
+        static void StartWindow(float now)
+        {
+            nextReport = now + every;
+            windowStart = now;
+            maraPath = enemyPath = earPath = 0f;
+            Array.Clear(steps, 0, steps.Length);
+            foreach (DopplerTap tap in taps)
+                if (tap.Object != null) tap.Take();
+        }
+
+        static void Track(Transform target, ref Vector3 last, ref float path)
+        {
+            if (target == null) return;
+            Vector3 position = target.position;
+            if (last != Vector3.zero) path += Vector3.Distance(position, last);
+            last = position;
+        }
+
+        static void Place()
+        {
+            foreach (DopplerTap tap in taps)
+                if (tap.Object != null) UnityEngine.Object.Destroy(tap.Object);
+            taps.Clear();
+            lock (owners) owners.Clear();
+            enemyTaps.Clear();
+            wakeTaps.Clear();
+            GameObject body = GameObject.Find("character RIGIDBODY");
+            mara = body != null ? body.transform : null;
+            AudioListener listener = UnityEngine.Object.FindObjectOfType<AudioListener>();
+            ear = listener != null ? listener.transform : null;
+            maraLast = enemyLast = earLast = Vector3.zero;
+            var still = new GameObject("CrowDoppler still");
+            still.transform.position = (ear != null ? ear.position : Vector3.zero) + new Vector3(0f, 0f, 3f);
+            Add(still.transform, Vector3.zero, "still", AudioVelocityUpdateMode.Auto, 1.01f, 0f);
+            Add(still.transform, Vector3.zero, "flat", AudioVelocityUpdateMode.Auto, 1.01f, 0f).Source.spatialBlend = 0f;
+            if (mara != null)
+            {
+                Add(mara, new Vector3(0f, 0.8f, 1.5f), "mara-dyn", AudioVelocityUpdateMode.Dynamic, 1f, 1f);
+                Add(mara, new Vector3(0f, 0.8f, 1.5f), "mara-auto", AudioVelocityUpdateMode.Auto, 1f, 1f);
+            }
+            enemy = PickEnemy(null);
+            Transform holder = enemy != null ? enemy : still.transform;
+            enemyTaps.Add(Add(holder, new Vector3(0f, 0.5f, 0f), "enemy-dyn", AudioVelocityUpdateMode.Dynamic, 1f, 1f));
+            enemyTaps.Add(Add(holder, new Vector3(0f, 0.5f, 0f), "enemy-auto", AudioVelocityUpdateMode.Auto, 1f, 1f));
+            wakeTaps.Add(Add(holder, new Vector3(0f, 0.5f, 0f), "wake-dyn", AudioVelocityUpdateMode.Dynamic, 1f, 1f));
+            wakeTaps.Add(Add(holder, new Vector3(0f, 0.5f, 0f), "wake-auto", AudioVelocityUpdateMode.Auto, 1f, 1f));
+            enemyTaps.AddRange(wakeTaps);
+            off = false;
+            Debug.Log("CROW_DOPPLER placed: mara=" + (mara != null) + " ear=" + (ear != null ? ear.name.Replace(' ', '_') : "none") +
+                      " enemy=" + Describe(enemy) + " fixedDt=" + Time.fixedDeltaTime.ToString("F4", CultureInfo.InvariantCulture));
+        }
+
+        static string Describe(Transform target)
+        {
+            if (target == null) return "none";
+            float distance = mara != null ? Vector3.Distance(target.position, mara.position) : -1f;
+            Rigidbody body = target.GetComponent<Rigidbody>();
+            return target.name.Replace(' ', '_') + "(" + distance.ToString("F1", CultureInfo.InvariantCulture) + "m," +
+                   (body != null ? body.velocity.magnitude.ToString("F2", CultureInfo.InvariantCulture) : "?") + "m/s)";
+        }
+
+        // The nearest awake enemy body to Mara, moving ones first.
+        static Transform PickEnemy(Transform not)
+        {
+            Transform best = null;
+            float bestScore = float.MaxValue;
+            Vector3 from = mara != null ? mara.position : Vector3.zero;
+            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+            {
+                if (body.isKinematic || body.transform == not || !body.name.StartsWith("Enemy ", StringComparison.Ordinal)) continue;
+                float score = Vector3.Distance(body.position, from) + (body.velocity.magnitude > 0.2f ? 0f : 1000f);
+                if (score < bestScore)
+                {
+                    bestScore = score;
+                    best = body.transform;
+                }
+            }
+            return best;
+        }
+
+        static DopplerTap Add(Transform parent, Vector3 local, string label, AudioVelocityUpdateMode mode, float pitch, float doppler)
+        {
+            var go = new GameObject("CrowDoppler " + label);
+            go.transform.SetParent(parent, false);
+            go.transform.localPosition = local;
+            AudioSource source = go.AddComponent<AudioSource>();
+            source.clip = clip;
+            source.loop = true;
+            source.playOnAwake = false;
+            source.priority = 0;
+            source.volume = 0.02f;
+            source.pitch = pitch;
+            source.spatialBlend = 1f;
+            source.dopplerLevel = doppler;
+            source.rolloffMode = AudioRolloffMode.Linear;
+            source.minDistance = 500f;
+            source.maxDistance = 1000f;
+            source.bypassReverbZones = true;
+            source.velocityUpdateMode = mode;
+            var tap = new DopplerTap { Label = label, Source = source, Object = go, Transform = go.transform };
+            tap.Filter = go.AddComponent<Diag>();
+            lock (owners) owners[tap.Filter] = tap;
+            source.Play();
+            taps.Add(tap);
+            return tap;
+        }
+
+        static void Report(float now)
+        {
+            float seconds = Math.Max(now - windowStart, 0.001f);
+            var line = new StringBuilder("CROW_DOPPLER t=");
+            line.Append(now.ToString("F1", CultureInfo.InvariantCulture));
+            line.Append(" scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
+            line.Append(" steps=").Append(steps[0]).Append('/').Append(steps[1]).Append('/').Append(steps[2]).Append('/').Append(steps[3]);
+            line.Append(" speed mara=").Append((maraPath / seconds).ToString("F2", CultureInfo.InvariantCulture));
+            line.Append(" enemy=").Append((enemyPath / seconds).ToString("F2", CultureInfo.InvariantCulture));
+            line.Append(" ear=").Append((earPath / seconds).ToString("F2", CultureInfo.InvariantCulture));
+            line.Append(" listenerVolume=").Append(AudioListener.volume.ToString("F2", CultureInfo.InvariantCulture));
+            foreach (DopplerTap tap in taps)
+                if (tap.Object != null) line.Append(" | ").Append(tap.Take());
+            Debug.Log(line.ToString());
+            // An enemy that stood still all window: the tones move to one that walks.
+            if (enemy == null || enemyPath < 0.3f)
+            {
+                Transform next = PickEnemy(enemy);
+                if (next != null && next != enemy)
+                {
+                    enemy = next;
+                    enemyLast = Vector3.zero;
+                    foreach (DopplerTap tap in enemyTaps)
+                    {
+                        if (tap.Object == null) continue;
+                        tap.Transform.SetParent(next, false);
+                        tap.Transform.localPosition = new Vector3(0f, 0.5f, 0f);
+                        tap.Skip = 12;  // the move itself is a jump
+                    }
+                    Debug.Log("CROW_DOPPLER enemy -> " + Describe(next));
+                }
+            }
+        }
+    }
+
+    // A Doppler test tone's pitch, block by block, from inside the mixer (Doppler above). Its filter is a
+    // Diag component (a new MonoBehaviour would need a full build), which passes the blocks here.
+    public class DopplerTap
+    {
+        internal string Label;
+        internal AudioSource Source;
+        internal GameObject Object;
+        internal Transform Transform;
+        internal Diag Filter;
+        internal volatile int Skip;
+        volatile bool restarted;
+        readonly object gate = new object();
+        long blocks, jumps, wakeBlocks, calls;
+        float peak;
+        double sum, min = 9.0, max, sumDelta, maxDelta, wakeMax, last = -1.0;
+        int wake;
+
+        internal void Restart()
+        {
+            restarted = true;
+        }
+
+        internal void Measure(float[] data, int channels)
+        {
+            double pitch = Pitch(data, channels);
+            float loudest = 0f;
+            for (int i = 0; i < data.Length; i++) loudest = Math.Max(loudest, Math.Abs(data[i]));
+            lock (gate)
+            {
+                calls++;
+                peak = Math.Max(peak, loudest);
+                if (restarted)
+                {
+                    restarted = false;
+                    last = -1.0;
+                    wake = 6;  // the first ~6 blocks after the Play
+                }
+                if (pitch <= 0.0) return;
+                if (Skip > 0)
+                {
+                    Skip--;
+                    last = -1.0;
+                    return;
+                }
+                if (wake > 0)
+                {
+                    wake--;
+                    wakeBlocks++;
+                    wakeMax = Math.Max(wakeMax, Math.Abs(pitch - 1.0));
+                }
+                blocks++;
+                sum += pitch;
+                min = Math.Min(min, pitch);
+                max = Math.Max(max, pitch);
+                if (last > 0.0)
+                {
+                    double delta = Math.Abs(pitch - last);
+                    sumDelta += delta;
+                    maxDelta = Math.Max(maxDelta, delta);
+                    if (delta > 0.005) jumps++;
+                }
+                last = pitch;
+            }
+        }
+
+        // The block's frequency over the tone's, from its rising zero crossings (interpolated between
+        // samples), the channels summed (one panned sine).
+        static double Pitch(float[] data, int channels)
+        {
+            if (channels <= 0) return -1.0;
+            int frames = data.Length / channels;
+            double first = -1.0, latest = -1.0;
+            int count = 0;
+            float previous = 0f;
+            for (int i = 0; i < frames; i++)
+            {
+                float sample = 0f;
+                for (int c = 0; c < channels; c++) sample += data[i * channels + c];
+                if (i > 0 && previous < 0f && sample >= 0f)
+                {
+                    double at = i - 1 + previous / (double)(previous - sample);
+                    if (count == 0) first = at;
+                    latest = at;
+                    count++;
+                }
+                previous = sample;
+            }
+            if (count < 3 || latest <= first) return -1.0;
+            return (count - 1) / (latest - first) * Doppler.Rate / Doppler.Tone;
+        }
+
+        static string Percent(double pitch)
+        {
+            return ((pitch - 1.0) * 100.0).ToString("+0.00;-0.00", CultureInfo.InvariantCulture);
+        }
+
+        // The window's numbers ("label: ..."), and a new window.
+        internal string Take()
+        {
+            lock (gate)
+            {
+                var text = new StringBuilder(Label);
+                text.Append("[").Append(Source != null ? Source.velocityUpdateMode.ToString() : "?").Append("]");
+                text.Append(" calls=").Append(calls).Append(" peak=").Append(peak.ToString("F3", CultureInfo.InvariantCulture));
+                text.Append(" n=").Append(blocks);
+                if (blocks > 0)
+                {
+                    text.Append(" mean=").Append(Percent(sum / blocks)).Append("% min=").Append(Percent(min)).Append("% max=").Append(Percent(max));
+                    text.Append("% dmean=").Append((sumDelta * 100.0 / Math.Max(blocks - 1, 1)).ToString("F3", CultureInfo.InvariantCulture));
+                    text.Append("% dmax=").Append((maxDelta * 100.0).ToString("F2", CultureInfo.InvariantCulture)).Append("% jumps=").Append(jumps);
+                }
+                if (wakeBlocks > 0) text.Append(" wakeMax=").Append((wakeMax * 100.0).ToString("F2", CultureInfo.InvariantCulture)).Append('%');
+                blocks = jumps = wakeBlocks = calls = 0;
+                peak = 0f;
+                sum = max = sumDelta = maxDelta = wakeMax = 0.0;
+                min = 9.0;
+                last = -1.0;
+                return text.ToString();
             }
         }
     }

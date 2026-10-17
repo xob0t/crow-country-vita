@@ -12,7 +12,11 @@ using UnityEngine.SceneManagement;
 //                     physics step (FixedUpdate.AudioFixedUpdate), and the enemies have 7-15 sources
 //                     each; Dynamic takes it once a frame from the source's movement. Station Square's
 //                     fight: AudioFixedUpdate 3.8 -> 2.5 ms a frame with 6 enemies awake, 32 -> 7 with 18.
-//                     Set on the loaded scenes' sources (and the player's) a second after each load.
+//                     Set on the loaded scenes' sources (and the player's) a second after each load, and on
+//                     the AudioListener: it is under Mara's rigidbody, so Auto updated it per physics step
+//                     while her own sources, Dynamic, moved per frame, and the frames with no step or two
+//                     gave her own sounds a Doppler shift (a 1 kHz tone on her body: steps of up to 1.9%
+//                     as she moved, 0 with both per step); with both per frame they move together again.
 //   -crow-enemy-readable
 //                     the enemies' MeshCombineStudio combiners keep their combined meshes readable
 //                     (makeMeshesUnreadable off, set as each scene loads, before they combine), so the
@@ -100,7 +104,14 @@ namespace CrowCompat
             }
             GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
             if (player != null) count += Dynamic(player.scene.GetRootGameObjects());
-            Debug.Log("CROW_ENEMY audio velocity Dynamic on " + count + " sources");
+            int listeners = 0;
+            foreach (AudioListener listener in UnityEngine.Object.FindObjectsOfType<AudioListener>())
+                if (listener.velocityUpdateMode != AudioVelocityUpdateMode.Dynamic)
+                {
+                    listener.velocityUpdateMode = AudioVelocityUpdateMode.Dynamic;
+                    listeners++;
+                }
+            Debug.Log("CROW_ENEMY audio velocity Dynamic on " + count + " sources, " + listeners + " listeners");
         }
 
         static int Dynamic(GameObject[] roots)
