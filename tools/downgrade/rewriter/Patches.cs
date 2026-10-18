@@ -104,6 +104,23 @@ partial class DowngradeAssemblies
         return 1;
     }
 
+    // SFB's UIPixelate (the UI's pixel pattern) starts its Update with CrowCompat MapPan.Skip(this); when
+    // that says so (the map scrolling on whole grid cells, the image's mesh still right), the rest, which
+    // dirties the image's mesh whenever its transform changed, is left out.
+    static int PatchUIPixelate(ModuleDefinition module)
+    {
+        TypeDefinition type = GameType(module, "com.sfbgames.general.materials.UIPixelate");
+        if (type == null) return 0;
+        MethodDefinition update = type.Methods.Single(m => m.Name == "Update" && m.Parameters.Count == 0);
+        var code = update.Body.Instructions;
+        ILProcessor il = update.Body.GetILProcessor();
+        Instruction first = code[0];
+        il.InsertBefore(first, Instruction.Create(OpCodes.Ldarg_0));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Call, CompatMethod(module, "MapPan", "Skip")));
+        il.InsertBefore(first, Instruction.Create(OpCodes.Brtrue, code.Last(i => i.OpCode == OpCodes.Ret)));
+        return 1;
+    }
+
     // PlayMaker's AddForce action: its Rigidbody AddForce, AddRelativeForce and AddForceAtPosition calls go
     // to CrowCompat FixedStep with the action's everyFrame, which scales an impulse given in every physics
     // step when the step isn't the game's 0.02 s (-crow-fixed-dt), so Mara walks and Blobs move as fast.

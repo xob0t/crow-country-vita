@@ -39,6 +39,10 @@ using UnityEngine.SceneManagement;
 //                              (its event with a stand-in bullet); -crow-fight-kill-mode explosion gives
 //                              the grenade's instead (a Grinner blows apart into 22 dynamic pieces)
 //   -crow-fight-log            log the first 40 shots: target, aim, the target's health
+//   -crow-fight-aim off        no aiming and no shots: the enemies awake around Mara, the pad free for
+//                              the menus (fightbench --input)
+//   -crow-fight-globals "<name>=<value>;..."  more PlayMaker globals set before the load, typed as the
+//                              variable is (e.g. "item: map=1;MapFF=true": the map and its Fairytale Town page)
 //   -crow-fight-dump           log one enemy of each type's colliders and bodies at the setup and
 //                              when measuring starts, and which of their layers collide
 //   -crow-fight-cycle <sets>   a change set per window, the sets in turn ('/' between sets, ',' between
@@ -95,6 +99,13 @@ namespace CrowCompat
             new Area { Scene = "Ocean Kingdom", Bools = new[] { "VisitedOceanKingdom", "VisitedSubmarine" }, Items = new[] { "3", "4" } },
             // 10: 2 Guests on a first visit; 4 Blobs, 2 Arms after Big Metal Door; a Puddle, a Goblin after item 10.
             new Area { Scene = "Haunted Hilltop", Bools = new[] { "VisitedHauntedHilltop", "Big Metal Door" }, Items = new[] { "10" } },
+            // 8 (4 Blobs, 2 Grinners, 2 Guests) under Revisiting room (VisitedFairytaleTown), after moving
+            // Arthur (VisitedHauntedHilltop, or NPC1 3): 2 Grinners after item 6 (the gem), the Guests and
+            // Blobs after VisitedSaveLounge. They stand along the town's street (x -0.9..0.7, z 5-25); the
+            // spot is on the street, 3-4 m from a Grinner, a Blob and a Guest (the automatic spot fell
+            // through the floor by the mushroom house).
+            new Area { Scene = "Fairy Forest", Bools = new[] { "VisitedFairytaleTown", "VisitedHauntedHilltop", "VisitedSaveLounge" },
+                       Items = new[] { "6" }, Spot = new[] { 0f, 0f, 12f, 0f, 0f } },
             new Area { Scene = "Underground SW" },
             new Area { Scene = "Pre Machine Centre" },
         };
@@ -166,6 +177,8 @@ namespace CrowCompat
             if (cycle != null) cycleSets = cycle.Split('/');
             killEvery = Number(args, "-crow-fight-kill", mode == "stress" ? 6f : 8f);
             explosionKills = Value(args, "-crow-fight-kill-mode") == "explosion";
+            noAim = Value(args, "-crow-fight-aim") == "off";
+            extraGlobals = Value(args, "-crow-fight-globals");
             if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
             phase = Phase.Loading;
@@ -203,6 +216,20 @@ namespace CrowCompat
                 for (int i = 0; i < area.IntNames.Length; i++) Global(area.IntNames[i], area.IntValues[i], set);
                 ClearEnemyArrays();
             }
+            if (extraGlobals != null)
+                foreach (string pair in extraGlobals.Split(';'))
+                {
+                    int equals = pair.LastIndexOf('=');
+                    if (equals <= 0) continue;
+                    string name = pair.Substring(0, equals).Trim();
+                    string text = pair.Substring(equals + 1).Trim();
+                    object current = Variable(name) == null ? null : GlobalValue(name);
+                    object value = text;
+                    if (current is bool) value = text == "1" || text.ToLowerInvariant() == "true";
+                    else if (current is int) value = int.Parse(text, Inv);
+                    else if (current is float) value = float.Parse(text, Inv);
+                    Global(name, value, set);
+                }
             Global("item: handgun", true, set);
             Global("gun equipped", 1, set);
             Global("Handgun Laser", true, set);
@@ -562,7 +589,7 @@ namespace CrowCompat
             kills0 = getKills == null ? 0 : getKills();
             lastClip = getClip == null ? 0 : getClip();
             Transform combatObject = Descendant(body.transform, "combat mode controls (+ KEYBOARD)");
-            combat = combatObject == null ? null : FsmOn(combatObject.gameObject);
+            combat = combatObject == null || noAim ? null : FsmOn(combatObject.gameObject);
             Transform aim = Descendant(body.transform, "aim raycast");
             aimOrigin = aim != null ? aim : body.transform;
             if (combat != null)
@@ -1379,6 +1406,8 @@ namespace CrowCompat
         // Spiders: "hit"; the others: "my health" 0, then "explosion", which their FSMs take from a
         // grenade), so deaths and their effects come at a steady rate whatever the shots hit.
         static bool explosionKills;
+        static string extraGlobals;  // -crow-fight-globals "name=value;...": more globals before the load
+        static bool noAim;  // -crow-fight-aim off: no aiming and no shots (the pad free for menus)
         static GameObject fakeBullet;
         static Func<string> damageState;
 

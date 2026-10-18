@@ -32,6 +32,14 @@ using UnityEngine.UI;
 //                          -crow-cycle / -crow-ab take fogfar=.
 //   player=hide|noshadow|show (-crow-cycle / -crow-ab, a cost test): the player's drawn renderers off,
 //                          or their shadow casting off, or back as they were.
+//   -crow-menu-cull on|off  on (the PS Vita's default): while a full-screen menu covers the world (the
+//                          inventory and status screen, the map, the pause menu: their canvases
+//                          "UI Canvas Inventory OFF", "UI Canvas Map OFF", "UI Canvas Pause OFF" active)
+//                          the Main Camera culls only layer 5 (UI), where every menu 3D object and the
+//                          menus' lights are; the world it drew behind them (the inventory's black plane
+//                          hid it by depth, the map's and pause's overlay images covered it) is left out:
+//                          its culling, draws and shadow pass. The camera's own mask comes back when the
+//                          menu closes. -crow-cycle / -crow-ab / -crow-fight-cycle take menucull=.
 //   -crow-camera-report [s] after each scene load (and every s seconds, if given), each camera that
 //                          rendered (CROW_CAMERA): its path, target, depth, projection, clip planes,
 //                          culling mask, clear flags, occlusion culling, layer cull distances, image
@@ -63,6 +71,8 @@ namespace CrowCompat
             }
             string value = Perf.Value(args, "-crow-rt-cameras") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
             if (value != null) Set(value);
+            string menu = Perf.Value(args, "-crow-menu-cull") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            if (menu != null) MenuCull.Set(menu == "on");
             string fog = Perf.Value(args, "-crow-fog-far");
             if (fog != null) FogFar(fog == "on");
         }
@@ -185,6 +195,11 @@ namespace CrowCompat
             if (key == "player")
             {
                 Player(value);
+                return true;
+            }
+            if (key == "menucull")
+            {
+                MenuCull.Set(value == "on");
                 return true;
             }
             if (key == "fogfar")
@@ -453,6 +468,81 @@ namespace CrowCompat
                       " cascades=" + QualitySettings.shadowCascades + " lodBias=" + QualitySettings.lodBias.ToString(CultureInfo.InvariantCulture) +
                       " realtimeReflectionProbes=" + (QualitySettings.realtimeReflectionProbes ? 1 : 0) +
                       " softParticles=" + (QualitySettings.softParticles ? 1 : 0));
+        }
+    }
+
+    // -crow-menu-cull: the Main Camera draws only the menus' layer while a full-screen menu is up.
+    static class MenuCull
+    {
+        const int MenuLayers = 1 << 5;  // UI: the menus' 3D objects (portrait, equipped gun, item, monitor) and lights
+        static readonly string[] Names = { "UI Canvas Inventory OFF", "UI Canvas Map OFF", "UI Canvas Pause OFF" };
+        static readonly GameObject[] canvases = new GameObject[3];
+        static bool on, hooked;
+        static Camera camera;
+        static int saved;
+        static bool culling;
+        static float nextFind;
+
+        internal static void Set(bool value)
+        {
+            on = value;
+            if (!hooked)
+            {
+                hooked = true;
+                Application.onBeforeRender += Tick;
+                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
+            }
+            if (!on) Release();
+            Debug.Log("CROW_CAMERA menu cull " + (on ? "on" : "off"));
+        }
+
+        static void Release()
+        {
+            if (culling && camera != null && camera.cullingMask == MenuLayers) camera.cullingMask = saved;
+            culling = false;
+        }
+
+        // The canvases below the player's "UI Canvases" (a root of its own on the PS Vita, PlayerSplit),
+        // looked up by name one level at a time.
+        static void Find()
+        {
+            for (int i = 0; i < canvases.Length; i++) canvases[i] = null;
+            GameObject holder = GameObject.Find("UI Canvases");
+            if (holder == null) return;
+            Transform root = holder.transform;
+            for (int c = 0; c < root.childCount; c++)
+            {
+                Transform child = root.GetChild(c);
+                int index = Array.IndexOf(Names, child.name);
+                if (index >= 0) canvases[index] = child.gameObject;
+            }
+        }
+
+        static void Tick()
+        {
+            if (!on) return;
+            float now = Time.realtimeSinceStartup;
+            if (camera == null || canvases[0] == null)
+            {
+                if (now < nextFind) return;
+                nextFind = now + 1f;
+                if (culling) culling = false;  // the camera went with a load: nothing to give back
+                camera = Camera.main;
+                Find();
+                if (camera == null || canvases[0] == null) return;
+            }
+            bool covered = false;
+            for (int i = 0; i < canvases.Length; i++)
+                if (canvases[i] != null && canvases[i].activeInHierarchy) covered = true;
+            if (covered && !culling)
+            {
+                int mask = camera.cullingMask;
+                if (mask == 0 || mask == MenuLayers) return;  // a load's gap culls nothing (Loading.cs): leave it
+                saved = mask;
+                camera.cullingMask = MenuLayers;
+                culling = true;
+            }
+            else if (!covered && culling) Release();
         }
     }
 }

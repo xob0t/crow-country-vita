@@ -113,6 +113,7 @@ partial class DowngradeAssemblies
         new Pass("patches", Scope.Game, PatchKeyboardOrController),
         new Pass("patches", Scope.All, PatchGarbageCollectMesh),
         new Pass("patches", Scope.Game, PatchBlobTrailSpawn),
+        new Pass("patches", Scope.Game, PatchUIPixelate),
         new Pass("patches", Scope.Game, PatchAddForce),
         new Pass("patches", Scope.All, PatchConsoleMode),
         new Pass("patches", Scope.Game, PatchPlatformAnimation),
