@@ -19,7 +19,8 @@ using System.Runtime.CompilerServices;
 //   - BlobTrailSpawn.Spawn (a Blob's trail) starts with TrailReady: after the Blob dies its pooled
 //     pieces are destroyed and Spawn threw a NullReferenceException every 0.01-0.1 s per dead Blob
 //     (on the PS Vita a stack trace and a log line each, the largest allocation source in fights);
-//     destroyed pieces leave the pool, and an empty pool spawns nothing, as the throw did.
+//     destroyed pieces leave the pool, and an empty pool spawns nothing, as the throw did. With
+//     -crow-blob-trails off (Cuts.cs, the PS Vita's default) it spawns nothing at all.
 //   - FullScreenColour.OnGUI (the game's fades: it walks every FSM's active state for actions with
 //     an OnGUI, on every GUI event, and calls those that are Active) returns at once while none
 //     between its OnEnter and OnExit is Active, and turns its component off until one enters (the game's only OnGUI in play, so
@@ -53,6 +54,7 @@ namespace CrowCompat
         // the game's throw.
         public static bool TrailReady(List<UnityEngine.GameObject> pool)
         {
+            if (Cuts.NoTrails) return false;  // -crow-blob-trails off (Cuts.cs): no new pieces
             if (!trailGuard || pool == null) return true;
             if (pool.Count > 0 && pool[0] != null) return true;
             pool.RemoveAll(destroyed);

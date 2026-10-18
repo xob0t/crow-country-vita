@@ -54,6 +54,10 @@ using UnityEngine.SceneManagement;
 //   -crow-fight-fsm <name>     log every state and action of the FSMs on GameObjects of that name
 //   -crow-fight-run <name>     ignored: fightbench.py names each run, so its log's args line differs
 //                              from the last run's
+//   -crow-fight-moves "t:x,y,z,yaw[,camyaw];..."  t seconds after the fight starts (CROW_FIGHT_START), Mara and
+//                              the camera to another spot (as the setup puts them), pinned there from then on
+//                              (CROW_FIGHT_MOVE): enemies near the new spot wake from their culling, those at
+//                              the old one are culled
 // Mara: on the spot, pinned there (pushes undone every half second), the handgun with the laser
 // sight and a full box, unhurtable (DefenseMulti 0, Health kept at its maximum, never KO, poisoned or
 // on fire), the camera locked (CameraLock, no aim swivel). Aiming: the combat FSM (character
@@ -179,6 +183,16 @@ namespace CrowCompat
             explosionKills = Value(args, "-crow-fight-kill-mode") == "explosion";
             noAim = Value(args, "-crow-fight-aim") == "off";
             extraGlobals = Value(args, "-crow-fight-globals");
+            string movesValue = Value(args, "-crow-fight-moves");
+            if (movesValue != null)
+                foreach (string move in movesValue.Split(';'))
+                {
+                    string[] parts = move.Split(':');
+                    float at;
+                    if (parts.Length != 2 || !float.TryParse(parts[0], NumberStyles.Float, Inv, out at)) continue;
+                    float[] place = parts[1].Split(',').Select(v => float.Parse(v, Inv)).ToArray();
+                    if (place.Length >= 4) moves.Add(new KeyValuePair<float, float[]>(at, place));
+                }
             if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
             phase = Phase.Loading;
@@ -438,10 +452,18 @@ namespace CrowCompat
                 }
                 phase = Phase.Engage;
                 phaseStart = now;
+                fightStart = now;
                 Debug.Log("CROW_FIGHT_START t=" + F(now) + " engage=" + F(engage));
                 return;
             }
             CountHits();
+            if (moves.Count > 0 && now - fightStart >= moves[0].Key) Move(moves[0].Value, now);
+            if (moveCheckAt > 0f && now >= moveCheckAt)
+            {
+                moveCheckAt = -1f;
+                Debug.Log("CROW_FIGHT_MOVED t=" + F(now) + " alive=" + Alive(false) + " awake=" + enemies.Count(e => IsAwake(e)) + " culls=" +
+                          string.Join(",", enemies.Select(e => e.Root == null ? "gone" : e.Type.Replace("Enemy_", "") + ":" + (e.CullState == null ? "-" : e.CullState().Replace(' ', '_'))).ToArray()));
+            }
             if (mode == "walk") LogPosition();
             else if (mode != "stand") Keep(now);
             if (mode != "idle" && mode != "stand" && mode != "walk") Shoot(now);
@@ -464,6 +486,30 @@ namespace CrowCompat
                 return;
             }
             Measure(now);
+        }
+
+        static readonly List<KeyValuePair<float, float[]>> moves = new List<KeyValuePair<float, float[]>>();
+        static float fightStart, moveCheckAt = -1f;
+
+        // -crow-fight-moves: Mara and the camera to the next spot, pinned there.
+        static void Move(float[] place, float now)
+        {
+            moves.RemoveAt(0);
+            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            MonoBehaviour rig = player == null ? null : player.GetComponents<MonoBehaviour>().FirstOrDefault(b => b != null && b.GetType().Name == "CharacterAndCamera");
+            if (rig == null || body == null) return;
+            var marker = new GameObject("CrowFightSpot");
+            marker.transform.position = new Vector3(place[0], place[1], place[2]);
+            rig.GetType().GetMethod("SetPosition").Invoke(rig, new object[] { marker.transform, place[3], place.Length >= 5 ? place[4] : place[3] });
+            UnityEngine.Object.Destroy(marker);
+            if (bodyRigidbody != null)
+            {
+                bodyRigidbody.position = body.transform.position;
+                bodyRigidbody.velocity = Vector3.zero;
+            }
+            pinned = body.transform.position;
+            Debug.Log("CROW_FIGHT_MOVE t=" + F(now) + " to " + V(pinned).Replace(' ', ',') + " alive=" + Alive(false) + " awake=" + enemies.Count(e => IsAwake(e)));
+            moveCheckAt = now + 2f;
         }
 
         static bool Setup()

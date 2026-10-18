@@ -286,6 +286,7 @@ COMPAT_SOURCES = [
             'EnemyChores',
             'Cameras',
             'Decor',
+            'Cuts',
         )
     ),
 ]
@@ -317,6 +318,7 @@ REWRITER_SOURCES = [
             'EnemySplit',
             'FastPaths',
             'Decor',
+            'Cuts',
         )
     ),
 ]

@@ -127,6 +127,8 @@ partial class DowngradeAssemblies
         new Pass("scriptcost", Scope.Game, PatchFullScreenColour),
         // IdleAudio.cs
         new Pass("idleaudio", Scope.All, RouteAudioSourcePlays),
+        // Cuts.cs (CutsSamePose before RouteEnemySplit: Cuts' writes go through EnemySplit themselves)
+        new Pass("cuts", Scope.Game, CutsSamePose),
         // EnemySplit.cs
         new Pass("enemysplit", Scope.Game, RouteEnemySplit),
         // Alloc.cs
@@ -137,6 +139,13 @@ partial class DowngradeAssemblies
         // Decor.cs
         new Pass("decor", Scope.All, DecorTweenHooks),
         new Pass("decor", Scope.Game, DecorAnimationScripts),
+        // Cuts.cs
+        new Pass("cuts", Scope.All, FsmGateHooks),
+        new Pass("cuts", Scope.All, FsmDeltaTime),
+        new Pass("cuts", Scope.Game, CutsLightFlicker),
+        new Pass("cuts", Scope.Game, CutsParticleBursts),
+        new Pass("cuts", Scope.All, CutsRewired),
+        new Pass("rewiredsites", Scope.All, CutsRewiredSites),  // probing builds only: CROW_REWIRED_SITES=1
         // PlayMakerData.cs
         new Pass("playmakerdata", Scope.All, SerializeActionDataAsArrays),
         new Pass("playmakerdata", Scope.All, FastActionFields),
@@ -409,6 +418,7 @@ partial class DowngradeAssemblies
         {
             if (pass.Scope == Scope.Game && !IsGameAssembly(module)) continue;
             if (pass.Group == "profile" && !Profiling) continue;
+            if (pass.Group == "rewiredsites" && Environment.GetEnvironmentVariable("CROW_REWIRED_SITES") != "1") continue;
             int sites = pass.Run(module);
             Count("pass " + pass.Name, sites);
             if (!lines.ContainsKey(pass.Group))

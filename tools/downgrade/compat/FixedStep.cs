@@ -27,6 +27,9 @@ using UnityEngine.SceneManagement;
 // unscaled time don't. One step a frame (on) saves 2-4 ms of physics in a 50-65 ms fight frame but runs
 // the fight at 55-66% of real time; at 2 a frame up to 66.7 ms keeps the game's speed and only hitches
 // are clamped. -crow-cycle / -crow-fight-cycle / -crow-ab take physcap=on|off|<n>.
+// -crow-ground-cache <steps>|off (groundcache=; Cuts.cs sets the PS Vita's 4): the ground friction under a body
+// that Gain looks up with a raycast at every AddForce (84 us a call on the PS Vita, ~1 ms a frame in Station
+// Square's fight) is kept per body for that many physics steps (off: looked up at every call, as before).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -206,7 +209,7 @@ namespace CrowCompat
             if (drag <= 0f || keep <= 0f || keep >= 1f) return step / GameStep;
             float now = Mathf.Pow(keep, step / GameStep);
             float plain = keep / (1f - keep) / (now / (1f - now));
-            float mu = GroundFriction(body);
+            float mu = CachedGroundFriction(body);
             if (mu <= 0f) return plain;
             float impulse = force.magnitude / (mode == ForceMode.Impulse ? body.mass : 1f);  // speed it adds a step at 0.02
             float g = -Physics.gravity.y;
@@ -216,6 +219,21 @@ namespace CrowCompat
         }
 
         static readonly Dictionary<Rigidbody, Collider> ownCollider = new Dictionary<Rigidbody, Collider>();
+        internal static int GroundCacheSteps;
+        static readonly Dictionary<Rigidbody, Vector2> groundCache = new Dictionary<Rigidbody, Vector2>();  // friction, step
+
+        // GroundFriction, kept per body for GroundCacheSteps physics steps.
+        static float CachedGroundFriction(Rigidbody body)
+        {
+            if (GroundCacheSteps <= 0) return GroundFriction(body);
+            float stepNow = Mathf.Round(Time.fixedTime / Time.fixedDeltaTime);
+            Vector2 cached;
+            if (groundCache.TryGetValue(body, out cached) && stepNow - cached.y < GroundCacheSteps && stepNow >= cached.y) return cached.x;
+            if (groundCache.Count > 256) groundCache.Clear();
+            float mu = GroundFriction(body);
+            groundCache[body] = new Vector2(mu, stepNow);
+            return mu;
+        }
 
         // The combined dynamic friction between the body's (first solid) collider and the ground under it;
         // 0 when it isn't on the ground.

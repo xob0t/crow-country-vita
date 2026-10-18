@@ -30,7 +30,9 @@ using UnityEngine.SceneManagement;
 //   -crow-decor-log           every 10 s (CROW_DECOR): targets looked at, the share slowed, runs and
 //                             skips, what was refused and why
 // -crow-cycle / -crow-ab take decor=on|off, decorhidden=, decorfar=, decorfarrate=, and
-// the experiment breath=off|on (Mara's breathing tweens paused or played: what her ~600 transforms cost).
+// the experiment breathpause=off|on (Mara's breathing tweens paused or played: what her ~600 transforms cost;
+// Cuts.cs' breath= is the rule). -crow-decor-visible <n> (Cuts.cs parses it; decorvisible=, the PS Vita's 2):
+// decoration that was drawn runs on one frame in n too, with the frames' time.
 // The probe:
 //   -crow-motion-report <s>   every s seconds, for 6 frames in a row, every transform in the loaded
 //                             scenes that changed in the frame (Transform.hasChanged, cleared each
@@ -55,6 +57,8 @@ namespace CrowCompat
         // The rules (see the top): on by default on the PS Vita, off elsewhere (-crow-decor on|off).
         internal static bool On = Application.platform == RuntimePlatform.PSP2;
         internal static int HiddenDivisor = 4, FarDivisor = 2;
+        // -crow-decor-visible <n> (Cuts.cs sets the PS Vita's 2): decoration that was drawn runs on one frame in n.
+        internal static int VisibleDivisor = 1;
         internal static float Far;  // metres from the camera; 0: no far rule
         static bool log;
 
@@ -106,7 +110,7 @@ namespace CrowCompat
                 };
         }
 
-        // An experiment (-crow-cycle breath=off|on): the player's breathing tweens (on "breath_vert_1",
+        // An experiment (-crow-cycle breathpause=off|on): the player's breathing tweens (on "breath_vert_1",
         // which moves about 600 of Mara's transforms every frame) paused or played again through DOTween,
         // to measure what those transform changes cost.
         static void Breath(bool play)
@@ -149,7 +153,7 @@ namespace CrowCompat
             {
                 case "decor":
                     On = value == "on";
-                    DecorTweens.Active = On;
+                    DecorTweens.Active = On || DecorTweens.Active;
                     break;
                 case "decorhidden":
                     HiddenDivisor = Divisor(number);
@@ -160,7 +164,7 @@ namespace CrowCompat
                 case "decorfarrate":
                     FarDivisor = Divisor(number);
                     break;
-                case "breath":
+                case "breathpause":
                     Breath(value != "off");
                     break;
                 case "lift":
@@ -254,6 +258,12 @@ namespace CrowCompat
         public Transform Target;
         public Renderer[] Renderers;
         public int Phase, Frame = -1, Divisor = 1;
+        // What the target is (the kinds but Decoration follow Cuts.cs' rules): decoration, a prop (below an
+        // object Cuts.Props names: colliders allowed), an enemy's part (free: no collider or body below it
+        // and not the enemy's own transform; fixed: one of those), Mara's breathing.
+        public int Kind;
+        public EnemyState Enemy;
+        public const int Decoration = 0, Prop = 1, EnemyFree = 2, EnemyFixed = 3, Breath = 4;
     }
 
     static class Views
@@ -296,24 +306,44 @@ namespace CrowCompat
             if (target == null) return -(generation << 16);
             int id = target.GetInstanceID(), entry;
             if (byTarget.TryGetValue(id, out entry)) return entry;
-            string why = Refusal(target);
+            int kind;
+            EnemyState enemy;
+            string why = Refusal(target, out kind, out enemy);
             if (why != null || list.Count >= 0xFFFE)
             {
                 refused[id] = why ?? "full";
                 return byTarget[id] = -(generation << 16);
             }
-            var view = new View { Target = target, Renderers = target.GetComponentsInChildren<Renderer>(true), Phase = list.Count };
+            var view = new View { Target = target, Renderers = target.GetComponentsInChildren<Renderer>(true), Phase = enemy != null ? enemy.Index : list.Count,
+                                  Kind = kind, Enemy = enemy };
             list.Add(view);
             return byTarget[id] = (generation << 16) | list.Count;
         }
 
         // Why a target isn't decoration, or null: what it moves has no renderer to judge by, or moving it
         // matters beyond its looks (physics, lights, cameras, the UI, the player, the enemies).
-        static string Refusal(Transform target)
+        static string Refusal(Transform target, out int kind, out EnemyState enemy)
         {
-            if (target.gameObject.scene.name == "DontDestroyOnLoad") return "player";
+            kind = View.Decoration;
+            enemy = null;
+            if (target.gameObject.scene.name == "DontDestroyOnLoad")
+            {
+                if (!Cuts.IsBreath(target)) return "player";
+                kind = View.Breath;
+                return null;
+            }
+            Transform root = Cuts.EnemyRoot(target);
+            if (root != null)
+            {
+                enemy = Enemies.Of(root);
+                kind = target == root || target.GetComponentsInChildren<Rigidbody>(true).Length > 0 ||
+                       target.GetComponentsInChildren<Collider>(true).Length > 0 ? View.EnemyFixed : View.EnemyFree;
+                return null;
+            }
+            bool prop = Cuts.IsProp(target);
+            if (prop) kind = View.Prop;
             if (target.GetComponentsInChildren<Renderer>(true).Length == 0) return "no renderer";
-            if (target.GetComponentsInChildren<Collider>(true).Length > 0) return "collider";
+            if (!prop && target.GetComponentsInChildren<Collider>(true).Length > 0) return "collider";
             if (target.GetComponentsInChildren<Light>(true).Length > 0) return "light";
             if (target.GetComponentsInChildren<Camera>(true).Length > 0) return "camera";
             if (target.GetComponentsInChildren<Rigidbody>(true).Length > 0) return "body";
@@ -354,7 +384,7 @@ namespace CrowCompat
                     break;
                 }
             }
-            int divisor = seen ? 1 : Decor.HiddenDivisor;
+            int divisor = seen ? Decor.VisibleDivisor : Decor.HiddenDivisor;
             if (seen && Decor.Far > 0f && view.Target != null)
             {
                 Camera main = Camera(Time.realtimeSinceStartup);
@@ -364,6 +394,36 @@ namespace CrowCompat
             counted++;
             if (divisor > 1) slowed++;
             return divisor;
+        }
+
+        // This frame's divisor of a view by its kind: 0 holds it (no time passes), 1 runs it every frame.
+        // script: an animation script's (Cuts' -crow-enemy-anim) rather than a tween's.
+        internal static int Rate(View view, int frame, bool script)
+        {
+            switch (view.Kind)
+            {
+                case View.EnemyFree:
+                case View.EnemyFixed:
+                    if (view.Enemy.Frozen && Cuts.FreezeMode > 0) return 0;
+                    if (view.Kind == View.EnemyFixed) return 1;
+                    return script ? Cuts.EnemyAnim : Cuts.EnemyTweens;
+                case View.Breath:
+                    return Cuts.Breath;
+                case View.Prop:
+                    if (Cuts.PropsDivisor > 1) return Cuts.PropsDivisor;
+                    return Decor.On ? Divisor(view, frame) : 1;
+                default:
+                    return Decor.On ? Divisor(view, frame) : 1;
+            }
+        }
+
+        // Whether a view with this frame's divisor (above 0) runs this frame.
+        internal static bool RunsAt(View view, int frame, int divisor)
+        {
+            bool runs = divisor <= 1 || (frame + view.Phase) % divisor == 0;
+            if (runs) ran++;
+            else skipped++;
+            return runs;
         }
 
         // Whether a view runs this frame.
@@ -418,7 +478,7 @@ namespace CrowCompat
 
         public static float Scale(float timeScale, ref int state, object target, int updateType)
         {
-            if (!Decor.On || state == -1) return timeScale;
+            if (state == -1) return timeScale;
             if (updateType > 1)
             {
                 state = -1;
@@ -435,8 +495,10 @@ namespace CrowCompat
                 int now = Time.frameCount;
                 if (now != frame) Advance(now);
                 Count++;
-                if (!Views.Runs(view, now)) return 0f;
-                return view.Divisor <= 1 ? timeScale : timeScale * (view.Divisor == 2 ? factor2 : factor4);
+                int divisor = Views.Rate(view, now, false);
+                if (divisor == 1) return timeScale;
+                if (divisor == 0 || !Views.RunsAt(view, now, divisor)) return 0f;
+                return timeScale * (divisor == 2 ? factor2 : factor4);
             }
             catch (Exception exception)
             {
@@ -483,7 +545,7 @@ namespace CrowCompat
         public static bool Step(Component script, ref float pending, ref int entry)
         {
             float dt = Time.deltaTime;
-            if (Decor.On && entry >= 0)
+            if (entry >= 0 && (Decor.On || Cuts.ScriptRules))
             {
                 try
                 {
@@ -491,7 +553,9 @@ namespace CrowCompat
                     if (view != null)
                     {
                         Count++;
-                        if (!Views.Runs(view, Time.frameCount))
+                        int frame = Time.frameCount, divisor = Views.Rate(view, frame, true);
+                        if (divisor == 0) return false;  // held (a frozen enemy, or the rule off): its time passes by
+                        if (!Views.RunsAt(view, frame, divisor))
                         {
                             pending += dt;
                             return false;

@@ -114,7 +114,7 @@ namespace CrowCompat
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
                 else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1]) && !FixedStep.Change(pair[0], pair[1]) &&
                          !FastPaths.Change(pair[0], pair[1]) && !Decor.Change(pair[0], pair[1]) && !SharedClosures.Change(pair[0], pair[1]) &&
-                         !FilterGate.Change(pair[0], pair[1]))
+                         !FilterGate.Change(pair[0], pair[1]) && !Cuts.Change(pair[0], pair[1]))
                     Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();

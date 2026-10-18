@@ -78,6 +78,7 @@ namespace CrowCompat
             EnemySplit.Install(ProbeFiles.Args);  // -crow-enemy-split: the enemies' inactive parts out
             FastPaths.Install(ProbeFiles.Args);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
             Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
+            Cuts.Install(ProbeFiles.Args);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene") ?? Fight.Scene;
