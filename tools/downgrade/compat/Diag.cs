@@ -191,6 +191,8 @@ namespace CrowCompat
             Doppler.Step(this);
         }
 
+        static float lastUpdateAt = -1f;
+
         void Update()
         {
             if (Doppler.Owns(this)) return;
@@ -236,7 +238,9 @@ namespace CrowCompat
                 sceneToLoad = next;
                 ScenePrefetch.LoadScene(next, LoadSceneMode.Single);
             }
-            float delta = Time.unscaledDeltaTime * 1000f;
+            // By the wall clock: Time.unscaledDeltaTime is clamped to maximumDeltaTime (-crow-physics-cap).
+            float delta = lastUpdateAt >= 0f ? (now - lastUpdateAt) * 1000f : Time.unscaledDeltaTime * 1000f;
+            lastUpdateAt = now;
             frames++;
             frameSum += delta;
             if (delta > worst) worst = delta;

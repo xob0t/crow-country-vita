@@ -19,6 +19,14 @@ using UnityEngine.SceneManagement;
 //     collisions continuously, so they don't pass through an enemy's small colliders
 //     (-crow-bullet-ccd off leaves them discrete).
 // One-off impulses, set velocities (the Grinners' walk), gravity and forces are already step-independent.
+// -crow-physics-cap on|off|<n> (on is 1; the PS Vita's default is 2): Time.maximumDeltaTime at n physics
+// steps, so a frame slower than n steps runs n steps and game time advances by n steps' time (Unity clamps
+// Time.deltaTime, Time.time and the fixed steps' clock alike), instead of 3 or more steps in one long frame
+// making the next one long too; off keeps the project's maximumDeltaTime (0.3333 s). In a clamped frame
+// the whole game slows with it, physics, scripts, animation, tweens and timers together; sound and
+// unscaled time don't. One step a frame (on) saves 2-4 ms of physics in a 50-65 ms fight frame but runs
+// the fight at 55-66% of real time; at 2 a frame up to 66.7 ms keeps the game's speed and only hitches
+// are clamped. -crow-cycle / -crow-fight-cycle / -crow-ab take physcap=on|off|<n>.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -31,10 +39,18 @@ namespace CrowCompat
         static readonly Dictionary<Rigidbody, Vector2> gameDrag = new Dictionary<Rigidbody, Vector2>();
         static float nextScan = -1f;
         static bool fullScan;
+        // -crow-physics-cap: steps a frame at most (0: off), and the project's maximumDeltaTime.
+        static float capSteps;
+        static float gameMaxDelta = -1f;
 
         // -crow-cycle / -crow-fight-cycle / -crow-ab: fixeddt=<s or fps> (game for 0.02), as -crow-fixed-dt.
         internal static bool Change(string key, string value)
         {
+            if (key == "physcap")
+            {
+                Cap(value);
+                return true;
+            }
             if (key != "fixeddt") return false;
             float number;
             if (value == "game") number = GameStep;
@@ -66,6 +82,10 @@ namespace CrowCompat
             string value = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
             int ccd = Array.IndexOf(args, "-crow-bullet-ccd");
             bulletCcd = !(ccd >= 0 && ccd + 1 < args.Length && args[ccd + 1] == "off");
+            int capFlag = Array.IndexOf(args, "-crow-physics-cap");
+            string capValue = capFlag >= 0 && capFlag + 1 < args.Length ? args[capFlag + 1]
+                : Application.platform == RuntimePlatform.PSP2 ? "2" : null;
+            if (capValue != null) Cap(capValue);
             // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
             if (value == null && Application.platform == RuntimePlatform.PSP2) value = "30";
             float number;
@@ -82,6 +102,7 @@ namespace CrowCompat
             compensate = keepGame;
             on = Mathf.Abs(step - GameStep) > 1e-6f && keepGame;
             Time.fixedDeltaTime = step;
+            if (capSteps > 0f) ApplyCap();
             // The bodies seen so far get their drags for the new step, from the game's.
             var known = new List<Rigidbody>(gameDrag.Keys);
             foreach (Rigidbody body in known)
@@ -97,6 +118,29 @@ namespace CrowCompat
             }
             if (on && Time.timeSinceLevelLoad > 1f) fullScan = true;
             Debug.Log("CROW_FIXED step " + step.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) + " s" + (on ? " (game kept as at 0.02)" : compensate ? "" : " (uncompensated)"));
+        }
+
+        // -crow-physics-cap's value: on (1 step), off, or a number of steps.
+        static void Cap(string value)
+        {
+            if (gameMaxDelta < 0f) gameMaxDelta = Time.maximumDeltaTime;
+            float steps;
+            if (value == "on") steps = 1f;
+            else if (value == "off" || value == "game") steps = 0f;
+            else if (!float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out steps) || steps < 0f)
+                return;
+            capSteps = steps;
+            if (capSteps > 0f) ApplyCap();
+            else Time.maximumDeltaTime = gameMaxDelta;
+            Debug.Log("CROW_FIXED cap " + (capSteps > 0f ? capSteps.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " steps" : "off") +
+                      ": maximumDeltaTime=" + Time.maximumDeltaTime.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) +
+                      " fixedDeltaTime=" + Time.fixedDeltaTime.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        // Unity keeps maximumDeltaTime at least fixedDeltaTime.
+        static void ApplyCap()
+        {
+            Time.maximumDeltaTime = Mathf.Max(Time.fixedDeltaTime * capSteps, Time.fixedDeltaTime);
         }
 
         static void Frame()

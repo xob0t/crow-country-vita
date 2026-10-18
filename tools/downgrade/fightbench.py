@@ -55,6 +55,7 @@ COLUMNS = [
     ('scripts', 'scripts', '{:.1f}'),
     ('physics', 'phys', '{:.1f}'),
     ('steps', 'steps', '{:.1f}'),
+    ('rate', 'rate', '{:.2f}'),
     ('anim', 'anim', '{:.1f}'),
     ('skin', 'skin', '{:.1f}'),
     ('particles', 'part', '{:.1f}'),
@@ -154,6 +155,7 @@ def report(logs):
         'ms per frame. frame: mean frame time; p50/p95/p99/worst: frame time percentiles; main: the main\n'
         "thread's own run time per frame (PS Vita, CrowClock); scripts..wait: player loop steps (scripts:\n"
         'Update/LateUpdate/FixedUpdate scripts incl. PlayMaker; phys: physics; steps: physics steps a frame;\n'
+        'rate: game time per wall-clock second (under 1 when -crow-physics-cap clamps slow frames);\n'
         'anim: Animator/Director; '
         'skin: skinned meshes; part: particle systems; render: culling and draw submission, renderers;\n'
         'ui: canvases; wait: vsync, present and frame start); gc/gcms: collections and their pause in the\n'

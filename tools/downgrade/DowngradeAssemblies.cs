@@ -148,6 +148,7 @@ partial class DowngradeAssemblies
         new Pass("loadstats", Scope.All, TimeLoadMethods),
         // ActionProfile.cs (profiling builds only: CROW_ACTION_PROFILE=1)
         new Pass("profile", Scope.All, ProfileActions),
+        new Pass("profile", Scope.All, ProfileBehaviours),
     };
 
     // Sites changed per rule (a pass, a row of a rule table, a game type a pass looks for),

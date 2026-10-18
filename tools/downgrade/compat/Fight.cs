@@ -411,6 +411,10 @@ namespace CrowCompat
         {
             if (mode == null || phase == Phase.Off || phase == Phase.Done) return;
             float now = Time.realtimeSinceStartup;
+            // The frame's time by the wall clock: Unity clamps Time.unscaledDeltaTime to
+            // maximumDeltaTime too, which -crow-physics-cap lowers to one physics step.
+            frameMs = lastFrameAt >= 0f ? (now - lastFrameAt) * 1000f : Time.unscaledDeltaTime * 1000f;
+            lastFrameAt = now;
             if (phase == Phase.Loading)
             {
                 if (now > 400f) Fail("area-not-loaded");
@@ -1599,6 +1603,7 @@ namespace CrowCompat
                 if (windowSet != "-") Quality.Change(windowSet);
             }
             windowStart = now;
+            gameStart = Time.time;
             fixedStart = Time.fixedTime;
             if (fixedRunStart < 0f) fixedRunStart = fixedStart;
             windowCount = 0;
@@ -1613,6 +1618,7 @@ namespace CrowCompat
             allocStart = alloc;
             if (windowIndex == 0)
             {
+                gameRunStart = gameStart;
                 gcRunStart = gcStart;
                 shotsRunStart = shots;
                 killsRunStart = getKills == null ? 0 : getKills();
@@ -1629,9 +1635,11 @@ namespace CrowCompat
             freeMin = float.MaxValue;
         }
 
+        static float frameMs, lastFrameAt = -1f, gameStart, gameRunStart;
+
         static void Measure(float now)
         {
-            float ms = Time.unscaledDeltaTime * 1000f;
+            float ms = frameMs;
             if (windowCount < MaxFrames) windowFrames[windowCount++] = ms;
             if (allCount < MaxFrames) allFrames[allCount++] = ms;
             if (mainUid > 0)
@@ -1681,6 +1689,11 @@ namespace CrowCompat
             line.Append(" reloads=").Append(reloads - reloadsStart).Append(" hits=").Append(hits - hitsStart)
                 .Append(" shotkills=").Append(shotKills - shotKillsStart);
             if (windowSet != null) line.Append(" set=").Append(windowSet);
+            // Game time against the wall clock's (below 1 when -crow-physics-cap clamps long frames), and
+            // the physics clock's against game time's (1: the two keep together).
+            float gameSpan = Time.time - gameStart;
+            line.Append(" rate=").Append(F(now > windowStart ? gameSpan / (now - windowStart) : 0f))
+                .Append(" fixedRate=").Append(F(gameSpan > 0f ? (Time.fixedTime - fixedStart) / gameSpan : 0f));
             int debrisBodies = 0, debrisAwake = 0;
             foreach (Rigidbody rigid in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
                 if (EnemyCost.Debris(rigid))
@@ -1716,6 +1729,9 @@ namespace CrowCompat
                             loopRunStart, GC.CollectionCount(0) - gcRunStart, gcMsAll, allocRunStart, shots - shotsRunStart,
                             (getKills == null ? 0 : getKills()) - killsRunStart, aliveRunSamples > 0 ? aliveRunSum / aliveRunSamples : -1,
                             aliveRunSamples > 0 ? awakeRunSum / aliveRunSamples : -1, freeRunMin);
+            float gameRun = Time.time - gameRunStart;
+            line.Append(" rate=").Append(F(now > phaseStart ? gameRun / (now - phaseStart) : 0f))
+                .Append(" fixedRate=").Append(F(gameRun > 0f ? (Time.fixedTime - fixedRunStart) / gameRun : 0f));
             line.Append(" windows=").Append(windowIndex).Append(" copies=").Append(placed).Append(" replaced=").Append(replaced)
                 .Append(" forced=").Append(killed).Append(" hits=").Append(hits - hitsRunStart).Append(" shotkills=").Append(shotKills - shotKillsRunStart)
                 .Append(" hitsAll=").Append(hits).Append(" shotkillsAll=").Append(shotKills);
