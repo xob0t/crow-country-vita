@@ -232,22 +232,33 @@ public static class DowngradeBuild
     // The PS Vita build's static merge (CrowCompat's compat/Merge.cs, CrowMergeScenes below), from the
     // CROW_MERGE environment variable: on (merge, and drop the parts' meshes nothing else in the scene
     // uses; the default), ab (merge and keep the parts' meshes, so -crow-merge off can switch back for
-    // comparisons), off. Other platforms don't merge.
+    // comparisons), off. Other platforms don't merge, unless CROW_VITA_DATA=1 (a Windows player with
+    // the PS Vita's scene data, for measurements: merge, split and MeshCombineStudio bake as on the PS Vita).
     internal static string MergeMode()
     {
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.PSP2) return "off";
+        if (!VitaData) return "off";
         string mode = Environment.GetEnvironmentVariable("CROW_MERGE");
         return string.IsNullOrEmpty(mode) ? "on" : mode;
     }
 
     // The PS Vita build's scene split (CrowCompat's Merge.Split, after the merge in CrowMergeScenes),
     // from the CROW_SPLIT environment variable: movers (the default: the still parts and the parts that
-    // move on their own), on (the still parts only) or off. Other platforms don't split.
+    // move on their own), on (the still parts only) or off. Other platforms don't split (CROW_VITA_DATA=1 does).
     internal static string SplitMode()
     {
-        if (EditorUserBuildSettings.activeBuildTarget != BuildTarget.PSP2) return "off";
+        if (!VitaData) return "off";
         string mode = Environment.GetEnvironmentVariable("CROW_SPLIT");
         return string.IsNullOrEmpty(mode) ? "movers" : mode;
+    }
+
+    // The scene data as the PS Vita build writes it: the PS Vita target, or CROW_VITA_DATA=1 on another.
+    internal static bool VitaData
+    {
+        get
+        {
+            return EditorUserBuildSettings.activeBuildTarget == BuildTarget.PSP2 ||
+                   Environment.GetEnvironmentVariable("CROW_VITA_DATA") == "1";
+        }
     }
 
     // Whether a scene path is the scene named (its file name, or its path), in any case.

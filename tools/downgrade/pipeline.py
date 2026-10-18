@@ -287,6 +287,7 @@ COMPAT_SOURCES = [
             'Cameras',
             'Decor',
             'Cuts',
+            'Audit',
         )
     ),
 ]

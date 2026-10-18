@@ -491,6 +491,9 @@ namespace CrowCompat
         static readonly List<KeyValuePair<float, float[]>> moves = new List<KeyValuePair<float, float[]>>();
         static float fightStart, moveCheckAt = -1f;
 
+        // Audit.cs: when the fight started (CROW_FIGHT_START, realtimeSinceStartup), or -1 before.
+        internal static float StartedAt { get { return phase >= Phase.Engage ? fightStart : -1f; } }
+
         // -crow-fight-moves: Mara and the camera to the next spot, pinned there.
         static void Move(float[] place, float now)
         {

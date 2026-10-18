@@ -815,9 +815,40 @@ namespace CrowCompat
             return start.root.gameObject.scene.name == "DontDestroyOnLoad" ? "player/" + label : label;
         }
 
+        // Audit.cs: what drives a change inside an enemy (its tweens, scripts, FSM actions...) instead of
+        // "enemy"; a body moves only its own transform there.
+        internal static bool InsideEnemies;
+
+        // Audit.cs: the driver tables as Begin makes them, for its own frames.
+        internal static void PrepareDrivers()
+        {
+            labels = new Dictionary<Transform, string>();
+            details = new Dictionary<Transform, string>();
+            drivers = new Dictionary<Transform, string>();
+            driverDetails = new Dictionary<Transform, string>();
+            weak = new Dictionary<Transform, string>();
+            try { Tweens(); } catch (Exception e) { Debug.Log("CROW_MOTION tweens: " + e.GetType().Name + " " + e.Message); }
+            try { Scripts(); } catch (Exception e) { Debug.Log("CROW_MOTION scripts: " + e.GetType().Name + " " + e.Message); }
+            try { Machines(); } catch (Exception e) { Debug.Log("CROW_MOTION fsms: " + e.GetType().Name + " " + e.Message); }
+        }
+
+        // Audit.cs' flatten experiment: something found moving it (a tween, an animation script, an FSM
+        // action of an active state, a script's update on it).
+        internal static bool IsDriven(Transform t)
+        {
+            return drivers != null && (drivers.ContainsKey(t) || weak.ContainsKey(t));
+        }
+
+        internal static string LabelOf(Transform start, out string detail)
+        {
+            string label = Label(start);
+            details.TryGetValue(start, out detail);
+            return label;
+        }
+
         static string Driven(Transform start, ref string detail)
         {
-            for (Transform t = start; t != null; t = t.parent)
+            for (Transform t = start; t != null && !InsideEnemies; t = t.parent)
             {
                 Rigidbody body = t.GetComponent<Rigidbody>();
                 if (body != null && t.name.StartsWith("Enemy ", StringComparison.Ordinal)) return "enemy";
@@ -841,7 +872,7 @@ namespace CrowCompat
                 detail = animation.name.Replace(' ', '_');
                 return "animation:" + animation.cullingType;
             }
-            Rigidbody rigidbody = start.GetComponentInParent<Rigidbody>();
+            Rigidbody rigidbody = InsideEnemies ? start.GetComponent<Rigidbody>() : start.GetComponentInParent<Rigidbody>();
             if (rigidbody != null && !rigidbody.isKinematic) return "physics";
             if (weak.TryGetValue(start, out driver))
             {

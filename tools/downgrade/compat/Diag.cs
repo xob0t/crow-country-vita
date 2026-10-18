@@ -79,6 +79,7 @@ namespace CrowCompat
             FastPaths.Install(ProbeFiles.Args);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
             Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
             Cuts.Install(ProbeFiles.Args);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
+            Audit.Install(ProbeFiles.Args);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = Value("-crow-scene") ?? Fight.Scene;

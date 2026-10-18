@@ -33,7 +33,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
     {
         string mode = Environment.GetEnvironmentVariable("CROW_MCS_BAKE");
         if (!string.IsNullOrEmpty(mode)) return mode;
-        return EditorUserBuildSettings.activeBuildTarget == BuildTarget.PSP2 ? "on" : "off";
+        return DowngradeBuild.VitaData ? "on" : "off";  // the PS Vita, or CROW_VITA_DATA=1
     }
 
     static object Get(object target, string name)
