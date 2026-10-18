@@ -14,6 +14,8 @@ using Mono.Cecil.Cil;
 //   CutsLightFlicker: the game's LightFlicker gets float crowPending; Update starts with
 //     if (!Cuts.FlickerStep(this, ref crowPending)) return; and reads Cuts.FlickerDelta() for Time.deltaTime.
 //   CutsParticleBursts: ParticleSystemEmit's ParticleSystem.Emit(int) goes through Cuts.Emit.
+//   CutsRendererEnabled: every Renderer.enabled read and write goes through TinyParts.GetEnabled and SetEnabled
+//     (a part the tiny-parts cut hides reads as the game left it, and a write is kept for when it shows again).
 //   CutsSamePose: SetPosition's and SetRotation's Transform writes go through Cuts.SetPosition and friends.
 //   CutsRewired: Rewired's UnityInputHelper.GetJoystickAxis(Raw)ValueByJoystickId return 0 for an axis
 //     index at or past Cuts.RewiredAxes or a Unity joystick id past Cuts.RewiredMaxJoystick, and
@@ -174,6 +176,25 @@ partial class DowngradeAssemblies
                 count++;
             }
         if (count == 0) throw new System.Exception("ParticleSystemEmit: no ParticleSystem.Emit(int)");
+        return count;
+    }
+
+    static int CutsRendererEnabled(ModuleDefinition module)
+    {
+        int count = 0;
+        foreach (TypeDefinition type in AllTypes(module.Types))
+            foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
+                foreach (Instruction call in method.Body.Instructions)
+                {
+                    if (call.OpCode != OpCodes.Call && call.OpCode != OpCodes.Callvirt) continue;
+                    if (!Calls(call, "UnityEngine.Renderer", "get_enabled") && !Calls(call, "UnityEngine.Renderer", "set_enabled")) continue;
+                    if (call.Previous != null && call.Previous.OpCode == OpCodes.Constrained) continue;
+                    string name = ((MethodReference)call.Operand).Name == "get_enabled" ? "GetEnabled" : "SetEnabled";
+                    call.OpCode = OpCodes.Call;
+                    call.Operand = CompatMethod(module, "TinyParts", name);
+                    Count("cuts Renderer.enabled", 1);
+                    count++;
+                }
         return count;
     }
 

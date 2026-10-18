@@ -113,6 +113,13 @@ namespace CrowCompat
             else camera.ResetAspect();
         }
 
+        // The height of the camera's own picture, in pixels (TinyParts' sizes): the camera's target is set
+        // only while it renders, so its pixelHeight reads the screen's at other times.
+        internal static int PictureHeight
+        {
+            get { return Half ? Height(CameraWidth) : 702; }
+        }
+
         static int Height(int width)
         {
             return width == 624 ? 351 : width == 550 ? 351 : width == 416 ? 234 : 0;

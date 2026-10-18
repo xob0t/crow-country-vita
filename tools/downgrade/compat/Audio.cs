@@ -586,6 +586,8 @@ namespace CrowCompat
         [DllImport("CrowClock")] static extern int CrowThreadSet(int uid, int priority, int affinity);
         [DllImport("CrowClock")] static extern int CrowThreadsRunning(int[] uids);
         [DllImport("CrowClock")] static extern int CrowCpuIdle(int[] idle);
+        [DllImport("CrowClock")] static extern int CrowThreadWait(int uid, int[] info);
+        [DllImport("CrowClock")] static extern int CrowSyncName(int uid, int waitType, byte[] name);
 
         // The plugin exists on the PS Vita only. Mono looks a P/Invoke up when it compiles the method that
         // calls it, whichever branch then runs, and logs the failed library load ("Fallback handler could
@@ -729,6 +731,36 @@ namespace CrowCompat
         {
             if (CrowThreadQuery(uid, runInfo, runName) < 0) return -1;
             return (uint)runInfo[4] | ((long)runInfo[5] << 32);
+        }
+
+        // For Quality's frame probe (any thread, its own buffers): a thread's status, wait type, the UID it
+        // waits on and the CPU it last ran on into info[4]; which of our threads each CPU runs now into
+        // uids[3]; a thread's name; a wait object's name. Below 0 on failure.
+        internal static int Wait(int uid, int[] info)
+        {
+            return CrowThreadWait(uid, info);
+        }
+
+        internal static int Running(int[] uids)
+        {
+            return CrowThreadsRunning(uids);
+        }
+
+        internal static string ThreadName(int uid)
+        {
+            var info = new int[10];
+            var name = new byte[32];
+            if (CrowThreadQuery(uid, info, name) < 0) return null;
+            int end = Array.IndexOf(name, (byte)0);
+            return System.Text.Encoding.ASCII.GetString(name, 0, end < 0 ? name.Length : end);
+        }
+
+        internal static string SyncName(int uid, int waitType)
+        {
+            var name = new byte[32];
+            if (CrowSyncName(uid, waitType, name) < 0) return null;
+            int end = Array.IndexOf(name, (byte)0);
+            return System.Text.Encoding.ASCII.GetString(name, 0, end < 0 ? name.Length : end);
         }
 
         // Adds a thread, with a tag to show after its name (or null).

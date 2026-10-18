@@ -25,6 +25,9 @@ using UnityEngine.SceneManagement;
 //   -crow-loop-cpu                  with it, on the PS Vita, the main thread's run time per frame too
 //                                   (cpu=; the rest of the frame it waits: for jobs, the render thread,
 //                                   the GPU)
+//   -crow-frame-probe               with it, on the PS Vita, where the frame waits (CROW_FRAME, see
+//                                   FrameProbe): a sampler thread reads the main thread's and the render
+//                                   thread's state every 2 ms, by player loop step and camera stage
 //   -crow-light-report <s>          every s seconds, the forward renderer's light passes as Unity
 //                                   assigns them, per light (CROW_LIGHTS, CROW_LIGHT; see LightReport)
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
@@ -402,6 +405,7 @@ namespace CrowCompat
             ticks = new long[labels.Count];
             totals = new long[labels.Count];
             PlayerLoop.SetPlayerLoop(root);
+            if (Array.IndexOf(ProbeFiles.Args, "-crow-frame-probe") >= 0) FrameProbe.Start();
             Camera.onPreCull += camera => CameraMark(camera, 0);
             Camera.onPreRender += camera => CameraMark(camera, 1);
             Camera.onPostRender += camera => CameraMark(camera, 2);
@@ -420,6 +424,7 @@ namespace CrowCompat
             if (stage == 0) CameraEnd(now);
             long[] slot;
             if (!cameras.TryGetValue(camera.name, out slot)) cameras[camera.name] = slot = new long[4];
+            FrameProbe.Stage = stage + 1;
             if (stage == 1) slot[0] += now - cameraMark;
             if (stage == 2)
             {
@@ -434,6 +439,7 @@ namespace CrowCompat
         {
             if (lastCamera != null) lastCamera[2] += now - cameraMark;
             lastCamera = null;
+            FrameProbe.Stage = 0;
         }
 
         static PlayerLoopSystem SyncProbe(string label)
@@ -468,6 +474,7 @@ namespace CrowCompat
             }
             previous = index;
             last = now;
+            FrameProbe.Step = index;
             if (index != 0) return;
             if (mainUid > 0)
             {
@@ -480,6 +487,7 @@ namespace CrowCompat
             {
                 frames++;
                 worst = Math.Max(worst, now - frameStart);
+                FrameProbe.Frame(now - frameStart);
             }
             frameStart = now;
             float time = Time.realtimeSinceStartup;
@@ -511,10 +519,209 @@ namespace CrowCompat
                 Array.Clear(pair.Value, 0, 4);
             }
             Debug.Log(line.ToString());
+            FrameProbe.Report(label, total * ms / frames);
             Array.Clear(ticks, 0, ticks.Length);
             frames = 0;
             worst = 0;
             lastReport = time;
+        }
+    }
+
+    // -crow-frame-probe (PS Vita; with LoopProfile): where a frame waits. The main thread's run time
+    // (-crow-loop-cpu) says how much of a frame it waits, not where or for what. A sampler thread reads,
+    // every 2 ms, the main thread's kernel state (running or ready, or waiting, and on what) with the
+    // player loop step and camera stage it is in (LoopProfile's marks: Step, Stage), the render
+    // thread's state (the thread named *Gfx*) and which of the game's threads each CPU runs. A state
+    // read is right whatever CPU the sampler takes: a thread it preempts reads as ready, not waiting.
+    // CROW_FRAME per LoopProfile report, the samples' shares as ms of the wall frame: main run/wait,
+    // render thread run/wait, both waiting (none of the two runs: the GPU or the display), the job
+    // workers' CPUs in use; the steps and camera stages the main thread waits in (no suffix: before or
+    // without a camera, [cull], [draw], [after]: from the camera's onPostRender to the frame's end), each
+    // with (rX) the part of that wait the render thread ran; the objects each waits on (wait type in hex
+    // : name = share of its waits); the frames by length in vertical blanks (16.7 ms: <1/1-2/2-3/3-4/
+    // 4-5/5+); and FrameTimingManager's GPU time if the player gives any (ftmGpu=none if not).
+    static class FrameProbe
+    {
+        internal static volatile int Step, Stage;
+        static int mainUid, renderUid = -1;
+        static readonly object gate = new object();
+        static readonly Dictionary<int, int> kinds = new Dictionary<int, int>();  // uid -> 0 other, 1 render, 2 worker
+        static readonly Dictionary<int, string> names = new Dictionary<int, string>();
+        // per key (step * 4 + stage) * 3: samples, main waiting, main waiting while the render thread runs
+        static long[] perKey = new long[1024];
+        static long samples, mainWait, renderRun, renderWait, bothWait, workerCpu, renderMissing;
+        static readonly Dictionary<long, long> mainObjects = new Dictionary<long, long>();
+        static readonly Dictionary<long, long> renderObjects = new Dictionary<long, long>();
+        static readonly int[] bins = new int[6];
+        static double gpuSum, cpuSum;
+        static int gpuFrames;
+        static readonly FrameTiming[] timings = new FrameTiming[1];
+        static bool timingFailed;
+
+        internal static void Start()
+        {
+            if (Application.platform != RuntimePlatform.PSP2) return;
+            mainUid = Threads.SelfAnyway();
+            if (mainUid <= 0) return;
+            var thread = new System.Threading.Thread(Sample) { IsBackground = true, Name = "CrowFrameProbe" };
+            thread.Start();
+            Debug.Log("CROW_FRAME probe started, main thread 0x" + mainUid.ToString("X"));
+        }
+
+        static int Kind(int uid)
+        {
+            int kind;
+            if (kinds.TryGetValue(uid, out kind)) return kind;
+            string name = Threads.ThreadName(uid) ?? "?";
+            kind = name.Contains("Gfx") ? 1 : name.Contains("Worker") ? 2 : 0;
+            lock (gate)
+            {
+                kinds[uid] = kind;
+                names[uid] = name;
+            }
+            if (kind == 1 && renderUid < 0)
+            {
+                renderUid = uid;
+                Debug.Log("CROW_FRAME render thread " + name + " 0x" + uid.ToString("X"));
+            }
+            return kind;
+        }
+
+        static void Sample()
+        {
+            var main = new int[4];
+            var render = new int[4];
+            var running = new int[3];
+            while (true)
+            {
+                System.Threading.Thread.Sleep(2);
+                int key = Step * 4 + Stage;
+                if (Threads.Wait(mainUid, main) < 0) continue;
+                int workers = 0;
+                if (Threads.Running(running) >= 0)
+                    for (int cpu = 0; cpu < 3; cpu++)
+                        if (running[cpu] > 0 && running[cpu] != mainUid && Kind(running[cpu]) == 2) workers++;
+                bool haveRender = renderUid > 0 && Threads.Wait(renderUid, render) >= 0;
+                bool mainWaits = (main[0] & 8) != 0;
+                bool renderWaits = haveRender && (render[0] & 8) != 0;
+                lock (gate)
+                {
+                    if (key * 3 + 2 >= perKey.Length)
+                    {
+                        var grown = new long[(key + 16) * 3];
+                        Array.Copy(perKey, grown, perKey.Length);
+                        perKey = grown;
+                    }
+                    samples++;
+                    perKey[key * 3]++;
+                    workerCpu += workers;
+                    if (!haveRender) renderMissing++;
+                    else if (renderWaits) renderWait++;
+                    else renderRun++;
+                    if (renderWaits) Count(renderObjects, render[1], render[2]);
+                    if (!mainWaits) continue;
+                    mainWait++;
+                    perKey[key * 3 + 1]++;
+                    if (haveRender && !renderWaits) perKey[key * 3 + 2]++;
+                    if (renderWaits) bothWait++;
+                    Count(mainObjects, main[1], main[2]);
+                }
+            }
+        }
+
+        static void Count(Dictionary<long, long> objects, int type, int id)
+        {
+            long key = ((long)(uint)type << 32) | (uint)id;
+            long count;
+            objects.TryGetValue(key, out count);
+            objects[key] = count + 1;
+        }
+
+        // At each frame's start (LoopProfile), with the last frame's length.
+        internal static void Frame(long ticks)
+        {
+            if (mainUid <= 0) return;
+            double ms = ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+            bins[Math.Min(5, (int)(ms / 16.6667))]++;
+            if (timingFailed) return;
+            try
+            {
+                FrameTimingManager.CaptureFrameTimings();
+                if (FrameTimingManager.GetLatestTimings(1, timings) > 0 && timings[0].gpuFrameTime > 0)
+                {
+                    gpuSum += timings[0].gpuFrameTime;
+                    cpuSum += timings[0].cpuFrameTime;
+                    gpuFrames++;
+                }
+            }
+            catch (Exception exception)
+            {
+                timingFailed = true;
+                Debug.Log("CROW_FRAME FrameTimingManager failed: " + exception.Message);
+            }
+        }
+
+        static string Objects(Dictionary<long, long> objects, long total, int take)
+        {
+            var text = new StringBuilder();
+            foreach (KeyValuePair<long, long> pair in objects.OrderByDescending(p => p.Value).Take(take))
+            {
+                int type = (int)(pair.Key >> 32), id = (int)pair.Key;
+                string name;
+                if (!names.TryGetValue(id, out name))
+                {
+                    name = Threads.SyncName(id, type) ?? ("0x" + id.ToString("X"));
+                    names[id] = name;
+                }
+                text.Append(text.Length == 0 ? "" : ",").Append(type.ToString("X")).Append(':').Append(name.Replace(' ', '_'))
+                    .Append('=').Append((100.0 * pair.Value / Math.Max(1, total)).ToString("F0")).Append('%');
+            }
+            return text.ToString();
+        }
+
+        static readonly string[] stages = { "", "[cull]", "[draw]", "[after]" };
+
+        internal static void Report(string label, double frameMs)
+        {
+            if (mainUid <= 0) return;
+            var line = new StringBuilder("CROW_FRAME");
+            if (label != null) line.Append(" cycle=").Append(label);
+            lock (gate)
+            {
+                double n = Math.Max(1, samples);
+                Func<long, string> ms = count => (frameMs * count / n).ToString("F1");
+                line.Append(" samples=").Append(samples).Append(" frame=").Append(frameMs.ToString("F1"));
+                line.Append(" mainRun=").Append(ms(samples - mainWait)).Append(" mainWait=").Append(ms(mainWait));
+                line.Append(" renderRun=").Append(ms(renderRun)).Append(" renderWait=").Append(ms(renderWait));
+                if (renderMissing > 0) line.Append(" renderUnknown=").Append(ms(renderMissing));
+                line.Append(" bothWait=").Append(ms(bothWait)).Append(" workerCpus=").Append((workerCpu / n).ToString("F2"));
+                line.Append(" waits:");
+                var keys = new List<int>();
+                for (int k = 0; k * 3 + 2 < perKey.Length; k++) if (perKey[k * 3 + 1] > 0) keys.Add(k);
+                foreach (int k in keys.OrderByDescending(k => perKey[k * 3 + 1]).Take(8))
+                {
+                    int step = k / 4, stage = k % 4;
+                    string name = step < LoopProfile.Labels.Count ? LoopProfile.Labels[step] : "?";
+                    name = name.Substring(name.IndexOf('.') + 1);
+                    line.Append(' ').Append(name).Append(stages[stage]).Append('=').Append(ms(perKey[k * 3 + 1]))
+                        .Append("(r").Append(ms(perKey[k * 3 + 2])).Append(')');
+                }
+                line.Append(" mainOn=").Append(Objects(mainObjects, mainWait, 4));
+                line.Append(" renderOn=").Append(Objects(renderObjects, renderWait, 4));
+                Array.Clear(perKey, 0, perKey.Length);
+                samples = mainWait = renderRun = renderWait = bothWait = workerCpu = renderMissing = 0;
+                mainObjects.Clear();
+                renderObjects.Clear();
+            }
+            line.Append(" vblanks=").Append(string.Join("/", bins.Select(b => b.ToString()).ToArray()));
+            if (gpuFrames > 0)
+                line.Append(" ftmGpu=").Append((gpuSum / gpuFrames).ToString("F1")).Append(" ftmCpu=").Append((cpuSum / gpuFrames).ToString("F1"))
+                    .Append(" ftmFrames=").Append(gpuFrames);
+            else line.Append(" ftmGpu=none");
+            Array.Clear(bins, 0, bins.Length);
+            gpuSum = cpuSum = 0;
+            gpuFrames = 0;
+            Debug.Log(line.ToString());
         }
     }
 

@@ -144,6 +144,7 @@ partial class DowngradeAssemblies
         new Pass("cuts", Scope.All, FsmDeltaTime),
         new Pass("cuts", Scope.Game, CutsLightFlicker),
         new Pass("cuts", Scope.Game, CutsParticleBursts),
+        new Pass("cuts", Scope.All, CutsRendererEnabled),
         new Pass("cuts", Scope.All, CutsRewired),
         new Pass("rewiredsites", Scope.All, CutsRewiredSites),  // probing builds only: CROW_REWIRED_SITES=1
         // PlayMakerData.cs

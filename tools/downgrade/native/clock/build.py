@@ -51,6 +51,8 @@ extern "C" int CrowThreadQuery();
 extern "C" int CrowThreadSet();
 extern "C" int CrowThreadsRunning();
 extern "C" int CrowCpuIdle();
+extern "C" int CrowThreadWait();
+extern "C" int CrowSyncName();
 typedef int (*EXTERNFUNCTION)();
 static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_FunctionNames[] = {
   { "CrowClockSetArm", &CrowClockSetArm },
@@ -62,6 +64,8 @@ static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_Functi
   { "CrowThreadSet", &CrowThreadSet },
   { "CrowThreadsRunning", &CrowThreadsRunning },
   { "CrowCpuIdle", &CrowCpuIdle },
+  { "CrowThreadWait", &CrowThreadWait },
+  { "CrowSyncName", &CrowSyncName },
 };
 extern "C" __declspec(dllimport) void RegisterModule(const char* module_name, void* exports,
   size_t exports_count, SceSize size, void* arg);

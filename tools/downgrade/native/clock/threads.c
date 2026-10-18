@@ -88,3 +88,88 @@ PRX_EXPORT int CrowCpuIdle(int *out)
 	}
 	return 0;
 }
+
+/* For Quality's frame probe: a thread's status, wait type, the UID of what it waits on and the CPU it
+   last ran on, into out[4]. 0 or the system's error. */
+PRX_EXPORT int CrowThreadWait(int uid, int *out)
+{
+	SceKernelThreadInfo info;
+	int result;
+	memset(&info, 0, sizeof info);
+	info.size = sizeof info;
+	result = sceKernelGetThreadInfo(uid, &info);
+	if (result < 0) return result;
+	out[0] = (int)info.status;
+	out[1] = (int)info.waitType;
+	out[2] = (int)info.waitId;
+	out[3] = info.lastExecutedCpuId;
+	return 0;
+}
+
+/* The name of a synchronization object a thread waits on (CrowThreadWait's wait type and UID) into
+   name[32]: event flags, semaphores, mutexes, condition variables, events, lightweight mutexes and
+   condition variables. 0, or below 0 when the type has no name lookup here or the lookup failed. */
+PRX_EXPORT int CrowSyncName(int uid, int waitType, char *name)
+{
+	unsigned int type = (unsigned int)waitType & 0x7fffffffU;
+	int result = -1;
+	name[0] = 0;
+	if (type & SCE_KERNEL_WAITTYPE_EVENTFLAG)
+	{
+		SceKernelEventFlagInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetEventFlagInfo(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & SCE_KERNEL_WAITTYPE_SEMAPHORE)
+	{
+		SceKernelSemaInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetSemaInfo(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & SCE_KERNEL_WAITTYPE_MUTEX)
+	{
+		SceKernelMutexInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetMutexInfo(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & (SCE_KERNEL_WAITTYPE_COND_SIGNAL | SCE_KERNEL_WAITTYPE_COND_MUTEX))
+	{
+		SceKernelCondInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetCondInfo(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & (SCE_KERNEL_WAITTYPE_EVENT | SCE_KERNEL_WAITTYPE_MP_EVENTS))
+	{
+		SceKernelEventInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetEventInfo(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & SCE_KERNEL_WAITTYPE_LW_MUTEX)
+	{
+		SceKernelLwMutexInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetLwMutexInfoById(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	else if (type & (SCE_KERNEL_WAITTYPE_LW_COND_SIGNAL | SCE_KERNEL_WAITTYPE_LW_COND_LW_MUTEX))
+	{
+		SceKernelLwCondInfo info;
+		memset(&info, 0, sizeof info);
+		info.size = sizeof info;
+		result = sceKernelGetLwCondInfoById(uid, &info);
+		if (result >= 0) memcpy(name, info.name, SCE_UID_NAMELEN + 1);
+	}
+	name[SCE_UID_NAMELEN] = 0;
+	return result;
+}
