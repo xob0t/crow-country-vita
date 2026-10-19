@@ -294,7 +294,6 @@ COMPAT_SOURCES = [
             'Audit',
             'EnemyRebuild',
             'PlayerMerge',
-            'LevelAtlas',
             'FsmTrim',
             'FsmCompile',
             'Pad',
