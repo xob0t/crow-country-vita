@@ -298,6 +298,7 @@ namespace CrowCompat
         internal static bool Change(string key, string value)
         {
             if (EnemyChores.Change(key, value)) return true;
+            if (EnemyRebuild.Change(key, value)) return true;  // eatlas=, eflatten=, edebrisout= (EnemyRebuild.cs)
             switch (key)
             {
                 case "eaudio":

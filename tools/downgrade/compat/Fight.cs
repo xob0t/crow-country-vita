@@ -729,6 +729,19 @@ namespace CrowCompat
             return enemy.SpawnState == null || enemy.SpawnState() == "currently alive";
         }
 
+        // The enemy shots (EnemyRebuild.cs): the last enemy the fight killed, and one awake enemy of each type.
+        internal static GameObject LastKilled;
+        internal static GameObject PlayerBody { get { return body; } }
+        internal static float LastKilledAt = -1f;
+
+        internal static Dictionary<string, GameObject> AwakeByType()
+        {
+            var found = new Dictionary<string, GameObject>();
+            foreach (Enemy enemy in enemies)
+                if (IsAwake(enemy) && !found.ContainsKey(enemy.Type)) found[enemy.Type] = enemy.Root;
+            return found;
+        }
+
         static bool IsAwake(Enemy enemy)
         {
             return IsAlive(enemy) && (enemy.CullState == null || enemy.CullState() == "visible");
@@ -1253,6 +1266,8 @@ namespace CrowCompat
                 Enemy model = models[i % models.Count];
                 EnemySplit.RestoreAll(model.Root.transform);  // a copy needs all its parts
                 GameObject copy = UnityEngine.Object.Instantiate(model.Root, poolHolder);
+                EnemySplit.Mirror(model.Root.transform, copy.transform);  // the build's moved debris: the copy's out too
+                EnemySplit.Mirror(model.Root.transform, model.Root.transform);  // and the model's again
                 copy.name = model.Root.name + " (fight " + i + ")";
                 OwnTrail(copy);
                 EnemyCost.Prepare(copy);
@@ -1502,6 +1517,8 @@ namespace CrowCompat
                 killed++;
                 enemy.Forced = true;
                 victim = enemy;
+                LastKilled = enemy.Root;
+                LastKilledAt = Time.realtimeSinceStartup;
                 victimCheck = Time.realtimeSinceStartup + 1.5f;
             }
             catch (Exception e)

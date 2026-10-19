@@ -288,6 +288,7 @@ COMPAT_SOURCES = [
             'Decor',
             'Cuts',
             'Audit',
+            'EnemyRebuild',
         )
     ),
 ]
@@ -301,6 +302,7 @@ COMPAT_MODULES = [
     'ScreenCaptureModule',
     'PhysicsModule',  # compat/Memory.cs: MeshCollider.sharedMesh
     'AnimationModule',  # compat/Decor.cs: Animator, Animation
+    'ImageConversionModule',  # compat/EnemyRebuild.cs: the enemy shots' PNGs
 ]
 REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',

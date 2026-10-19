@@ -156,7 +156,7 @@ namespace CrowCompat
         }
     }
 
-    public static class Merge
+    public static partial class Merge
     {
         public static float Cell = 8f;
         // Parts with bigger meshes stay as they are: a big mesh is one draw already, and merged copies of
@@ -409,6 +409,7 @@ namespace CrowCompat
             "ProBuilderMesh", "Entity", "EntityBehaviour", "ColliderBehaviour", "TriggerBehaviour", "PolyShape", "BezierShape",
             "PlayMakerUnity2DProxy", "PlayMakerFixedUpdate", "PlayMakerOnGUI", "PlayMakerGUI", "PlayMakerGlobals",
             "MergedRenderer", "MeshCombiner",
+            "EnemyAtlasRecord", "EnemyFlattenRecord", "EnemyDebrisHolder",  // EnemyRebuild.cs' records
         };
 
         // PlayMaker actions, by what they do to the objects they act on (their FsmOwnerDefault
@@ -1233,7 +1234,7 @@ namespace CrowCompat
             var stops = new Dictionary<string, int>();
             foreach (GameObject root in Roots(scene))
             {
-                if (root.transform.hierarchyCount < 1000) continue;
+                if (root.transform.hierarchyCount < 1000 || root.GetComponent<EnemyDebrisHolder>() != null) continue;  // the enemies' debris (EnemyRebuild.cs)
                 before += root.transform.hierarchyCount;
                 Transform[] all = root.GetComponentsInChildren<Transform>(true);
                 var index = new Dictionary<Transform, int>(all.Length);
@@ -1517,7 +1518,9 @@ namespace CrowCompat
             var scripts = new Dictionary<string, int>();
             // The build strips the enemies' bare merged parts when it drops the parts' meshes.
             bool strip = apply && bake && Drop && Enemies && Environment.GetEnvironmentVariable("CROW_MERGE_ENEMY_STRIP") != "off";
-            collectReferences = strip;
+            // The enemies' rebuild (compat/EnemyRebuild.cs) after the build's enemy merge, with the same analysis.
+            bool rebuild = apply && bake && Enemies;
+            collectReferences = strip || rebuild;
             Analysis analysis;
             try
             {
@@ -1721,6 +1724,7 @@ namespace CrowCompat
                 .Append(string.Join(" ", merging.OrderByDescending(g => g.Count).Take(12).Select(g => g[0].material.name.Replace(' ', '_') + "=" + g.Count).ToArray())).Append('\n');
             // Last: the report above reads the parts this destroys.
             if (strip) report.Append(Strip(scene, analysis, created.Select(go => go.GetComponent<MergedRenderer>()), true)).Append('\n');
+            if (rebuild) report.Append(Rebuild(scene, analysis, created)).Append('\n');
             return report.ToString();
         }
 
