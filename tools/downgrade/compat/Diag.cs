@@ -85,6 +85,7 @@ namespace CrowCompat
             Guard("Cuts", Cuts.Install);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
             Guard("Pad", Pad.Install);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
             Guard("FsmTrim", FsmTrim.Install);  // PlayMaker's updates that do nothing, skipped (FsmTrim.cs; PS Vita default)
+            Guard("FsmCompile", FsmCompile.Install);  // PlayMaker's FSM code compiled (FsmCompile.cs; PS Vita default)
             Guard("Audit", Audit.Install);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
             sceneToLoad = CrowFlags.Value(args, "-crow-scene") ?? Fight.Scene;

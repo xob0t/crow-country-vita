@@ -18,6 +18,12 @@ using UnityEngine.SceneManagement;
 // a call on a part inside a moved subtree (not only its root) puts the subtree back too, logged with
 // -crow-enemy-debris check (CROW_SPLIT_MISS). (The run-time split of 18 Oct, -crow-enemy-split, which
 // this replaced, is gone.)
+// Every routed call asks whether its transform is a moved part or inside one. Two dictionary lookups
+// cost about 1.2 us each on the PS Vita (interface calls and a software modulo), 4.9 us of a
+// GetWorldDistance's 14.7 in Station Square's fight (19 Oct, profiling build, debris in and out per
+// window): a filter of a bit per identity hash, set for every transform that goes into either set and
+// cleared only when rebuilt from them, answers no for nearly all of them first (Filter; FsmCompile's
+// splitfilter=on|off; status.md, FSM compile).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -34,6 +40,12 @@ namespace CrowCompat
         // root, for -crow-enemy-debris in|out and Fight's copies.
         static readonly List<Adopted> adopted = new List<Adopted>();
         static int restored, misses, restoredBySwitch, restoredByTouch, restoredByInside;
+        // The filter: 65,536 bits (8 KB), a transform's bit the top bits of its identity hash; removals since
+        // the last rebuild (a removed transform's bit stays set until then: only a lookup more).
+        internal static bool Filter = true;
+        const int FilterBits = 16;
+        static readonly uint[] filter = new uint[1 << (FilterBits - 5)];
+        static int filterStale;
 
         struct Place
         {
@@ -71,6 +83,25 @@ namespace CrowCompat
             check = EnemyRebuild.CheckDebris;
         }
 
+        static int Bit(Transform t)
+        {
+            return (int)((uint)RuntimeHelpers.GetHashCode(t) >> (32 - FilterBits));
+        }
+
+        static void Mark(Transform t)
+        {
+            int bit = Bit(t);
+            filter[bit >> 5] |= 1u << (bit & 31);
+        }
+
+        static void Rebuild()
+        {
+            Array.Clear(filter, 0, filter.Length);
+            foreach (Transform t in moved.Keys) Mark(t);
+            foreach (Transform t in inside) Mark(t);
+            filterStale = 0;
+        }
+
         // What an unloaded scene took with it.
         static void Purge()
         {
@@ -82,6 +113,7 @@ namespace CrowCompat
             var gone = new List<int>();
             foreach (KeyValuePair<int, Transform> pair in holders) if (pair.Value == null) gone.Add(pair.Key);
             foreach (int key in gone) holders.Remove(key);
+            Rebuild();
         }
 
         static Transform HolderOf(Scene scene)
@@ -100,8 +132,13 @@ namespace CrowCompat
         static int Out(Transform part, Transform parent, int sibling, Transform holder)
         {
             moved[part] = new Place { Parent = parent, Sibling = sibling };
+            Mark(part);
             Transform[] below = part.GetComponentsInChildren<Transform>(true);
-            for (int i = 1; i < below.Length; i++) inside.Add(below[i]);
+            for (int i = 1; i < below.Length; i++)
+            {
+                inside.Add(below[i]);
+                Mark(below[i]);
+            }
             if (part.parent != holder) part.SetParent(holder, false);
             return below.Length;
         }
@@ -200,6 +237,8 @@ namespace CrowCompat
             if (ReferenceEquals(t, null) || t == null) return;
             Transform[] below = t.GetComponentsInChildren<Transform>(true);
             for (int i = 1; i < below.Length; i++) inside.Remove(below[i]);
+            filterStale += below.Length;
+            if (filterStale > 1024) Rebuild();
             if (place.Parent == null) return;
             Put(t, place.Parent, place.Sibling);
             restored++;
@@ -214,6 +253,11 @@ namespace CrowCompat
         static void Touch(Transform t, bool switching)
         {
             if (moved.Count == 0 || ReferenceEquals(t, null)) return;
+            if (Filter)
+            {
+                int bit = Bit(t);
+                if ((filter[bit >> 5] & (1u << (bit & 31))) == 0) return;
+            }
             if (moved.ContainsKey(t))
             {
                 if (switching) restoredBySwitch++;

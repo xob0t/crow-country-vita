@@ -93,7 +93,7 @@ namespace CrowCompat
         static readonly Func<string, string, bool>[] modules =
         {
             Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
-            FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, Pad.Change,
+            FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change, Pad.Change,
             Clock.Change
         };
 

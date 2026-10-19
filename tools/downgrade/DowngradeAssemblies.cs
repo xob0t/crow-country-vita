@@ -34,6 +34,7 @@ using Mono.Cecil.Cil;
 //   Pad.cs                  Rewired's queries and update through CrowCompat's PS Vita pad reader
 //   PlayMakerData.cs        load time: ActionData's lists as arrays, action fields set without reflection
 //   FastPaths.cs            PlayMaker's Get and Set Property, and object names, without reflection
+//   FsmCompile.cs           PlayMaker's small methods inlined into the FSM code, unused action updates not called
 //   LoadStats.cs            load time: PlayMaker's load methods timed (-crow-load-stats)
 //   ActionProfile.cs        profiling builds only (CROW_ACTION_PROFILE=1): actions and behaviours timed
 partial class DowngradeAssemblies
@@ -168,6 +169,8 @@ partial class DowngradeAssemblies
         new Pass("fastpaths", Scope.All, FastPropertyAccess),
         new Pass("fastpaths", Scope.All, TypedPropertySets),  // after FastPropertyAccess
         new Pass("fastpaths", Scope.All, RouteObjectNames),
+        // FsmCompile.cs (after the passes that change PlayMaker's small methods and their callers: it copies them as they are)
+        new Pass("fsmcompile", Scope.All, FsmCompileMethods),
         // LoadStats.cs
         new Pass("loadstats", Scope.All, TimeLoadMethods),
         // ActionProfile.cs (profiling builds only: CROW_ACTION_PROFILE=1)

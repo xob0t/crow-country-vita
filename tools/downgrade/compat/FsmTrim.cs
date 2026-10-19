@@ -128,7 +128,7 @@ namespace CrowCompat
         // idle/proxy skips, LateUpdate the same (Fight's window lines; a window starts with Mark).
         internal static string Report()
         {
-            return PerFrame("pm=", reportStart, Time.frameCount - reportFrame);
+            return PerFrame("pm=", reportStart, Time.frameCount - reportFrame) + " " + FsmCompile.Report();
         }
 
         internal static void Mark()

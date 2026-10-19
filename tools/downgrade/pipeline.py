@@ -292,6 +292,7 @@ COMPAT_SOURCES = [
             'Audit',
             'EnemyRebuild',
             'FsmTrim',
+            'FsmCompile',
             'Pad',
         )
     ),
@@ -327,6 +328,7 @@ REWRITER_SOURCES = [
             'Decor',
             'Cuts',
             'FsmTrim',
+            'FsmCompile',
             'Pad',
         )
     ),
