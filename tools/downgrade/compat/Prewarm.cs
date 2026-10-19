@@ -38,7 +38,7 @@ namespace CrowCompat
             {
                 if (installed) return on;
                 installed = true;
-                string value = Perf.Value(ProbeFiles.Args, "-crow-prewarm");
+                string value = CrowFlags.Value(ProbeFiles.Args, "-crow-prewarm");
                 on = value == "on" || value == "all";
                 all = value == "all";
                 proBuilderMesh = Type.GetType("UnityEngine.ProBuilder.ProBuilderMesh, Unity.ProBuilder");

@@ -45,13 +45,12 @@ namespace CrowCompat
             }
             if (args.Contains("-crow-mcs-time")) CombineTimer.Install();
             if (args.Contains("-crow-load-stats")) LoadStats.Install();
-            int read = Array.IndexOf(args, "-crow-read-test");
-            if (read >= 0 && read + 1 < args.Length) ReadTest(args[read + 1]);
-            int cpu = Array.IndexOf(args, "-crow-load-cpu");
-            if (cpu >= 0)
+            string read = CrowFlags.Value(args, "-crow-read-test");
+            if (read != null) ReadTest(read);
+            if (args.Contains("-crow-load-cpu"))
             {
-                int ms;
-                LoadCpu.Install(cpu + 1 < args.Length && int.TryParse(args[cpu + 1], out ms) ? ms : 250);
+                if (args.Contains("-crow-audio")) Debug.Log("CROW_LOADCPU off: -crow-audio reads the threads' shares (one reader at a time)");
+                else LoadCpu.Install(CrowFlags.Int(args, "-crow-load-cpu", 250));
             }
             MaraScene.Install();
             ScenePrefetch.Install(args);
@@ -525,8 +524,7 @@ namespace CrowCompat
     // main memory in that pass, growing its object tables by 3 MB). The area becomes the active scene
     // in the first sceneLoaded handler, before the game's; what its Awake and OnEnable made went into
     // the gap, which was active then, and moves into the area before the gap is unloaded. The areas
-    // have no lightmaps or light probes, which an additive load would treat otherwise. -crow-gap-additive
-    // is accepted and changes nothing.
+    // have no lightmaps or light probes, which an additive load would treat otherwise.
     // Before the old scenes go, the gap drains the renderer (-crow-gap-drain on, the default; off as
     // before): the player's camera draws nothing (culling mask 0) and the old scenes' own cameras and
     // canvases are switched off for two frames, then the main thread waits for the render thread to
@@ -597,7 +595,7 @@ namespace CrowCompat
         {
             get
             {
-                if (drain == null) drain = Perf.Value(ProbeFiles.Args, "-crow-gap-drain") != "off";
+                if (drain == null) drain = CrowFlags.Value(ProbeFiles.Args, "-crow-gap-drain") != "off";
                 return drain.Value;
             }
         }

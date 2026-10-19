@@ -10,7 +10,7 @@ partial class DowngradeAssemblies
 {
     static FieldReference ScriptCostFast(ModuleDefinition module)
     {
-        return module.ImportReference(compat["CrowCompat.ScriptCost"].Fields.Single(f => f.Name == "Fast"));
+        return CompatField(module, "ScriptCost", "Fast");
     }
 
     // FsmExecutionStack's Stack<Fsm> becomes a CrowCompat FastStack<Fsm>: the field's type and the
@@ -53,8 +53,7 @@ partial class DowngradeAssemblies
     {
         TypeDefinition fsm = GameType(module, "HutongGames.PlayMaker.Fsm");
         if (fsm == null) return 0;
-        var mark = new FieldDefinition("crowStatesEntered", FieldAttributes.Private | FieldAttributes.NotSerialized, module.TypeSystem.Boolean);
-        fsm.Fields.Add(mark);
+        FieldDefinition mark = AddField(fsm, "crowStatesEntered", module.TypeSystem.Boolean);
 
         MethodDefinition enter = fsm.Methods.Single(m => m.Name == "EnterState" && m.Parameters.Count == 1);
         InsertBeforeRetarget(enter, enter.Body.Instructions[0],
@@ -92,8 +91,7 @@ partial class DowngradeAssemblies
     {
         TypeDefinition fsm = GameType(module, "HutongGames.PlayMaker.Fsm");
         if (fsm == null) return 0;
-        var mark = new FieldDefinition("crowDelayedEvents", FieldAttributes.Private | FieldAttributes.NotSerialized, module.TypeSystem.Boolean);
-        fsm.Fields.Add(mark);
+        FieldDefinition mark = AddField(fsm, "crowDelayedEvents", module.TypeSystem.Boolean);
         int count = 0;
         foreach (MethodDefinition method in fsm.Methods.Where(m => m.HasBody && !m.IsStatic))
         {
@@ -171,13 +169,7 @@ partial class DowngradeAssemblies
     {
         TypeDefinition contract = compat["CrowCompat.IGuiAction"];
         action.Interfaces.Add(new InterfaceImplementation(module.ImportReference(contract)));
-        MethodDefinition getActive = null;
-        for (TypeReference current = action.BaseType; getActive == null && current != null;)
-        {
-            TypeDefinition resolved = current.Resolve();
-            getActive = resolved.Methods.SingleOrDefault(m => m.Name == "get_Active" && m.Parameters.Count == 0);
-            current = resolved.BaseType;
-        }
+        MethodDefinition getActive = BaseMethod(action, m => m.Name == "get_Active" && m.Parameters.Count == 0);
         var method = new MethodDefinition("CrowGuiActive",
             MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.Virtual | MethodAttributes.Final | MethodAttributes.NewSlot,
             module.TypeSystem.Boolean);
@@ -195,13 +187,7 @@ partial class DowngradeAssemblies
         MethodDefinition method = action.Methods.SingleOrDefault(m => m.Name == name && m.Parameters.Count == 0 && !m.IsStatic);
         if (method == null)
         {
-            MethodDefinition baseMethod = null;
-            for (TypeReference current = action.BaseType; baseMethod == null && current != null;)
-            {
-                TypeDefinition resolved = current.Resolve();
-                baseMethod = resolved.Methods.SingleOrDefault(m => m.Name == name && m.Parameters.Count == 0 && m.IsVirtual);
-                current = resolved.BaseType;
-            }
+            MethodDefinition baseMethod = BaseMethod(action, m => m.Name == name && m.Parameters.Count == 0 && m.IsVirtual);
             method = new MethodDefinition(name, MethodAttributes.Public | MethodAttributes.HideBySig | MethodAttributes.Virtual, module.TypeSystem.Void);
             ILProcessor build = method.Body.GetILProcessor();
             build.Emit(OpCodes.Ldarg_0);
@@ -213,13 +199,7 @@ partial class DowngradeAssemblies
         MethodDefinition reportMethod = compat["CrowCompat.ScriptCost"].Methods.Single(m => m.Name == report);
         if (reportMethod.Parameters.Count == 2)  // GuiEnter(action, FsmStateAction.Owner)
         {
-            MethodDefinition owner = null;
-            for (TypeReference current = action.BaseType; owner == null && current != null;)
-            {
-                TypeDefinition resolved = current.Resolve();
-                owner = resolved.Methods.SingleOrDefault(m => m.Name == "get_Owner" && m.Parameters.Count == 0);
-                current = resolved.BaseType;
-            }
+            MethodDefinition owner = BaseMethod(action, m => m.Name == "get_Owner" && m.Parameters.Count == 0);
             added.Add(Instruction.Create(OpCodes.Ldarg_0));
             added.Add(Instruction.Create(OpCodes.Call, module.ImportReference(owner)));
         }

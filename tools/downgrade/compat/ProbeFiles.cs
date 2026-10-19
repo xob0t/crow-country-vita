@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -75,6 +76,7 @@ namespace CrowCompat
                 log = new StreamWriter(path, false, new UTF8Encoding(false));
                 log.WriteLine("Crow Country " + Application.version + ", Unity " + Application.unityVersion + ", started " + Saves.Now().ToString("s"));
                 log.WriteLine("args: " + string.Join(" ", Args.Skip(1).ToArray()));
+                if (keepFailed != null) log.WriteLine("CROW_LOG the logs before weren't all kept: " + keepFailed);
                 log.Flush();
                 sync = Args.Contains("-crow-log-sync");
                 if (!sync)
@@ -93,7 +95,10 @@ namespace CrowCompat
         }
 
         // The last runs' logs: log.txt becomes log.prev.txt and that log.prev2.txt (vita.py log --prev
-        // [2]), so the log of a run that crashed survives the next launch or two.
+        // [2]), so the log of a run that crashed survives the next launch or two. A failure is noted in
+        // the new log (keepFailed).
+        static string keepFailed;
+
         static void KeepPrevious()
         {
             string[] names = { "log.txt", "log.prev.txt", "log.prev2.txt" };
@@ -106,8 +111,9 @@ namespace CrowCompat
                     if (File.Exists(to)) File.Delete(to);
                     File.Move(from, to);
                 }
-                catch (Exception)
+                catch (Exception exception)
                 {
+                    keepFailed = names[i - 1] + " -> " + names[i] + ": " + exception.Message;
                 }
             }
         }
@@ -287,6 +293,45 @@ namespace CrowCompat
                 file.Flush();
             }
             return true;
+        }
+    }
+
+    // The probe's flags as the modules read them from ProbeFiles.Args: a flag's value is the word
+    // after it, numbers in the invariant culture.
+    static class CrowFlags
+    {
+        internal static bool Has(string[] args, string flag)
+        {
+            return Array.IndexOf(args, flag) >= 0;
+        }
+
+        // The word after the flag, or null.
+        internal static string Value(string[] args, string flag)
+        {
+            int index = Array.IndexOf(args, flag);
+            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+        }
+
+        // The word after the flag, or null when there is none or it is another -crow-* flag (for flags
+        // whose value may be left out: -crow-audio [s]).
+        internal static string Optional(string[] args, string flag)
+        {
+            string value = Value(args, flag);
+            return value != null && !value.StartsWith("-crow-") ? value : null;
+        }
+
+        internal static float Number(string[] args, string flag, float fallback)
+        {
+            string text = Value(args, flag);
+            float value;
+            return text != null && float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ? value : fallback;
+        }
+
+        internal static int Int(string[] args, string flag, int fallback)
+        {
+            string text = Value(args, flag);
+            int value;
+            return text != null && int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : fallback;
         }
     }
 }

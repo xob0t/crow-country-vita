@@ -148,7 +148,7 @@ partial class DowngradeAssemblies
             Instruction.Create(OpCodes.Call, CompatMethod(module, "Pad", "Update")),
             Instruction.Create(OpCodes.Brfalse, first),
             Instruction.Create(OpCodes.Ret));
-        FieldReference serving = module.ImportReference(compat["CrowCompat.Pad"].Fields.Single(f => f.Name == "Serving"));
+        FieldReference serving = CompatField(module, "Pad", "Serving");
         foreach (string name in new[] { "FixedUpdate", "LateUpdate" })
         {
             MethodDefinition method = manager.Methods.Single(m => m.Name == name && m.Parameters.Count == 0 && m.HasBody);

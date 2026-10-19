@@ -54,14 +54,8 @@ using UnityEngine.SceneManagement;
 //                                  frame; first leaves only the first with a name on (looked at every 2 s) and
 //                                  Unity's joysticks past it unread (rewriter CutsRewired). Taking the others from
 //                                  player 0 didn't hold (Rewired gives them back) nor save anything.
-//   -crow-tiny-parts <px>|off      (tiny=) the enemies' part renderers smaller than px pixels of the camera's picture
-//                                  not drawn (TinyParts below; off on the PS Vita too); -crow-tiny-log logs them (CROW_TINY)
 //   -crow-input-bench              8 s after the first area load, the cost of those Unity input calls (CROW_INPUT_BENCH)
 //                                  and Rewired's players, controllers and maps (CROW_REWIRED_REPORT)
-// Experiments (cycle keys): rwplayers=main|all (every Rewired player but player 0 and the system player not
-// playing, and back), rwkmaps=off|on (the keyboard and mouse maps of every player off, and back),
-// rwupdate=off|on (Rewired's InputManager component off: what its updates cost; no input meanwhile),
-// rwjoy=off|on (every Rewired joystick off: what polling the pad costs).
 // Test key: pmglobal=<name>:true|false (a PlayMaker global bool, e.g. pause mode: the enemies held as in a menu).
 // Also (other files): -crow-ground-cache (FixedStep.cs, groundcache=), -crow-decor-visible (Decor.cs, decorvisible=).
 //   -crow-cuts-log                 every 10 s, CROW_CUTS: frozen enemies, FSM updates skipped and run, wakes by cause
@@ -92,25 +86,23 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             SetAll(Vita);
-            string value = Perf.Value(args, "-crow-blob-trails");
+            string value = CrowFlags.Value(args, "-crow-blob-trails");
             if (value != null) Change("trails", value);
-            if ((value = Perf.Value(args, "-crow-enemy-freeze")) != null) Change("freeze", value);
-            if ((value = Perf.Value(args, "-crow-enemy-anim")) != null) Change("eanim", value);
-            if ((value = Perf.Value(args, "-crow-enemy-tweens")) != null) Change("etweens", value);
-            if ((value = Perf.Value(args, "-crow-breath")) != null) Change("breath", value);
-            if ((value = Perf.Value(args, "-crow-flicker")) != null) Change("flicker", value);
-            if ((value = Perf.Value(args, "-crow-props-rate")) != null) Change("props", value);
-            if ((value = Perf.Value(args, "-crow-props")) != null) Props = value.Split(',');
-            if ((value = Perf.Value(args, "-crow-blood-stains")) != null) Change("stains", value);
-            if ((value = Perf.Value(args, "-crow-burst")) != null) Change("burst", value);
-            if ((value = Perf.Value(args, "-crow-same-pose")) != null) Change("samepose", value);
-            if ((value = Perf.Value(args, "-crow-rewired-axes")) != null) Change("rwaxes", value);
-            if ((value = Perf.Value(args, "-crow-rewired-mouse")) != null) Change("rwmouse", value);
-            if ((value = Perf.Value(args, "-crow-rewired-joysticks")) != null) Change("rwjoys", value);
-            if ((value = Perf.Value(args, "-crow-ground-cache")) != null) Change("groundcache", value);
-            if ((value = Perf.Value(args, "-crow-decor-visible")) != null) Change("decorvisible", value);
-            TinyParts.Install(args);
-            if ((value = Perf.Value(args, "-crow-tiny-parts")) != null) Change("tiny", value);
+            if ((value = CrowFlags.Value(args, "-crow-enemy-freeze")) != null) Change("freeze", value);
+            if ((value = CrowFlags.Value(args, "-crow-enemy-anim")) != null) Change("eanim", value);
+            if ((value = CrowFlags.Value(args, "-crow-enemy-tweens")) != null) Change("etweens", value);
+            if ((value = CrowFlags.Value(args, "-crow-breath")) != null) Change("breath", value);
+            if ((value = CrowFlags.Value(args, "-crow-flicker")) != null) Change("flicker", value);
+            if ((value = CrowFlags.Value(args, "-crow-props-rate")) != null) Change("props", value);
+            if ((value = CrowFlags.Value(args, "-crow-props")) != null) Props = value.Split(',');
+            if ((value = CrowFlags.Value(args, "-crow-blood-stains")) != null) Change("stains", value);
+            if ((value = CrowFlags.Value(args, "-crow-burst")) != null) Change("burst", value);
+            if ((value = CrowFlags.Value(args, "-crow-same-pose")) != null) Change("samepose", value);
+            if ((value = CrowFlags.Value(args, "-crow-rewired-axes")) != null) Change("rwaxes", value);
+            if ((value = CrowFlags.Value(args, "-crow-rewired-mouse")) != null) Change("rwmouse", value);
+            if ((value = CrowFlags.Value(args, "-crow-rewired-joysticks")) != null) Change("rwjoys", value);
+            if ((value = CrowFlags.Value(args, "-crow-ground-cache")) != null) Change("groundcache", value);
+            if ((value = CrowFlags.Value(args, "-crow-decor-visible")) != null) Change("decorvisible", value);
             log = Array.IndexOf(args, "-crow-cuts-log") >= 0;
             if (Array.IndexOf(args, "-crow-input-bench") >= 0) InputBench.Install();
             SceneManager.sceneUnloaded += scene => FsmGate.Clear();
@@ -135,10 +127,10 @@ namespace CrowCompat
             RewiredAxes = on ? 8 : 29;
             RewiredNoMouse = on;
             RewiredProbe.FirstJoystickOnly = on;
+            RewiredProbe.Rescan();
             FixedStep.GroundCacheSteps = on ? 4 : 0;
             Decor.VisibleDivisor = on ? 2 : 1;
-            TinyParts.Set(on ? TinyParts.VitaPixels : 0f);
-            Update();
+            Refresh();
         }
 
         static string Describe()
@@ -149,7 +141,7 @@ namespace CrowCompat
                    " stains=" + (StainCap > 0 ? StainCap.ToString() : "game") + " burst=" + Burst.ToString("0.##", CultureInfo.InvariantCulture) +
                    " samepose=" + (SamePose ? "on" : "game") + " rwaxes=" + RewiredAxes + " rwmouse=" + (RewiredNoMouse ? "off" : "on") +
                    " rwjoys=" + (RewiredProbe.FirstJoystickOnly ? "first" : "all") +
-                   " groundcache=" + FixedStep.GroundCacheSteps + " decorvisible=" + Decor.VisibleDivisor + " tiny=" + TinyParts.Describe();
+                   " groundcache=" + FixedStep.GroundCacheSteps + " decorvisible=" + Decor.VisibleDivisor;
         }
 
         static string Rate(int value)
@@ -157,8 +149,8 @@ namespace CrowCompat
             return value == 0 ? "off" : value == 1 ? "full" : "half";
         }
 
-        // The hooks' switches follow the rules.
-        static void Update()
+        // The hooks' switches follow the rules (Decor.Change too).
+        internal static void Refresh()
         {
             DecorTweens.Active = Decor.On || EnemyTweens > 1 || FreezeMode > 0 || Breath != 1 || PropsDivisor > 1;
             FsmGate.Active = FreezeMode > 0 || FlickerDivisor > 1 || PropsDivisor > 1;
@@ -175,7 +167,7 @@ namespace CrowCompat
             switch (key)
             {
                 case "cuts":
-                    SetAll(value != "off");
+                    SetAll(value != "off" && value != "game");
                     break;
                 case "trails":
                     NoTrails = value == "off";
@@ -222,26 +214,16 @@ namespace CrowCompat
                 case "groundcache":
                     FixedStep.GroundCacheSteps = value == "off" || value == "game" ? 0 : Math.Max(0, number);
                     break;
-                case "rwplayers":
-                case "rwkmaps":
-                case "rwupdate":
-                case "rwjoy":
-                    RewiredProbe.Change(key, value);
-                    return true;
                 case "pmglobal":
                     SetGlobalBool(value);
                     return true;
                 case "decorvisible":
                     Decor.VisibleDivisor = number >= 4 ? 4 : number >= 2 ? 2 : 1;
                     break;
-                case "tiny":
-                    float pixels;
-                    TinyParts.Set(value == "off" || value == "game" || !float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out pixels) ? 0f : pixels);
-                    break;
                 default:
                     return false;
             }
-            Update();
+            Refresh();
             Debug.Log("CROW_CUTS " + key + "=" + value + ": " + Describe());
             return true;
         }
@@ -275,7 +257,6 @@ namespace CrowCompat
         {
             float now = Time.realtimeSinceStartup;
             RewiredProbe.Joysticks();
-            TinyParts.Frame();
             if (StainCap > 0 && stainsAt >= 0f && now >= stainsAt)
             {
                 stainsAt = now + 1f;
@@ -424,319 +405,6 @@ namespace CrowCompat
             for (Transform t = target; t != null; t = t.parent)
                 if (t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.GetComponent<Rigidbody>() != null) return t;
             return null;
-        }
-    }
-
-    // -crow-tiny-parts <px>|off (tiny=): the enemies' part renderers drawn smaller than px pixels of the
-    // camera's picture (550x351 on the PS Vita) not drawn. Each enemy (an "Enemy <type>" rigidbody, found
-    // after each area load and every 5 s) is looked at once, one a frame: its MeshRenderers, each with its
-    // size (the diagonal of its mesh's bounds times its world scale, in metres). Never a candidate: a
-    // renderer with a collider or an FSM on its object, one below a rigidbody of its own or an Animator or
-    // Animation (death debris, limbs), one of no or zero scale, the enemy's biggest, and one whose object or
-    // parent is named main or body. The enemy FSMs (work/scratch/enemy-fsm dumps: Blob, Grinner, Guest,
-    // Spindle, Arms, Goblin, Lumber, Puddle) have no renderer action (SetVisibility, SetMaterial*,
-    // GameObjectIsVisible, ActivateComponent, Blink, Flicker): they switch whole objects, which leaves a
-    // renderer's enabled flag alone. Every 10 frames each enemy's distance along the camera's view gives its
-    // pixels per metre; a candidate under px is switched off (Renderer.enabled, which also takes it out of
-    // the renderers' update and culling), one at px or more back as the game left it. The game's own reads
-    // and writes of Renderer.enabled go through GetEnabled and SetEnabled (rewriter CutsRendererEnabled): a
-    // hidden part reads as the game left it, and a write is kept for when it shows again.
-    // -crow-tiny-log: CROW_TINY when an enemy is looked at (parts by size class at its distance then) and
-    // every 10 s (hidden parts by enemy type).
-    public static class TinyParts
-    {
-        internal static float Pixels;  // 0: off
-        // Off on the PS Vita too (cuts=on leaves it off): the build's enemy merge left no part under 3 px
-        // of an awake enemy, and hiding those under 10 px saved nothing measurable (status.md, 18 Oct).
-        internal const float VitaPixels = 0f;
-        static int hides, shows;
-        static bool log;
-
-        sealed class Part
-        {
-            public Renderer Renderer;
-            public float Size;
-            public bool Hidden, Wanted;
-        }
-
-        sealed class Enemy
-        {
-            public Transform Root;
-            public string Type;
-            public Part[] Parts;
-            public int Renderers;
-        }
-
-        static readonly List<Enemy> enemies = new List<Enemy>();
-        static readonly HashSet<int> known = new HashSet<int>();
-        static readonly Queue<Transform> pending = new Queue<Transform>();
-        static readonly Dictionary<int, Part> hidden = new Dictionary<int, Part>();
-        static float scanAt = 2f, logAt;
-        static int checkFrame;
-        static Camera camera;
-
-        internal static void Install(string[] args)
-        {
-            log = Array.IndexOf(args, "-crow-tiny-log") >= 0;
-            SceneManager.sceneLoaded += (scene, mode) =>
-            {
-                scanAt = Time.realtimeSinceStartup + 2f;
-                camera = null;
-            };
-            SceneManager.sceneUnloaded += scene => Forget();
-        }
-
-        internal static void Set(float pixels)
-        {
-            Pixels = Math.Max(0f, pixels);
-            checkFrame = 0;
-            if (Pixels <= 0f) ShowAll();
-        }
-
-        internal static string Describe()
-        {
-            return Pixels > 0f ? Pixels.ToString("0.##", CultureInfo.InvariantCulture) : "off";
-        }
-
-        // ---------------------------------------------------------------- the game's calls
-
-        public static bool GetEnabled(Renderer renderer)
-        {
-            Part part;
-            if (hidden.Count > 0 && (object)renderer != null && hidden.TryGetValue(renderer.GetInstanceID(), out part)) return part.Wanted;
-            return renderer.enabled;
-        }
-
-        public static void SetEnabled(Renderer renderer, bool value)
-        {
-            Part part;
-            if (hidden.Count > 0 && (object)renderer != null && hidden.TryGetValue(renderer.GetInstanceID(), out part))
-            {
-                part.Wanted = value;
-                return;
-            }
-            renderer.enabled = value;
-        }
-
-        // ---------------------------------------------------------------- once a frame (Cuts.Frame)
-
-        internal static void Frame()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (Pixels <= 0f && !log) return;
-            if (now >= scanAt)
-            {
-                scanAt = now + 5f;
-                Scan();
-            }
-            if (pending.Count > 0)
-            {
-                Transform root = pending.Dequeue();
-                if (root != null) Classify(root);
-            }
-            if (Pixels > 0f && ++checkFrame >= 10)
-            {
-                checkFrame = 0;
-                Check();
-            }
-            if (log && now - logAt >= 10f) Log(now);
-        }
-
-        static void Scan()
-        {
-            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
-            {
-                if (!body.name.StartsWith("Enemy ", StringComparison.Ordinal)) continue;
-                if (known.Add(body.transform.GetInstanceID())) pending.Enqueue(body.transform);
-            }
-        }
-
-        static readonly Dictionary<string, int> reasons = new Dictionary<string, int>();
-
-        static void Classify(Transform root)
-        {
-            var parts = new List<Part>();
-            reasons.Clear();
-            int renderers = 0;
-            Part biggest = null;
-            foreach (MeshRenderer renderer in root.GetComponentsInChildren<MeshRenderer>(true))
-            {
-                renderers++;
-                string reason = Excluded(renderer, root);
-                float size = 0f;
-                if (reason == null)
-                {
-                    var filter = renderer.GetComponent<MeshFilter>();
-                    Mesh mesh = filter == null ? null : filter.sharedMesh;
-                    Vector3 scale = renderer.transform.lossyScale;
-                    scale = new Vector3(Math.Abs(scale.x), Math.Abs(scale.y), Math.Abs(scale.z));
-                    if (mesh == null) reason = "nomesh";
-                    else if (Math.Min(scale.x, Math.Min(scale.y, scale.z)) < 1e-3f) reason = "noscale";
-                    else size = Vector3.Scale(mesh.bounds.size, scale).magnitude;
-                }
-                if (reason != null)
-                {
-                    int count;
-                    reasons.TryGetValue(reason, out count);
-                    reasons[reason] = count + 1;
-                    continue;
-                }
-                var part = new Part { Renderer = renderer, Size = size };
-                parts.Add(part);
-                if (biggest == null || size > biggest.Size) biggest = part;
-            }
-            if (biggest != null)
-            {
-                parts.Remove(biggest);
-                reasons["biggest"] = 1;
-            }
-            parts.Sort((a, b) => a.Size.CompareTo(b.Size));
-            var enemy = new Enemy { Root = root, Type = root.name.Substring(6).Replace(' ', '_'), Parts = parts.ToArray(), Renderers = renderers };
-            enemies.Add(enemy);
-            if (!log) return;
-            float perMetre = PerMetre(root);
-            var line = new StringBuilder("CROW_TINY enemy ").Append(enemy.Type).Append(" renderers=").Append(renderers).Append(" candidates=").Append(parts.Count);
-            line.Append(" px/m=").Append(perMetre.ToString("F0", CultureInfo.InvariantCulture)).Append(" under:");
-            foreach (float px in new[] { 1f, 2f, 3f, 4f, 6f })
-                line.Append(' ').Append(px.ToString("0", CultureInfo.InvariantCulture)).Append("px=").Append(parts.Count(p => p.Size * perMetre < px));
-            if (parts.Count > 0)
-            {
-                line.Append(" sizes(cm):");
-                foreach (float q in new[] { 0f, 0.1f, 0.25f, 0.5f, 0.75f, 1f })
-                    line.Append(' ').Append((parts[Math.Min(parts.Count - 1, (int)(q * parts.Count))].Size * 100f).ToString("F1", CultureInfo.InvariantCulture));
-            }
-            if (camera != null)
-                line.Append(" fov=").Append(camera.fieldOfView.ToString("F1", CultureInfo.InvariantCulture)).Append(" height=").Append(CamEffect.PictureHeight)
-                    .Append(" depth=").Append(Vector3.Dot(root.position - camera.transform.position, camera.transform.forward).ToString("F1", CultureInfo.InvariantCulture));
-            line.Append(" excluded:");
-            foreach (KeyValuePair<string, int> pair in reasons) line.Append(' ').Append(pair.Key).Append('=').Append(pair.Value);
-            Debug.Log(line.ToString());
-        }
-
-        // Why a renderer is never hidden, or null.
-        static string Excluded(Renderer renderer, Transform root)
-        {
-            GameObject owner = renderer.gameObject;
-            if (owner.GetComponent<Collider>() != null) return "collider";
-            foreach (MonoBehaviour behaviour in owner.GetComponents<MonoBehaviour>())
-                if (behaviour != null && behaviour.GetType().Name == "PlayMakerFSM") return "fsm";
-            if (Named(owner.name) || (renderer.transform.parent != null && Named(renderer.transform.parent.name))) return "main";
-            for (Transform t = renderer.transform; t != null && t != root; t = t.parent)
-            {
-                if (t.GetComponent<Rigidbody>() != null) return "body";
-                if (t.GetComponent<Animator>() != null || t.GetComponent<Animation>() != null) return "animator";
-            }
-            return null;
-        }
-
-        static bool Named(string name)
-        {
-            string lower = name.ToLowerInvariant();
-            return lower.Contains("main") || lower.Contains("body");
-        }
-
-        // The enemy's pixels per metre in the camera's picture, from its distance along the view; 0 when
-        // there is no camera or the enemy is behind it.
-        static float PerMetre(Transform root)
-        {
-            if (camera == null || !camera.isActiveAndEnabled) camera = Camera.main;
-            if (camera == null) return 0f;
-            Transform view = camera.transform;
-            float depth = Vector3.Dot(root.position - view.position, view.forward);
-            if (depth < 0.5f) return 0f;
-            return CamEffect.PictureHeight / (2f * depth * Mathf.Tan(camera.fieldOfView * 0.5f * Mathf.Deg2Rad));
-        }
-
-        static void Check()
-        {
-            for (int i = enemies.Count - 1; i >= 0; i--)
-            {
-                Enemy enemy = enemies[i];
-                if (enemy.Root == null)
-                {
-                    Drop(enemy);
-                    enemies.RemoveAt(i);
-                    continue;
-                }
-                float perMetre = PerMetre(enemy.Root);
-                if (perMetre <= 0f) continue;
-                float least = Pixels / perMetre;  // metres
-                foreach (Part part in enemy.Parts)
-                {
-                    if (part.Renderer == null) continue;
-                    bool tiny = part.Size < least;
-                    if (tiny == part.Hidden) continue;
-                    if (tiny) Hide(part);
-                    else Show(part);
-                }
-            }
-        }
-
-        static void Hide(Part part)
-        {
-            part.Wanted = part.Renderer.enabled;
-            part.Renderer.enabled = false;
-            part.Hidden = true;
-            hides++;
-            hidden[part.Renderer.GetInstanceID()] = part;
-        }
-
-        static void Show(Part part)
-        {
-            part.Hidden = false;
-            shows++;
-            hidden.Remove(part.Renderer.GetInstanceID());
-            part.Renderer.enabled = part.Wanted;
-        }
-
-        static void Drop(Enemy enemy)
-        {
-            foreach (Part part in enemy.Parts)
-                if (part.Hidden)
-                {
-                    if (part.Renderer != null) Show(part);
-                    else part.Hidden = false;
-                }
-        }
-
-        static void ShowAll()
-        {
-            foreach (Enemy enemy in enemies) Drop(enemy);
-            hidden.Clear();
-        }
-
-        // After a scene unloads: enemies gone with it.
-        static void Forget()
-        {
-            for (int i = enemies.Count - 1; i >= 0; i--)
-                if (enemies[i].Root == null)
-                {
-                    foreach (Part part in enemies[i].Parts) part.Hidden = false;
-                    enemies.RemoveAt(i);
-                }
-            var stale = new List<int>();
-            foreach (KeyValuePair<int, Part> pair in hidden)
-                if (pair.Value.Renderer == null || !pair.Value.Hidden) stale.Add(pair.Key);
-            foreach (int id in stale) hidden.Remove(id);
-            known.Clear();
-            foreach (Enemy enemy in enemies) known.Add(enemy.Root.GetInstanceID());
-            foreach (Transform root in pending) if (root != null) known.Add(root.GetInstanceID());
-        }
-
-        static void Log(float now)
-        {
-            logAt = now;
-            var line = new StringBuilder("CROW_TINY px=").Append(Describe()).Append(" hidden=").Append(hidden.Count).Append(" hides=").Append(hides)
-                .Append(" shows=").Append(shows).Append(" enemies=").Append(enemies.Count);
-            foreach (IGrouping<string, Enemy> group in enemies.Where(e => e.Root != null).GroupBy(e => e.Type).OrderBy(g => g.Key))
-            {
-                line.Append(' ').Append(group.Key).Append("[n=").Append(group.Count())
-                    .Append(" renderers=").Append(group.Sum(e => e.Renderers)).Append(" candidates=").Append(group.Sum(e => e.Parts.Length))
-                    .Append(" hidden=").Append(group.Sum(e => e.Parts.Count(p => p.Hidden)))
-                    .Append(" awakeHidden=").Append(group.Where(e => e.Root.gameObject.activeInHierarchy).Sum(e => e.Parts.Count(p => p.Hidden && p.Renderer != null && p.Renderer.gameObject.activeInHierarchy)))
-                    .Append(']');
-            }
-            Debug.Log(line.ToString());
         }
     }
 
@@ -1075,8 +743,7 @@ namespace CrowCompat
         }
     }
 
-    // Rewired's players and maps, by its public API through reflection (-crow-input-bench), and two
-    // experiments: rwplayers=main (players other than 0 not playing), rwkmaps=off (keyboard and mouse maps off).
+    // Rewired's players and maps, by its public API through reflection (-crow-input-bench).
     // Its InputManager's time (Begin/End, rewriter CutsRewired) for -crow-cuts-log, and the joystick rule
     // (-crow-rewired-joysticks first|all, Cuts.cs): Unity on the PS Vita reports four joysticks, the pad and
     // three with no name, and Rewired gives all four to player 0 and polls each (29 axes by name, 20 buttons)
@@ -1194,8 +861,6 @@ namespace CrowCompat
             }
         }
         const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
-        static readonly List<object> notPlaying = new List<object>();
-        static readonly List<object> mapsOff = new List<object>();
 
         // The most derived public property (or field) of that name: Rewired's types redeclare some.
         static System.Reflection.PropertyInfo Property(object target, string name)
@@ -1277,82 +942,6 @@ namespace CrowCompat
             catch (Exception exception)
             {
                 Debug.Log("CROW_REWIRED_REPORT failed: " + exception);
-            }
-        }
-
-        internal static void Change(string key, string value)
-        {
-            try
-            {
-                if (key == "rwupdate")
-                {
-                    Type manager = Type.GetType("Rewired.InputManager_Base, Rewired_Core");
-                    int count = 0;
-                    if (manager != null)
-                        foreach (UnityEngine.Object found in UnityEngine.Object.FindObjectsOfType(manager))
-                        {
-                            ((Behaviour)found).enabled = value != "off";
-                            count++;
-                        }
-                    Debug.Log("CROW_CUTS rwupdate=" + value + " (" + count + " input managers)");
-                    return;
-                }
-                if (key == "rwjoy")
-                {
-                    int count = 0;
-                    var joysticks = Get(Static("controllers"), "Joysticks") as System.Collections.IEnumerable;
-                    if (joysticks != null)
-                        foreach (object joystick in joysticks)
-                        {
-                            Set(joystick, "enabled", value != "off");
-                            count++;
-                        }
-                    Debug.Log("CROW_CUTS rwjoy=" + value + " (" + count + " joysticks)");
-                    return;
-                }
-                if (key == "rwplayers")
-                {
-                    if (value == "main")
-                    {
-                        foreach (object player in Players())
-                        {
-                            int id = Convert.ToInt32(Get(player, "id"));
-                            if (id == 0 || id == 9999999 || !(bool)Get(player, "isPlaying")) continue;
-                            Set(player, "isPlaying", false);
-                            notPlaying.Add(player);
-                        }
-                    }
-                    else
-                    {
-                        foreach (object player in notPlaying) Set(player, "isPlaying", true);
-                        notPlaying.Clear();
-                    }
-                    Debug.Log("CROW_CUTS rwplayers=" + value + " (" + notPlaying.Count + " not playing)");
-                }
-                else
-                {
-                    if (value == "off")
-                    {
-                        foreach (object player in Players())
-                            foreach (object map in Maps(player))
-                            {
-                                string type = Convert.ToString(Get(map, "controllerType"));
-                                if (type == "Joystick" || !(bool)Get(map, "enabled")) continue;
-                                Set(map, "enabled", false);
-                                mapsOff.Add(map);
-                            }
-                    }
-                    else
-                    {
-                        foreach (object map in mapsOff) Set(map, "enabled", true);
-                        mapsOff.Clear();
-                    }
-                    Debug.Log("CROW_CUTS rwkmaps=" + value + " (" + mapsOff.Count + " maps off)");
-                }
-            }
-            catch (Exception exception)
-            {
-                Debug.Log("CROW_CUTS " + key + " failed: " + exception);
             }
         }
     }

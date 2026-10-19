@@ -5,7 +5,8 @@ sort what the log says, to find broken scenes before the console does.
                                         [-- <more player flags...>]
     uv run tools/downgrade/sweep.py report <tag>
 
-`run` runs the player through run_player.py (its own desktop, windowed, muted), one scene at a time,
+`run` runs a copy of the player without Steam's files (work/sweep/player, hard links) through
+run_player.py (its own desktop, windowed, muted), one scene at a time,
 with -crow-scene <name> -crow-shot <shot> <png> -crow-quit-after <s> -crow-heartbeat 2. The first build
 scene (Logos) runs without -crow-scene. Output goes to artifacts/sweep/<tag>/: <scene>.log, <scene>.png
 and, from `report` (which `run` ends with), summary.md and summary.json: whether the scene loaded, its
@@ -21,10 +22,11 @@ import time
 from pathlib import Path
 
 import run_player
-from common import ROOT, TARGET, WORK
+from common import ROOT, TARGET, WORK, build_folder, number, project_folder, split_at_dashes
 
 OUT = ROOT / 'artifacts' / 'sweep'
-BUILD_SETTINGS = WORK / f'crow-{TARGET}' / 'ProjectSettings' / 'EditorBuildSettings.asset'
+COPY = WORK / 'sweep' / 'player'
+BUILD_SETTINGS = project_folder(TARGET, 'windows') / 'ProjectSettings' / 'EditorBuildSettings.asset'
 
 KINDS = [
     ('aot', re.compile(r'ExecutionEngineException|ahead of time|AOT code', re.I)),
@@ -90,7 +92,7 @@ def analyse(scene, log: Path, png: Path, first_scene):
     text = log.read_text(encoding='utf-8', errors='replace') if log.exists() else ''
     loaded = re.findall(r'CROW_DIAG scene loaded (.+?) \(\w+\) at ([\d,.]+) s', text)
     loaded_names = [name for name, _ in loaded]
-    load_time = next((float(t.replace(',', '.')) for name, t in loaded if name == scene), None)
+    load_time = next((number(t) for name, t in loaded if name == scene), None)
     beats = re.findall(r'HEARTBEAT t=([\d,.]+) scene=(\S+) fps=([\d,.]+) ms=([\d,.]+) .*?visible=(\d+)', text)
     last = beats[-1] if beats else None
     groups = {}
@@ -113,7 +115,7 @@ def analyse(scene, log: Path, png: Path, first_scene):
         'load_time': load_time,
         'quit': 'CROW_DIAG quitting' in text,
         'screenshot': str(png) if png.exists() else None,
-        'fps': float(last[2].replace(',', '.')) if last else None,
+        'fps': number(last[2]) if last else None,
         'visible': int(last[4]) if last else None,
         'last_beat_scene': last[1] if last else None,
         'messages': sorted(groups.values(), key=lambda g: (g['kind'], -g['count'])),
@@ -158,7 +160,7 @@ def report(tag):
 def run(tag, build: Path, only, start, shot, quit_after, timeout, extra=()):
     folder = OUT / tag
     folder.mkdir(parents=True, exist_ok=True)
-    exe = build / 'CrowCountry.exe'
+    exe = run_player.player_copy(build, COPY)
     names = scenes()
     todo = [s for s in names if not only or s in only]
     if start:
@@ -185,7 +187,7 @@ def main():
     sub = parser.add_subparsers(dest='command', required=True)
     r = sub.add_parser('run')
     r.add_argument('tag')
-    r.add_argument('--build', type=Path, default=ROOT / 'builds' / f'crow-{TARGET}')
+    r.add_argument('--build', type=Path, default=build_folder('windows'))
     r.add_argument('--scenes', help='comma-separated scene names (default: all build scenes)')
     r.add_argument('--from', dest='start', help='start at this scene')
     r.add_argument('--shot', type=float, default=6)
@@ -193,13 +195,13 @@ def main():
     r.add_argument('--timeout', type=float, default=120)
     p = sub.add_parser('report')
     p.add_argument('tag')
-    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
-    args = parser.parse_args(sys.argv[1:split])
+    own, extra = split_at_dashes(sys.argv[1:])
+    args = parser.parse_args(own)
     if args.command == 'report':
         report(args.tag)
         return
     only = {s.strip() for s in args.scenes.split(',')} if args.scenes else None
-    run(args.tag, args.build, only, args.start, args.shot, args.quit_after, args.timeout, sys.argv[split + 1 :])
+    run(args.tag, args.build, only, args.start, args.shot, args.quit_after, args.timeout, extra)
 
 
 if __name__ == '__main__':

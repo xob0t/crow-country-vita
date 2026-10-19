@@ -75,12 +75,12 @@ namespace CrowCompat
         public static void Install(string[] args)
         {
             log = Array.IndexOf(args, "-crow-lit-log") >= 0;
-            bundle = Perf.Value(args, "-crow-lit-bundle");
-            maxKeys = Mathf.Clamp((int)Quality.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
-            minRange = Quality.Number(args, "-crow-lit-min-range", minRange);
-            soa = Perf.Value(args, "-crow-lit-soa") != "off";
-            Shader.SetGlobalFloat("_CrowDebug", Quality.Number(args, "-crow-lit-debug", 0f));
-            string value = Perf.Value(args, "-crow-lit") ?? (Application.platform == RuntimePlatform.PSP2 ? "vita" : null);
+            bundle = CrowFlags.Value(args, "-crow-lit-bundle");
+            maxKeys = Mathf.Clamp((int)CrowFlags.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
+            minRange = CrowFlags.Number(args, "-crow-lit-min-range", minRange);
+            soa = CrowFlags.Value(args, "-crow-lit-soa") != "off";
+            Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
+            string value = CrowFlags.Value(args, "-crow-lit") ?? (Application.platform == RuntimePlatform.PSP2 ? "vita" : null);
             if (value != null) Set(value);
         }
 
@@ -99,7 +99,7 @@ namespace CrowCompat
                 }
                 if (lit == null) lit = Shader.Find("CrowVita/Lit");
                 standard = Shader.Find("Standard");
-                if (lit == null || !lit.isSupported || !new Material(lit).HasProperty("_CrowLitV3"))
+                if (lit == null || !lit.isSupported || !HasProperty(lit, "_CrowLitV3"))
                 {
                     Debug.Log("CROW_LIT CrowVita/Lit " + (lit == null ? "is not in the build" : !lit.isSupported ? "is not supported" : "is an older version") +
                               "; lights stay the game's");
@@ -161,6 +161,15 @@ namespace CrowCompat
 
         static bool restoreBaked;
         static readonly Dictionary<string, Shader> originals = new Dictionary<string, Shader>();
+
+        // Whether a shader has a property, through a throwaway material.
+        static bool HasProperty(Shader shader, string name)
+        {
+            var probe = new Material(shader);
+            bool has = probe.HasProperty(name);
+            UnityEngine.Object.Destroy(probe);
+            return has;
+        }
 
         // The materials CrowVita/Lit draws back on their own shaders: those swapped here, and those the
         // build saved with CrowVita/Lit (their _CrowLitFrom says which shader they had; a Legacy

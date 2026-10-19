@@ -13,9 +13,9 @@ fixed spot with a gun, ammo and the laser sight and makes her unhurtable, wakes 
 (stress mode adds copies of them), aims at the nearest and fires on a fixed schedule, logs a
 CROW_FIGHT_WINDOW line per measured window and a CROW_FIGHT_SUMMARY line, and quits.
 
-vita: takes the vita-device lock (waiting up to --wait seconds; inside `lock.py run` it uses the
-caller's), syncs the build (unless --no-sync), and for each mode and run quits the game, writes
-args.txt, launches, keeps the console awake, waits for the summary (or a failure, or --timeout),
+vita: takes the vita-device lock (waiting up to --wait seconds, by default not at all; inside
+`lock.py run` it uses the caller's), syncs the build (unless --no-sync), and for each mode and run
+quits the game, writes args.txt, launches, keeps the console awake, waits for the summary (or a failure, or --timeout),
 pulls the log and samples vitacompanion's perf during the fight. However it ends, it quits the game
 and clears args.txt. pc: runs a Windows player through run_player.py (its own desktop, windowed,
 muted); --vitalike runs it at <CAP> percent of the wall time on three cores (vitalike.py's
@@ -35,11 +35,11 @@ import sys
 import time
 from pathlib import Path
 
-from common import ROOT, TARGET, WORK
+from common import ROOT, TARGET, WORK, build_folder, number, split_at_dashes
 
 OUT = ROOT / 'artifacts' / 'fightbench'
-VITA_BUILD = ROOT / 'builds' / f'crow-{TARGET}-vita'
-PC_BUILD = ROOT / 'builds' / f'crow-{TARGET}'
+VITA_BUILD = build_folder('vita')
+PC_BUILD = build_folder('windows')
 PC_COPY = WORK / 'fightbench' / 'player'
 LINE = re.compile(r'(CROW_FIGHT_(?:WINDOW|SUMMARY|FAIL|SETUP|START))\s+(.*)$')
 POLL_SECONDS = 10
@@ -83,7 +83,7 @@ def fields(text):
             continue
         key, value = pair.split('=', 1)
         try:
-            out[key] = float(value.replace(',', '.'))
+            out[key] = number(value)
         except ValueError:
             out[key] = value
     return out
@@ -180,11 +180,6 @@ def flags_for(mode, args, run):
     return flags + list(args.extra)
 
 
-def quoted(flags):
-    """Flags as args.txt takes them (ProbeFiles splits on spaces; quotes keep "Station Square" whole)."""
-    return ' '.join(f'"{f}"' if ' ' in f else f for f in flags)
-
-
 def vita_runs(args):
     import vita
 
@@ -198,12 +193,9 @@ def vita_runs(args):
         logs.extend(vita_run(vita, mode, run, args, tag_dir) for mode in args.modes for run in range(1, args.runs + 1))
     finally:
         # Whatever happened: the game closed and the flags cleared, so the next launch is the game's own.
-        for step in ('quit', 'args'):
+        for step, clean in (('quit', vita.quit_game), ('args', lambda: vita.set_args([]))):
             try:
-                if step == 'quit':
-                    vita.command(f'{vita.KEEP_AWAKE}; quit all; wait 2s')
-                else:
-                    vita.write(f'{vita.REMOTE}/args.txt', b'')
+                clean()
             except Exception as error:
                 print(f'cleanup {step} failed: {error}')
         print('quit the game, cleared args.txt')
@@ -212,11 +204,10 @@ def vita_runs(args):
 
 def vita_run(vita, mode, run, args, tag_dir):
     flags = flags_for(mode, args, run)
-    line = quoted(flags)
-    print(f'--- {mode} run {run}: {line}')
-    vita.command(f'{vita.KEEP_AWAKE}; quit all; wait 2s')
-    vita.write(f'{vita.REMOTE}/args.txt', line.encode())
-    vita.command(f'{vita.KEEP_AWAKE}; launch {vita.pipeline.VITA_TITLE_ID}')
+    print(f'--- {mode} run {run}: {vita.args_line(flags)}')
+    vita.quit_game()
+    vita.set_args(flags)
+    vita.launch_game()
     started = time.time()
     out = tag_dir / f'{mode}-{run}.log'
     perf = tag_dir / f'perf-{mode}-{run}.txt'
@@ -266,23 +257,9 @@ def pc_player(build: Path):
     """A copy of the Windows build (hard links, so it costs nothing) whose CrowCompat.dll is the one
     compiled from today's sources (Mono builds), so the benchmark runs without a new build. Steam's
     steam_api library and steam_appid.txt are left out (the build's Steam wrappers are stubs anyway)."""
-    exe = build / 'CrowCountry.exe'
-    if not exe.exists():
-        sys.exit(f'no Windows player in {build}')
-    if PC_COPY.exists():
-        shutil.rmtree(PC_COPY)
-    for source in build.rglob('*'):
-        if source.name.lower().startswith(('steam_api', 'steam_appid')):
-            continue  # Steam's library and app id: with them a player once signed in and unlocked achievements
-        target = PC_COPY / source.relative_to(build)
-        if source.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(source, target)
-        except OSError:
-            shutil.copy2(source, target)
+    import run_player
+
+    exe = run_player.player_copy(build, PC_COPY)  # made again every time: its CrowCompat.dll changes
     managed = PC_COPY / 'CrowCountry_Data' / 'Managed' / 'CrowCompat.dll'
     if managed.exists():  # a Mono player: today's CrowCompat in place of the build's
         import contextlib
@@ -299,7 +276,7 @@ def pc_player(build: Path):
         print(f'player copy {PC_COPY} with {compat}')
     else:
         print(f'player copy {PC_COPY} (IL2CPP: the build has its CrowCompat compiled in)')
-    return PC_COPY / 'CrowCountry.exe'
+    return exe
 
 
 def pc_runs(args):
@@ -325,30 +302,18 @@ def pc_runs(args):
 
 
 def vitalike_slowdown(cap):
-    """run_player's on_start: vitalike.py's duty cycle (cap percent of the wall time, three cores
+    """run_player's on_start: vitalike.py's slow-down (cap percent of the wall time, three cores
     after core 0, busy guards in between) on the player process."""
-    import ctypes
-
     import vitalike
 
     def start(pid):
-        handle = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, pid)  # PROCESS_ALL_ACCESS
-        if not handle:
-            print(f'vitalike: cannot open the player ({pid})')
+        slowed = vitalike.slow_down(pid, cap)
+        if slowed is None:
             return None
-        handle = vitalike.wt.HANDLE(handle)
-        game_mask, controller_mask = vitalike.pick_cpus(3)
-        vitalike.kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(game_mask))
-        vitalike.kernel32.SetPriorityClass(handle, 0x80)  # HIGH_PRIORITY_CLASS
-        guards = vitalike.start_guards(game_mask)
-        duty = vitalike.Duty(handle, cap / 100, vitalike.DEFAULT_PERIOD_MS / 1000, controller_mask, guards[1])
-        duty.start()
+        duty, stop_duty = slowed
 
         def stop():
-            duty.stop.set()
-            duty.join(2)
-            vitalike.kernel32.TerminateJobObject(guards[0], 0)
-            vitalike.kernel32.CloseHandle(guards[0])
+            stop_duty()
             print(duty.report())
 
         return stop
@@ -360,8 +325,7 @@ def vitalike_slowdown(cap):
 
 
 def main():
-    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
-    own, extra = sys.argv[1:split], sys.argv[split + 1 :]
+    own, extra = split_at_dashes(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('target', choices=['vita', 'pc', 'report'])
     parser.add_argument('paths', nargs='*', help='report: tags (artifacts/fightbench/<tag>) or log files')
@@ -373,7 +337,12 @@ def main():
     parser.add_argument('--timeout', type=int, default=420, help='seconds per run before giving up')
     parser.add_argument('--build', type=Path)
     parser.add_argument('--no-sync', action='store_true', help='vita: skip the sync')
-    parser.add_argument('--wait', type=int, default=7200, help='vita: seconds to wait for the vita-device lock')
+    parser.add_argument(
+        '--wait',
+        type=int,
+        default=0,
+        help='vita: seconds to wait for the vita-device lock (default 0: stop at once while another job has it)',
+    )
     parser.add_argument('--vitalike', type=float, nargs='?', const=5.5, help='pc: run at CAP percent (5.5)')
     parser.add_argument('--input', help='vita: a vitacompanion chain sent once in the second window (walk mode)')
     args = parser.parse_args(own)
@@ -399,7 +368,7 @@ def main():
             print(f'waiting for the vita-device lock as "{holder}"')
             code = lock.run('vita-device', holder, args.wait, [sys.executable, __file__, *sys.argv[1:]])
             if code == lock.NOT_TAKEN:
-                print('the vita-device lock stayed held')
+                print('the vita-device lock stayed held (--wait SECONDS waits for it)')
             return code
         logs = vita_runs(args)
     else:

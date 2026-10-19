@@ -6,9 +6,10 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-// The measurement probe: off unless a -crow-* flag is given (on the PS Vita, in ux0:data/crow/args.txt;
-// see ProbeFiles). Each flag's line in Help says what it does. Heartbeats go to the player log as
-// "HEARTBEAT key=value ...", for tools to read.
+// CrowCompat's start (Install: every module's defaults and flags) and the measurement probe, which is off
+// unless a -crow-* flag is given (on the PS Vita, in ux0:data/crow/args.txt; see ProbeFiles). Each of
+// Diag's own flags has a line in Help. Heartbeats go to the player log as "HEARTBEAT key=value ...", for
+// tools to read.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -62,45 +63,47 @@ namespace CrowCompat
         bool shotTaken, sceneRequested, textDumped, waitLogged, found, teleported;
         float lastShaderSwap, lastInputReport = -10f;
 
+        // CrowCompat's start: every module's defaults (the PS Vita's among them) and flags, then the probe's
+        // own. Each module on its own: one that throws (a flag it can't read) is logged and the rest go on.
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         static void Install()
         {
-            Quality.Install();
-            Memory.Install();
-            Audio.InstallDefaults();  // before Loading's title prefetch, whose loading thread it moves
-            Loading.Install();
-            Clock.Install();
-            Alloc.Install(ProbeFiles.Args);
-            IdleAudio.Install(ProbeFiles.Args);
-            Fight.Install(ProbeFiles.Args);  // -crow-fight: the fight benchmark (Fight.cs)
-            EnemyCost.Install(ProbeFiles.Args);  // the enemies' costs (PS Vita defaults)
-            FixedStep.Install(ProbeFiles.Args);  // -crow-fixed-dt: the physics step
-            EnemySplit.Install(ProbeFiles.Args);  // -crow-enemy-split: the enemies' inactive parts out
-            FastPaths.Install(ProbeFiles.Args);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
-            Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
-            Cuts.Install(ProbeFiles.Args);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
-            Pad.Install(ProbeFiles.Args);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
-            FsmTrim.Install(ProbeFiles.Args);  // PlayMaker's updates that do nothing, skipped (FsmTrim.cs; PS Vita default)
-            Audit.Install(ProbeFiles.Args);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             args = ProbeFiles.Args;
+            Guard("Quality", Quality.Install);
+            Guard("Memory", Memory.Install);
+            Guard("Audio", Audio.InstallDefaults);  // before Loading's title prefetch, whose loading thread it moves
+            Guard("Loading", Loading.Install);
+            Guard("Clock", Clock.Install);
+            Guard("Alloc", Alloc.Install);
+            Guard("IdleAudio", IdleAudio.Install);
+            Guard("Fight", Fight.Install);  // -crow-fight: the fight benchmark (Fight.cs)
+            Guard("EnemyCost", EnemyCost.Install);  // the enemies' costs (PS Vita defaults)
+            Guard("FixedStep", FixedStep.Install);  // -crow-fixed-dt: the physics step
+            Guard("EnemySplit", EnemySplit.Install);  // the enemies' death debris out (EnemySplit.cs, EnemyRebuild.cs)
+            Guard("FastPaths", FastPaths.Install);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
+            Guard("Decor", Decor.Install);  // decoration off screen, -crow-motion-report (Decor.cs)
+            Guard("Cuts", Cuts.Install);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
+            Guard("Pad", Pad.Install);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
+            Guard("FsmTrim", FsmTrim.Install);  // PlayMaker's updates that do nothing, skipped (FsmTrim.cs; PS Vita default)
+            Guard("Audit", Audit.Install);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
-            sceneToLoad = Value("-crow-scene") ?? Fight.Scene;
-            sceneThen = Value("-crow-scene-then");
+            sceneToLoad = CrowFlags.Value(args, "-crow-scene") ?? Fight.Scene;
+            sceneThen = CrowFlags.Value(args, "-crow-scene-then");
             int then = Array.IndexOf(args, "-crow-scene-then");
             if (then < 0 || then + 2 >= args.Length || !float.TryParse(args[then + 2], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out sceneThenAfter))
                 sceneThenAfter = 30f;
-            heartbeat = Number("-crow-heartbeat", 0f);
-            quitAfter = Number("-crow-quit-after", -1f);
-            shotAfter = Number("-crow-shot", -1f);
+            heartbeat = CrowFlags.Number(args, "-crow-heartbeat", 0f);
+            quitAfter = CrowFlags.Number(args, "-crow-quit-after", -1f);
+            shotAfter = CrowFlags.Number(args, "-crow-shot", -1f);
             int shot = Array.IndexOf(args, "-crow-shot");
             shotPath = shot >= 0 && shot + 2 < args.Length ? args[shot + 2] : null;
             noVsync = args.Contains("-crow-no-vsync");
             mute = args.Contains("-crow-mute");
             input = args.Contains("-crow-input");
             if (mute) AudioListener.volume = 0f;
-            dumpTextAfter = Number("-crow-dump-text", -1f);
-            string find = Value("-crow-find");
+            dumpTextAfter = CrowFlags.Number(args, "-crow-dump-text", -1f);
+            string find = CrowFlags.Value(args, "-crow-find");
             if (find != null)
             {
                 findPattern = new System.Text.RegularExpressions.Regex(find);
@@ -109,20 +112,29 @@ namespace CrowCompat
                 findAfter = at + 2 < args.Length && float.TryParse(args[at + 2], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 5f;
             }
-            string teleport = Value("-crow-teleport");
-            if (teleport != null)
+            string teleport = CrowFlags.Value(args, "-crow-teleport");
+            float[] xyz = teleport == null ? null : teleport.Split(',').Select(v =>
             {
-                float[] xyz = teleport.Split(',').Select(v => float.Parse(v, System.Globalization.CultureInfo.InvariantCulture)).ToArray();
+                float number;
+                return float.TryParse(v, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out number) ? number : float.NaN;
+            }).ToArray();
+            if (xyz != null && (xyz.Length < 3 || xyz.Any(float.IsNaN)))
+            {
+                Debug.Log("CROW_DIAG bad -crow-teleport " + teleport);
+                xyz = null;
+            }
+            if (xyz != null)
+            {
                 teleportTo = new Vector3(xyz[0], xyz[1], xyz[2]);
                 int at = Array.IndexOf(args, "-crow-teleport");
                 float seconds;
                 teleportAfter = at + 2 < args.Length && float.TryParse(args[at + 2], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 3f;
             }
-            language = Value("-crow-language");
-            textShader = Value("-crow-text-shader");
-            stallDump = Number("-crow-stall-dump", -1f);
-            stallAfter = Number("-crow-stall-after", 0f);
+            language = CrowFlags.Value(args, "-crow-language");
+            textShader = CrowFlags.Value(args, "-crow-text-shader");
+            stallDump = CrowFlags.Number(args, "-crow-stall-dump", -1f);
+            stallAfter = CrowFlags.Number(args, "-crow-stall-after", 0f);
             if (stallDump > 0f) new System.Threading.Thread(WatchForStall) { IsBackground = true, Name = "CrowStallWatch" }.Start();
             if (args.Contains("-crow-help")) Debug.Log("CROW_DIAG flags:\n" + Help);
             var probe = new GameObject("CrowDiag");
@@ -130,6 +142,23 @@ namespace CrowCompat
             if (Audio.WantsTap) probe.AddComponent<AudioSource>();  // the mixer tap's silent source (Audio.cs)
             probe.AddComponent<Diag>();
             Audio.Install(probe);
+        }
+
+        static void Guard(string module, Action install)
+        {
+            try
+            {
+                install();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError("CROW_INSTALL_FAIL " + module + ": " + exception);
+            }
+        }
+
+        static void Guard(string module, Action<string[]> install)
+        {
+            Guard(module, () => install(args));
         }
 
         // -crow-stall-dump: a frame that never ends in the logs (the PS Vita's 40-60 s frames after a
@@ -150,20 +179,6 @@ namespace CrowCompat
                 System.Runtime.InteropServices.Marshal.WriteInt32(new IntPtr(16), 0);  // unmapped: a data abort
                 Environment.FailFast("CrowCompat stall dump");
             }
-        }
-
-        static string Value(string flag)
-        {
-            int index = Array.IndexOf(args, flag);
-            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-        }
-
-        static float Number(string flag, float fallback)
-        {
-            string value = Value(flag);
-            float number;
-            return value != null && float.TryParse(value, System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out number) ? number : fallback;
         }
 
         void Start()

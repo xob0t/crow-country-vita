@@ -17,13 +17,6 @@ using Mono.Cecil.Cil;
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {
-    static FieldDefinition AddField(TypeDefinition type, string name, TypeReference fieldType)
-    {
-        var field = new FieldDefinition(name, FieldAttributes.Private | FieldAttributes.NotSerialized, fieldType);
-        type.Fields.Add(field);
-        return field;
-    }
-
     static int DecorTweenHooks(ModuleDefinition module)
     {
         TypeDefinition tween = GameType(module, "DG.Tweening.Tween");
@@ -39,7 +32,7 @@ partial class DowngradeAssemblies
         scale.Parameters.Add(new ParameterDefinition("tween", ParameterAttributes.None, tween));
         ILProcessor il = scale.Body.GetILProcessor();
         Instruction plain = Instruction.Create(OpCodes.Ldarg_0);
-        il.Emit(OpCodes.Ldsfld, module.ImportReference(compat["CrowCompat.DecorTweens"].Fields.Single(f => f.Name == "Active")));
+        il.Emit(OpCodes.Ldsfld, CompatField(module, "DecorTweens", "Active"));
         il.Emit(OpCodes.Brfalse, plain);
         il.Emit(OpCodes.Ldarg_0);
         il.Emit(OpCodes.Ldfld, state);

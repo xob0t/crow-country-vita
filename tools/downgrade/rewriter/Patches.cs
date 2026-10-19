@@ -2,7 +2,8 @@ using System.Linq;
 using Mono.Cecil;
 using Mono.Cecil.Cil;
 
-// Single game methods that call CrowCompat rules: the camera's post-processing chain, Rewired's platform.
+// Single game methods that call CrowCompat rules: the camera's post-processing chain, Rewired's
+// platform and prompts, the console mode, scene loads and the player prefab, and a few per-frame fixes.
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {
@@ -92,12 +93,8 @@ partial class DowngradeAssemblies
         TypeDefinition type = GameType(module, "MeshCombineStudio.GarbageCollectMesh");
         if (type == null) return 0;
         MethodDefinition onDestroy = type.Methods.Single(m => m.Name == "OnDestroy" && m.Parameters.Count == 0);
-        var code = onDestroy.Body.Instructions;
         MethodReference isPlaying = module.ImportReference(target["UnityEngine.Application"].Methods.Single(m => m.Name == "get_isPlaying"));
-        ILProcessor il = onDestroy.Body.GetILProcessor();
-        Instruction first = code[0];
-        il.InsertBefore(first, Instruction.Create(OpCodes.Call, isPlaying));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Brfalse, code.Last(i => i.OpCode == OpCodes.Ret)));
+        ReturnAtStartIf(onDestroy, OpCodes.Brfalse, Instruction.Create(OpCodes.Call, isPlaying));
         return 1;
     }
 
@@ -114,13 +111,10 @@ partial class DowngradeAssemblies
         if (type == null) return 0;
         MethodDefinition spawn = type.Methods.Single(m => m.Name == "Spawn" && m.Parameters.Count == 0);
         FieldDefinition pool = type.Fields.Single(f => f.Name == "pool");
-        var code = spawn.Body.Instructions;
-        ILProcessor il = spawn.Body.GetILProcessor();
-        Instruction first = code[0];
-        il.InsertBefore(first, Instruction.Create(OpCodes.Ldarg_0));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Ldfld, pool));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Call, CompatMethod(module, "ScriptCost", "TrailReady")));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Brfalse, code.Last(i => i.OpCode == OpCodes.Ret)));
+        ReturnAtStartIf(spawn, OpCodes.Brfalse,
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldfld, pool),
+            Instruction.Create(OpCodes.Call, CompatMethod(module, "ScriptCost", "TrailReady")));
         return 1;
     }
 
@@ -132,12 +126,9 @@ partial class DowngradeAssemblies
         TypeDefinition type = GameType(module, "com.sfbgames.general.materials.UIPixelate");
         if (type == null) return 0;
         MethodDefinition update = type.Methods.Single(m => m.Name == "Update" && m.Parameters.Count == 0);
-        var code = update.Body.Instructions;
-        ILProcessor il = update.Body.GetILProcessor();
-        Instruction first = code[0];
-        il.InsertBefore(first, Instruction.Create(OpCodes.Ldarg_0));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Call, CompatMethod(module, "MapPan", "Skip")));
-        il.InsertBefore(first, Instruction.Create(OpCodes.Brtrue, code.Last(i => i.OpCode == OpCodes.Ret)));
+        ReturnAtStartIf(update, OpCodes.Brtrue,
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Call, CompatMethod(module, "MapPan", "Skip")));
         return 1;
     }
 

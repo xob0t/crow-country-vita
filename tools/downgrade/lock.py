@@ -4,28 +4,39 @@ don't collide.
     uv run tools/downgrade/lock.py take <name> "<holder: purpose>" [--wait SECONDS]  # exit 0 when taken, 1 on timeout
     uv run tools/downgrade/lock.py release <name> "<holder>"                         # removes it only if you hold it
     uv run tools/downgrade/lock.py run <name> "<holder: purpose>" [--wait SECONDS] -- <command...>
+    uv run tools/downgrade/lock.py wait <name> [--wait SECONDS]   # exit 0 once it is free (not taken), 75 on timeout
     uv run tools/downgrade/lock.py status
 
 <name> is vita-device, vita-build or pc-build. Taking creates work/<name>.lock with O_EXCL, so the
 check and the write are one step and two jobs can never both get it. Release checks that the
-file still names you before removing it.
+file still names you before removing it. --wait (or --max-wait) is how long take, run and wait wait
+for the lock; the default, 0, fails at once and says who holds it and since when.
 
 Only one pipeline.py runs at a time, whatever the platform: a build lock (vita-build, pc-build)
 counts as taken only while the other one is free; if the other appears right after, ours is
 released again and the wait goes on.
 
-`run` takes the lock, runs the command and releases the lock however the command ends (also on
-Ctrl+C); it exits with the command's code, or 75 if the lock was not taken in time. The command and
-everything it starts run in a Windows job that ends with lock.py: if lock.py is killed (a shell or an
-agent's tool stopping it), the Unity editor it started doesn't go on building unsupervised, and the
-lock, which names lock.py's process, counts as free once that process is gone (take removes it).
-The command sees CROW_LOCK=<name>, which pipeline.py checks. For example:
+`run` takes the lock, runs the command and releases the lock however the command ends; it exits
+with the command's code, 130 after Ctrl+C, or 75 if the lock was not taken in time. Ctrl+C reaches
+the command too, and run waits for it to end its own way (vita.py finishes the file it is sending:
+an FTP transfer cut off mid-way hangs the console's FTP server); Ctrl+Break ends both at once. The
+command and everything it starts run in a Windows job that ends with lock.py: if lock.py is killed
+(a shell or an agent's tool stopping it), the Unity editor it started doesn't go on building
+unsupervised, and the lock, which names lock.py's process, counts as free once that process is gone
+(take removes it). The command sees CROW_LOCK=<name>, which pipeline.py checks. For example:
 
     uv run tools/downgrade/lock.py run pc-build "user: mono build" --wait 3600 -- \\
         bash -c "uv run tools/downgrade/pipeline.py project && uv run tools/downgrade/pipeline.py build"
 
+The time spent waiting counts against whatever limits the caller's own run time: an agent's
+background command that is stopped at 2 hours stops lock.py and its command with it, wherever the
+command is (a Unity build, a console transfer). Keep --wait plus the command's own time well inside
+such a limit, or queue in short steps: `lock.py wait <name> --wait 540` in the foreground until it
+exits 0, then `lock.py run <name> ... --wait 0`, again from the wait if another job got there first
+(exit 75).
+
 A person at the console holds vita-device under the name "user" ("user: <purpose>", any case);
-jobs use their own names. keep_awake.py never wakes the console while a person holds it.
+jobs use their own names and wait for a person as for any holder.
 """
 
 import argparse
@@ -40,9 +51,9 @@ from pathlib import Path
 WORK = Path(__file__).resolve().parents[2] / 'work'
 LOCKS = ('vita-device', 'vita-build', 'pc-build')
 BUILD_LOCKS = ('vita-build', 'pc-build')
-NOT_TAKEN = 75  # exit code of `run` when the lock stayed held (EX_TEMPFAIL)
+NOT_TAKEN = 75  # exit code of `run` and `wait` when the lock stayed held (EX_TEMPFAIL)
+INTERRUPTED = 130  # exit code of `run` after Ctrl+C
 POLL_SECONDS = 5
-PERSON = 'user'  # the holder name of a person, as opposed to a job
 
 
 def path(name):
@@ -102,12 +113,32 @@ def clear_stale(name):
         path(name).unlink(missing_ok=True)
 
 
+def other_build_locks(name):
+    """The locks that must be free for name to count as taken: the other build lock of a build lock."""
+    return [other for other in BUILD_LOCKS if other != name] if name in BUILD_LOCKS else []
+
+
+def holding(name):
+    """Who holds the lock, since when and for how long ("<holder: purpose> HH:MM (N min)"), or "free"."""
+    text = holder_of(name)
+    try:
+        minutes = f' ({(time.time() - path(name).stat().st_mtime) / 60:.0f} min)'
+    except FileNotFoundError:
+        minutes = ''
+    return f'{text}{minutes}' if text else 'free'
+
+
+def held_by(name):
+    return f'{name} held by: {holding(name)}'
+
+
 def take(name, holder, wait, process=False):
     """process: name this process in the lock (run), so a lock it can no longer release counts as free."""
     lock = path(name)
-    others = [other for other in BUILD_LOCKS if other != name] if name in BUILD_LOCKS else []
+    others = other_build_locks(name)
     end = time.time() + wait
     own = f'pid {os.getpid()} {process_start(os.getpid())}\n' if process else ''
+    waiting = False
     while True:
         for other in [name, *others]:
             clear_stale(other)
@@ -125,19 +156,38 @@ def take(name, holder, wait, process=False):
                     return 0
                 lock.unlink()  # the other build lock was taken in between: one pipeline at a time
         if time.time() >= end:
-            print(f'{busy} held by: {holder_of(busy)}')
+            print(held_by(busy), flush=True)
             return 1
+        if not waiting:
+            waiting = True
+            print(f'{held_by(busy)}; waiting up to {wait:.0f} s for {name}', flush=True)
         time.sleep(POLL_SECONDS)
+
+
+def wait_free(name, wait):
+    """Wait until name could be taken (it and, for a build lock, the other one free) without taking
+    it: 0, or NOT_TAKEN after wait seconds. Another job may take it before the caller does."""
+    end = time.time() + wait
+    names = [name, *other_build_locks(name)]
+    waiting = False
+    while True:
+        for other in names:
+            clear_stale(other)
+        busy = next((other for other in names if path(other).exists()), None)
+        if busy is None:
+            return 0
+        if time.time() >= end:
+            print(held_by(busy), flush=True)
+            return NOT_TAKEN
+        if not waiting:
+            waiting = True
+            print(f'{held_by(busy)}; waiting up to {wait:.0f} s', flush=True)
+        time.sleep(max(0.0, min(POLL_SECONDS, end - time.time())))
 
 
 def owner(text):
     """The name before the purpose in a holder ("me: purpose") or a lock's text ("me: purpose 16:09")."""
     return re.sub(r' \d{1,2}:\d\d$', '', text.strip()).split(':')[0].strip()
-
-
-def is_person(text):
-    """Whether a holder or a lock's text names a person (PERSON), not a job."""
-    return owner(text).lower() == PERSON
 
 
 def release(name, holder):
@@ -159,11 +209,24 @@ def run(name, holder, wait, command):
     if take(name, holder, wait, process=True) != 0:
         return NOT_TAKEN
     try:
-        return subprocess.run(command, env={**os.environ, 'CROW_LOCK': name}).returncode
-    except KeyboardInterrupt:
-        return 130
+        return run_to_end(command, {**os.environ, 'CROW_LOCK': name})
     finally:
         release(name, holder)
+
+
+def run_to_end(command, env):
+    """Run the command and wait for it, also after Ctrl+C: the console sends Ctrl+C to the command as
+    well, which ends it in its own time (subprocess.run would kill it a quarter of a second later, in
+    the middle of a console transfer). The command's exit code, or INTERRUPTED after a Ctrl+C."""
+    process = subprocess.Popen(command, env=env)
+    interrupted = False
+    while True:
+        try:
+            code = process.wait()
+            return INTERRUPTED if interrupted else code
+        except KeyboardInterrupt:
+            interrupted = True
+            print('lock.py: waiting for the command to end (Ctrl+Break stops both at once)', flush=True)
 
 
 class JobLimits(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
@@ -216,16 +279,28 @@ def main(argv):
     parser = argparse.ArgumentParser(
         prog='lock.py', description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    parser.add_argument('action', choices=['take', 'release', 'run', 'status'])
+    parser.add_argument('action', choices=['take', 'release', 'run', 'wait', 'status'])
     parser.add_argument('name', nargs='?', choices=LOCKS)
     parser.add_argument('holder', nargs='?', help='"<name>: <purpose>"; release needs only the name')
-    parser.add_argument('--wait', type=float, default=0, metavar='SECONDS', help='take, run: how long to wait')
+    parser.add_argument(
+        '--wait',
+        '--max-wait',
+        dest='wait',
+        type=float,
+        default=0,
+        metavar='SECONDS',
+        help='take, run, wait: how long to wait for the lock (default 0: fail at once)',
+    )
     args = parser.parse_args(argv)
     if args.action == 'status':
         for name in LOCKS:
             note = ' (stale: its lock.py has ended; the next take removes it)' if stale(name) else ''
-            print(f'{name:12} {holder_of(name) or "free"}{note}')
+            print(f'{name:12} {holding(name)}{note}')
         return 0
+    if args.action == 'wait':
+        if args.name is None:
+            parser.error('wait needs a lock name')
+        return wait_free(args.name, args.wait)
     if args.holder is None:
         parser.error(f'{args.action} needs a lock name and a holder')
     if args.action == 'take':

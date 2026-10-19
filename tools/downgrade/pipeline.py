@@ -62,7 +62,6 @@ from asset_rules import (
     scene_reference_overlay,
     settings_overlay,
     streamed_mesh_overlay,
-    stripped_component_overlay,
     texture_cap_overlay,
     texture_dedup_overlay,
     texture_overlay,
@@ -77,10 +76,10 @@ from common import (
     DEFAULT_GAME,
     EDITORS,
     HERE,
-    ROOT,
     TARGET,
     VITA_HOST,
     WORK,
+    build_folder,
     editor_data,
     file_hash,
     folder_meta,
@@ -88,6 +87,8 @@ from common import (
     log,
     meta_of,
     mono_cecil,
+    project_folder,
+    rewritten_folder,
     run,
     stable_meta,
     walk,
@@ -271,6 +272,8 @@ COMPAT_SOURCES = [
             'Draws',
             'Merge',
             'Perf',
+            'SceneSplit',
+            'MapPan',
             'Clock',
             'Audio',
             'Alloc',
@@ -283,7 +286,6 @@ COMPAT_SOURCES = [
             'FixedStep',
             'EnemySplit',
             'FastPaths',
-            'EnemyChores',
             'Cameras',
             'Decor',
             'Cuts',
@@ -441,7 +443,7 @@ def link_check(version: str, platform: str):
     linker = EDITORS / version / 'Editor' / 'Data' / 'il2cpp' / 'build' / 'UnityLinker.exe'
     if not linker.exists():
         linker = data / 'il2cpp' / 'build' / 'UnityLinker.exe'
-    rewritten = WORK / (f'assemblies-{version}' + ('-vita' if platform == 'vita' else ''))
+    rewritten = rewritten_folder(version, platform)
     staging = WORK / f'link-{platform}'
     if staging.exists():
         shutil.rmtree(staging)
@@ -515,14 +517,14 @@ def load_check(version: str):
     Mono (LoadCheck.cs), in a copy of the Windows player's Managed folder with the assemblies from the
     last code stage: a type layout Mono 2018 rejects shows in seconds instead of in the game. Needs a
     Windows player (pipeline.py build). Returns the number of failures."""
-    player = ROOT / 'builds' / f'crow-{version}' / 'CrowCountry_Data' / 'Managed'
+    player = build_folder('windows', version=version) / 'CrowCountry_Data' / 'Managed'
     if not player.exists():
         sys.exit(f'No Windows player in {player.parent.parent}: build one first (pipeline.py build --platform windows)')
     staging = WORK / 'loadcheck'
     if staging.exists():
         shutil.rmtree(staging)
     shutil.copytree(player, staging)
-    rewritten = [*(WORK / f'assemblies-{version}').glob('*.dll'), compat_path('windows')]
+    rewritten = [*rewritten_folder(version, 'windows').glob('*.dll'), compat_path('windows')]
     for dll in rewritten:
         shutil.copy2(dll, staging / dll.name)
     exe = staging / 'LoadCheck.exe'
@@ -682,7 +684,7 @@ def assembly_overlay(exported: Path, game: Path, version: str, platform: str):
         meta = meta_of(dll)
         original_meta[dll.stem] = meta.read_bytes()
         excluded.update({relative / dll.name, relative / meta.name})
-    rewritten = WORK / (f'assemblies-{version}' + ('-vita' if platform == 'vita' else ''))
+    rewritten = rewritten_folder(version, platform)
     if rewrite_assemblies(game_data(game) / 'Managed', rewritten, version, platform):
         sys.exit(f'The game assemblies do not resolve against {version}; see the rewriter log in {ARTIFACTS}')
     compat = compat_path(platform)
@@ -714,7 +716,6 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(render_texture_overlay(exported))
         overlay.update(audio_overlay(exported, platform))
         overlay.update(compat_component_overlay(exported, overlay, platform))
-        overlay.update(stripped_component_overlay(exported, overlay, platform))
         overlay.update(scene_reference_overlay(exported, overlay))
         overlay.update(canvas_channel_overlay(exported, overlay))
         overlay.update(rewired_vita_overlay(exported, overlay, platform))
@@ -920,7 +921,7 @@ def editor_has_open(project: Path):
 def warn_stale_plugins(project: Path, version: str, platform: str):
     """Warn when the code stage (or quickcode) rewrote the assemblies after the project stage put them in
     the project: the build would use the project's."""
-    rewritten = WORK / (f'assemblies-{version}' + ('-vita' if platform == 'vita' else ''))
+    rewritten = rewritten_folder(version, platform)
     plugins = project / 'Assets' / 'Plugins'
     differ = [
         dll.name
@@ -1031,8 +1032,8 @@ def quick_code(version: str, game: Path, force: bool = False):
     (the project's Library/il2cpp_cache), so only the changed C++ compiles. For code changes only:
     it stops when the serialized types or the startup methods differ from the last full build's, and
     warns when the asset rules or build script changed since (quickcode_check). Then: vita.py sync."""
-    project = WORK / f'crow-{version}-vita'
-    output = ROOT / 'builds' / f'crow-{version}-vita'
+    project = project_folder(version, 'vita')
+    output = build_folder('vita', version=version)
     log_path = ARTIFACTS / f'build-{version}-vita.log'
     if not CODE_STAGE.exists() or not log_path.exists() or not (output / 'Media').exists():
         sys.exit('No saved PS Vita build to update: run pipeline.py build --platform vita once')
@@ -1043,7 +1044,7 @@ def quick_code(version: str, game: Path, force: bool = False):
     log_text = log_path.read_text(encoding='utf-8', errors='replace')
     linker_arguments = logged_arguments(log_text, 'UnityLinker')
     il2cpp_arguments = logged_arguments(log_text, 'il2cpp')
-    rewritten = WORK / f'assemblies-{version}-vita'
+    rewritten = rewritten_folder(version, 'vita')
     if rewrite_assemblies(game_data(game) / 'Managed', rewritten, version, 'vita'):
         sys.exit(f'The game assemblies do not resolve against {version}; see the rewriter log in {ARTIFACTS}')
     quickcode_check([*rewritten.glob('*.dll'), compat_path('vita')], version, force)
@@ -1262,7 +1263,7 @@ def check_lock():
         return
     held = [name for name in lock.BUILD_LOCKS if lock.holder_of(name) and not lock.stale(name)]
     holders = ', '.join(f'{name} ({lock.holder_of(name)})' for name in held)
-    command = 'uv run tools/downgrade/lock.py run vita-build "<you>: <purpose>" --wait 7200 -- '
+    command = 'uv run tools/downgrade/lock.py run vita-build "<you>: <purpose>" --wait 1800 -- '
     command += 'uv run tools/downgrade/pipeline.py ...'
     if any(lock.process_of(name) for name in held):
         sys.exit(f'Held by another run: {holders}. Wait for it: {command}')
@@ -1307,20 +1308,17 @@ def main():
     if args.stage == 'rip':
         rip(args.game, rip_dir, args.version)
     if args.stage == 'code':
-        out = WORK / (f'assemblies-{args.version}' + ('-vita' if args.platform == 'vita' else ''))
+        out = rewritten_folder(args.version, args.platform)
         sys.exit(rewrite_assemblies(game_data(args.game) / 'Managed', out, args.version, args.platform))
     if args.stage == 'loadcheck':
         sys.exit(1 if load_check(args.version) else 0)
     if args.stage == 'link':
         sys.exit(link_check(args.version, args.platform))
-    suffix = '-vita' if args.platform == 'vita' else ''
-    project = WORK / f'crow-{args.version}{suffix}'
+    project = project_folder(args.version, args.platform)
     if args.stage == 'project':
         assemble(rip_dir, project, args.version, args.game, args.platform)
     if args.stage == 'build':
-        variant = '-il2cpp' if args.platform == 'windows' and args.backend == 'il2cpp' else ''
-        variant += '-scenes' if args.scenes else ''
-        output = ROOT / 'builds' / f'crow-{args.version}{suffix}{variant}'
+        output = build_folder(args.platform, args.backend, bool(args.scenes), args.version)
         player = output if args.platform == 'vita' else output / 'CrowCountry.exe'
         scenes = [name.strip() for name in args.scenes.split(',') if name.strip()] if args.scenes else None
         build(project, args.version, player, args.platform, args.backend, args.development, scenes)
@@ -1329,7 +1327,7 @@ def main():
             # by an older build would let it sign in to Steam if the real wrapper came back.
             (output / 'steam_appid.txt').unlink(missing_ok=True)
     if args.stage == 'package':
-        package_vita(ROOT / 'builds' / f'crow-{args.version}-vita')
+        package_vita(build_folder('vita', version=args.version))
     if args.stage == 'quickcode':
         quick_code(args.version, args.game, args.force)
 

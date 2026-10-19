@@ -123,11 +123,11 @@ namespace CrowCompat
         {
             int gcLog = Array.IndexOf(args, "-crow-gc-log"), alloc = Array.IndexOf(args, "-crow-alloc");
             GcPace.Install(args);
-            float clones = Quality.Number(args, "-crow-alloc-clones", -1f);
+            float clones = CrowFlags.Number(args, "-crow-alloc-clones", -1f);
             if (clones > 0f) Clones.Install(clones);
             if (gcLog < 0 && alloc < 0) return;
-            if (gcLog >= 0) longFrameMs = Quality.Number(args, "-crow-gc-log", 200f);
-            if (alloc >= 0) reportEvery = Quality.Number(args, "-crow-alloc", 10f);
+            if (gcLog >= 0) longFrameMs = CrowFlags.Number(args, "-crow-gc-log", 200f);
+            if (alloc >= 0) reportEvery = CrowFlags.Number(args, "-crow-alloc", 10f);
             if (longFrameMs <= 0f && gcLog >= 0) longFrameMs = 200f;
             if (reportEvery <= 0f && alloc >= 0) reportEvery = 10f;
             runStart = new long[Runs];
@@ -143,7 +143,7 @@ namespace CrowCompat
                 if (stackFlag >= 0 && Application.platform == RuntimePlatform.WindowsPlayer)
                 {
                     stacks = true;
-                    sampleEvery = (long)(Quality.Number(args, "-crow-alloc-stacks", 16f) * 1024f);
+                    sampleEvery = (long)(CrowFlags.Number(args, "-crow-alloc-stacks", 16f) * 1024f);
                     if (sampleEvery <= 0) sampleEvery = 16 * 1024;
                     untilSample = sampleEvery;
                     frameBuffer = Marshal.AllocHGlobal(Frames * IntPtr.Size);
@@ -566,8 +566,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            int index = Array.IndexOf(args, "-crow-gc-pace");
-            string mode = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            string mode = CrowFlags.Optional(args, "-crow-gc-pace");
             if (mode == "off" || (mode == null && Application.platform != RuntimePlatform.PSP2)) return;
             float megabytes;
             if (float.TryParse(mode, NumberStyles.Float, CultureInfo.InvariantCulture, out megabytes) && megabytes > 0f)
@@ -644,9 +643,7 @@ namespace CrowCompat
 
         static bool Setting()
         {
-            string[] args = ProbeFiles.Args;
-            int index = Array.IndexOf(args, "-crow-tween-recycle");
-            string mode = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            string mode = CrowFlags.Optional(ProbeFiles.Args, "-crow-tween-recycle");
             return mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "on";
         }
     }
@@ -659,7 +656,7 @@ namespace CrowCompat
     // remembers a new one; the table is emptied when a scene unloads, and when it passes 8,192 closures.
     public static class SharedClosures
     {
-        public static bool On = Perf.Value(ProbeFiles.Args, "-crow-alloc-share") != "game";
+        public static bool On = CrowFlags.Value(ProbeFiles.Args, "-crow-alloc-share") != "game";
         static readonly Dictionary<long, object> closures = new Dictionary<long, object>();
         static bool hooked;
 

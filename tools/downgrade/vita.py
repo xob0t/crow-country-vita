@@ -24,7 +24,9 @@ the VPK in VitaShell); after that:
   perf                  clocks, CPU load per core, frame rate and battery (vitacompanion)
   log [--tail N] [--prev [N]]  print the player's log (ux0:data/crow/log.txt, CrowCompat Diag);
                         --prev the run before's (log.prev.txt), --prev 2 the one before that
-  args [flags...]       set the probe's -crow-* flags for the next launch (none clears)
+  args [flags...]       set the probe's -crow-* flags for the next launch (none clears; a flag's
+                        value with spaces, such as "Station Square", is quoted in the file)
+  args --show           print the flags the next launch gets, changing nothing
   files [folder]        list the files under a console folder with their sizes and times (default
                         the game's saves and settings, ux0:data/CrowCountry, compat/Saves.cs)
   crashes [--pull] [--thread NAME]  list crash dumps in ux0:data, newest last; --pull fetches the
@@ -38,6 +40,12 @@ The commands that change the console's state (sync, install, launch, quit, run, 
 reboot, args) refuse while someone else holds the vita-device lock (lock.py): they run inside
 `lock.py run vita-device ...` (CROW_LOCK) or with CROW_HOLDER=<the lock's holder name> after
 `lock.py take`. A free lock lets them run as before.
+
+An FTP transfer cut off mid-way (vita.py killed while it sends or reads a file) can leave the
+console's FTP server hung until the console reboots, so don't kill vita.py while it transfers. Ctrl+C
+or Ctrl+Break lets the file in progress finish and then stops; a second one ends the transfer at once
+by closing its connection cleanly. sync and args write each file under <name>.part and rename it into
+place, so an interrupted upload never leaves the app a file cut short.
 
 The log and the flags are CrowCompat Diag's: on the PS Vita it reads its flags from
 ux0:data/crow/args.txt and writes the player's log to ux0:data/crow/log.txt.
@@ -53,27 +61,36 @@ import io
 import json
 import os
 import re
+import shutil
+import signal
 import socket
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 import lock
 import pipeline
-from common import EXTERNAL, VITA_HOST, setting, vita_host
+from common import ARTIFACTS, EXTERNAL, ROOT, TARGET, VITA_HOST, build_folder, editor_data, log, setting, vita_host
 
 REMOTE = 'ux0:/data/crow'  # CrowCompat Diag's folder on the console (args.txt, log.txt)
+ARGS = f'{REMOTE}/args.txt'
 SAVES = 'ux0:/data/CrowCountry'  # the game's saves and persistentDataPath on the console (compat/Saves.cs)
 APP = f'ux0:/app/{pipeline.VITA_TITLE_ID}'
+OUT = ROOT / 'artifacts' / 'vita'  # screenshots, crash dumps, the symbols kept for them
 # What a dropped or stalled FTP session raises (TimeoutError is an OSError).
 FTP_ERRORS = (OSError, EOFError, ftplib.Error)
+FTP_SECONDS = 30  # connect, and any read or write of a transfer, before it counts as stalled
+PART = '.part'  # an upload's name until it is complete (upload)
 # The commands that change what the console runs or reads; they respect the vita-device lock.
 CHANGING = ('sync', 'install', 'launch', 'quit', 'run', 'do', 'reboot', 'args')
+# The commands that take words after them (the rest of the command line), and how many at most.
+WORDS = {'do': None, 'args': None, 'shot': 1, 'files': 1}
 # The vitacompanion chain that keeps the console awake, and how often it is repeated (keep_awake).
 KEEP_AWAKE = 'nosleep on; screen on'
 KEEP_AWAKE_SECONDS = 10
 WAKE_SECONDS = 5  # how long wake waits for the screen to draw again after a "screen on"
-SCREENSHOT_SECONDS = 20  # how long the probe gets to write a requested screenshot
 
 
 class Unreachable(OSError):
@@ -84,7 +101,7 @@ def ftp():
     vita_host()
     connection = ftplib.FTP()
     try:
-        connection.connect(*pipeline.VITA_FTP, timeout=30)
+        connection.connect(*pipeline.VITA_FTP, timeout=FTP_SECONDS)
     except OSError as error:
         raise Unreachable(
             f"No FTP server at {VITA_HOST}:1337 ({error}). Start VitaShell's FTP "
@@ -128,7 +145,11 @@ def require(name):
     listed = command('help', timeout=4)
     names = {line.split()[0] for line in listed.splitlines() if line.strip()}
     if listed and name not in names:
-        hint = ' To install a VPK, use `pipeline.py deploy` and install it in VitaShell.' if name == 'install' else ''
+        hint = (
+            ' To install, make the VPK with `pipeline.py package`, copy it to the console and install it in VitaShell.'
+            if name == 'install'
+            else ''
+        )
         sys.exit(
             f'The vitacompanion on the console has no `{name}` command (the released vitacompanion '
             f'lacks {", ".join(EXTENDED)}).{hint}'
@@ -171,7 +192,6 @@ def keep_awake():
     global _awake
     if _awake:
         return
-    import threading
 
     def tick():
         while True:
@@ -206,7 +226,11 @@ def install(build: Path):
     require('install')
     vpk = pipeline.package_vita(build)
     size = vpk.stat().st_size
-    with socket.create_connection(pipeline.VITA_COMMANDS, timeout=30) as connection, vpk.open('rb') as handle:
+    with (
+        socket.create_connection(pipeline.VITA_COMMANDS, timeout=30) as connection,
+        vpk.open('rb') as handle,
+        transferring(f'sending and installing {vpk.name}'),
+    ):
         connection.sendall(f'install - {size}\n'.encode())
         connection.settimeout(300)  # the Vita stops reading while it writes out large files
         sent, started, shown = 0, time.time(), 0
@@ -215,9 +239,7 @@ def install(build: Path):
             sent += len(chunk)
             if sent - shown >= 100 << 20 or sent == size:
                 shown = sent
-                pipeline.log(
-                    f'Sent {sent >> 20} of {size >> 20} MB ({sent / 2**20 / (time.time() - started):.1f} MB/s)'
-                )
+                log(f'Sent {sent >> 20} of {size >> 20} MB ({sent / 2**20 / (time.time() - started):.1f} MB/s)')
         connection.settimeout(1800)  # promoting a large package takes a while after the last byte
         reply = b''
         while not reply.endswith(b'\n') and (chunk := connection.recv(4096)):
@@ -229,16 +251,86 @@ def install(build: Path):
     seed(build)
 
 
+@contextlib.contextmanager
+def transferring(what):
+    """Holds back Ctrl+C and Ctrl+Break while an FTP transfer runs: the console's FTP server can hang
+    when a transfer is cut off mid-way, until the console reboots. The first one lets the transfer
+    finish and then stops (KeyboardInterrupt); a second one stops it at once (KeyboardInterrupt in
+    the transfer, whose data connection then closes cleanly: the server takes it as a short file).
+    Off the main thread, where Python takes no signals, it does nothing."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    caught = []
+
+    def held(number, frame):
+        caught.append(number)
+        if len(caught) > 1:
+            raise KeyboardInterrupt
+        print(f'\nvita.py: finishing {what} first (again to cut it short)', file=sys.stderr, flush=True)
+
+    kinds = [signal.SIGINT, *([signal.SIGBREAK] if hasattr(signal, 'SIGBREAK') else [])]
+    before = {kind: signal.signal(kind, held) for kind in kinds}
+    try:
+        yield
+    finally:
+        for kind, handler in before.items():
+            signal.signal(kind, handler)
+    if caught:
+        raise KeyboardInterrupt
+
+
 def read(path):
     buffer = io.BytesIO()
-    with ftp() as connection:
-        connection.retrbinary(f'RETR {path}', buffer.write)
+    with ftp() as connection, transferring(path):
+        try:
+            connection.retrbinary(f'RETR {path}', buffer.write)
+        except KeyboardInterrupt:
+            with contextlib.suppress(*FTP_ERRORS):
+                connection.voidresp()  # the cut transfer's reply, before QUIT's
+            raise
     return buffer.getvalue()
 
 
 def write(path, data: bytes):
     with ftp() as connection:
-        connection.storbinary(f'STOR {path}', io.BytesIO(data))
+        upload(connection, path, data)
+
+
+def upload(connection, target, data: bytes):
+    """Sends data to target: into <target>.part, then renamed over target, so an upload that is
+    stopped never leaves target cut short (one stopped with a second Ctrl+C also deletes its part).
+    Where the part can't be written or renamed (a full memory card, an FTP server without RNFR),
+    target is written in place, as before."""
+    part = target + PART
+    with transferring(target):
+        try:
+            connection.storbinary(f'STOR {part}', io.BytesIO(data), blocksize=1 << 16)
+        except KeyboardInterrupt:
+            discard_part(connection, part)
+            raise
+        except ftplib.error_perm as error:
+            discard_part(connection, part, reply=False)
+            log(f'{target}: {error}; writing it in place')
+            connection.storbinary(f'STOR {target}', io.BytesIO(data), blocksize=1 << 16)
+            return
+        with contextlib.suppress(ftplib.error_perm):  # not there yet
+            connection.delete(target)
+        try:
+            connection.rename(part, target)
+        except ftplib.error_perm as error:
+            log(f'{target}: renaming {PART} failed ({error}); writing it in place')
+            connection.storbinary(f'STOR {target}', io.BytesIO(data), blocksize=1 << 16)
+            discard_part(connection, part, reply=False)
+
+
+def discard_part(connection, part, reply=True):
+    """Deletes an upload's part file; reply: first read the reply of the transfer just cut short."""
+    if reply:
+        with contextlib.suppress(*FTP_ERRORS):
+            connection.voidresp()
+    with contextlib.suppress(*FTP_ERRORS):
+        connection.delete(part)
 
 
 def makedirs(connection, directory, known):
@@ -252,7 +344,7 @@ def makedirs(connection, directory, known):
         known.add(partial)
 
 
-MANIFEST = pipeline.ARTIFACTS / f'vita-synced-{pipeline.VITA_TITLE_ID}.json'
+MANIFEST = ARTIFACTS / f'vita-synced-{pipeline.VITA_TITLE_ID}.json'
 
 
 def digests(build: Path):
@@ -264,56 +356,61 @@ def digests(build: Path):
 def seed(build: Path):
     MANIFEST.parent.mkdir(parents=True, exist_ok=True)
     MANIFEST.write_text(json.dumps({name: digest for name, _, digest in digests(build)}, indent=0))
-    pipeline.log(f'Recorded {build} as installed')
+    log(f'Recorded {build} as installed')
     keep_symbols(build)
 
 
 def sync(build: Path):
     """Uploads the build's app files whose content changed since the last sync."""
-    manifest_path = MANIFEST
-    synced = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    synced = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     connection = ftp()
     try:
         try:
             connection.cwd(APP)
         except ftplib.error_perm:
-            sys.exit(f'{APP} does not exist: install the VPK once (pipeline.py deploy, then VitaShell)')
+            sys.exit(
+                f'{APP} does not exist: install the VPK once (vita.py install, or pipeline.py package and VitaShell)'
+            )
         changed, total, known = 0, 0, set()
         for name, data, digest in digests(build):
             total += 1
             if synced.get(name) == digest:
                 continue
+            # Out of the record until it is sent whole: a sync stopped while sending it sends it again
+            # next time, even for a build that has the recorded file back.
+            if synced.pop(name, None) is not None:
+                MANIFEST.write_text(json.dumps(synced, indent=0))
             target = f'{APP}/{name}'
             # The console's FTP server sometimes stops answering mid-transfer; a new
             # connection usually carries on.
             for attempt in range(3):
                 try:
                     makedirs(connection, target.rsplit('/', 1)[0], known)
-                    connection.storbinary(f'STOR {target}', io.BytesIO(data), blocksize=1 << 16)
+                    upload(connection, target, data)
                     break
                 except FTP_ERRORS as error:
                     if attempt == 2:
                         raise
-                    pipeline.log(f'{name}: {error!r}; reconnecting')
+                    log(f'{name}: {error!r}; reconnecting')
                     with contextlib.suppress(OSError):
                         connection.close()
                     time.sleep(5)
                     connection = ftp()
             synced[name] = digest
             changed += 1
-            manifest_path.write_text(json.dumps(synced, indent=0))  # progress survives an interrupted sync
+            MANIFEST.write_text(json.dumps(synced, indent=0))  # progress survives an interrupted sync
             if name == MODULE:
                 keep_symbols(build)
     finally:
         connection.close()
-    pipeline.log(f'Synced {changed} of {total} files to {APP}')
+    log(f'Synced {changed} of {total} files to {APP}')
 
 
 # Copies of the IL2CPP module's symbols, one per build sent to the console, named by the module's
 # fingerprint (its NID, which crash dumps list), so `crashes --pull` reads a dump with the symbols of
 # the build that crashed even after the next quickcode has replaced SymbolFiles. About 55 MB each.
 MODULE = 'Media/Modules/il2CppAssemblies.suprx'
-SYMBOLS = pipeline.ROOT / 'artifacts' / 'vita' / 'symbols'
+SYMBOLS = OUT / 'symbols'
 KEEP_SYMBOLS = 5
 SYNCED = 'synced.txt'  # in each copy's folder: when it was last sent (seconds since the epoch)
 
@@ -328,15 +425,13 @@ def fingerprint(data: bytes):
 def keep_symbols(build: Path):
     """Copies the build's SymbolFiles module into SYMBOLS/<fingerprint> when it matches the module
     sent, and drops all but the newest KEEP_SYMBOLS copies."""
-    import shutil
-
     source = build / 'SymbolFiles' / 'il2CppAssemblies.suprx'
     if not source.exists() or not (build / MODULE).exists():
         return
     data = source.read_bytes()
     kept, sent = fingerprint(data), fingerprint((build / MODULE).read_bytes())
     if kept is None or kept != sent:
-        pipeline.log(f'SymbolFiles do not match the module sent ({kept} vs {sent}): no copy kept for crash dumps')
+        log(f'SymbolFiles do not match the module sent ({kept} vs {sent}): no copy kept for crash dumps')
         return
     folder = SYMBOLS / f'{kept:08x}'
     folder.mkdir(parents=True, exist_ok=True)
@@ -349,7 +444,7 @@ def keep_symbols(build: Path):
     copies = sorted((p for p in SYMBOLS.iterdir() if (p / SYNCED).exists()), key=synced_at)
     for old in copies[:-KEEP_SYMBOLS]:
         shutil.rmtree(old, ignore_errors=True)
-    pipeline.log(f'Kept the symbols of module {kept:08x} in {folder.relative_to(pipeline.ROOT)}')
+    log(f'Kept the symbols of module {kept:08x} in {folder.relative_to(ROOT)}')
 
 
 def synced_at(folder: Path):
@@ -390,10 +485,6 @@ def parse_core(dump: Path):
 
 def addr2line(binary: Path, addresses):
     """{address: symbol name} of addresses in a binary, from the SDK's psp2bin."""
-    import re
-    import shutil
-    import subprocess
-
     if not addresses:
         return {}
     sdk = setting('SCE_PSP2_SDK_DIR')
@@ -433,7 +524,7 @@ def game_symbols(build: Path, wanted: int | None, dump: Path):
         return current, True
     kept = SYMBOLS / f'{wanted:08x}' / current.name
     if kept.exists():
-        print(f"game symbols: {kept.relative_to(pipeline.ROOT)} (the dump's module {wanted:08x})")
+        print(f"game symbols: {kept.relative_to(ROOT)} (the dump's module {wanted:08x})")
         return kept, True
     try:
         crashed = int(dump.name.split('-')[1])  # psp2core-<seconds since the epoch>-...
@@ -444,7 +535,7 @@ def game_symbols(build: Path, wanted: int | None, dump: Path):
     chosen = max(before, key=synced_at) / current.name if before else current
     print(
         f"WARNING: no symbols of the dump's module {wanted:08x}; game frames are mapped onto "
-        f'{chosen.relative_to(pipeline.ROOT)} through the two exception indexes (marked ~)'
+        f'{chosen.relative_to(ROOT)} through the two exception indexes (marked ~)'
     )
     return chosen, False
 
@@ -524,7 +615,7 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
     against the Unity player's symbols and the build's IL2CPP module. Stack scanning also
     finds stale return addresses; read the chain from the top."""
     core = parse_core(dump)
-    player = pipeline.editor_data(pipeline.TARGET) / 'PlaybackEngines' / 'PSP2Player' / 'PSP2Player_Il2cpp.self'
+    player = editor_data(TARGET) / 'PlaybackEngines' / 'PSP2Player' / 'PSP2Player_Il2cpp.self'
     game, exact = game_symbols(build, module_fingerprints(core).get('LIBIL2CPP_PRX'), dump)
     symbols = {'LIBIL2CPP_PRX': game}
     modules = {m.name: m for m in core.modules}
@@ -593,11 +684,11 @@ def crashes(pull: bool, build: Path, thread_name: str | None = None):
         for modify, name, size in dumps[-10:]:
             print(f'{modify}  {size:>10}  {name}')
         if pull and dumps:
-            out = pipeline.ROOT / 'artifacts' / 'vita' / dumps[-1][1]
+            out = OUT / dumps[-1][1]
             out.parent.mkdir(parents=True, exist_ok=True)
             # Into a part file first: a failed transfer used to leave an earlier copy empty.
-            part = out.with_name(out.name + '.part')
-            with part.open('wb') as handle:
+            part = out.with_name(out.name + PART)
+            with part.open('wb') as handle, transferring(dumps[-1][1]):
                 connection.retrbinary(f'RETR ux0:/data/{dumps[-1][1]}', handle.write)
             part.replace(out)
             print(f'saved {out}')
@@ -631,8 +722,6 @@ def files(folder: str):
 def check_lock(name):
     """Stop a changing command while the vita-device lock is someone else's: before, a job whose
     lock take failed went on and quit another job's run, and overwrote its flags."""
-    if name not in CHANGING:
-        return
     lock.clear_stale('vita-device')
     text = lock.holder_of('vita-device')
     if text is None or os.environ.get('CROW_LOCK') == 'vita-device':
@@ -644,6 +733,37 @@ def check_lock(name):
         f'vita.py {name}: the console is held by "{text}" (vita-device lock). Run inside '
         '`lock.py run vita-device ...`, or set CROW_HOLDER=<your holder name> after taking it.'
     )
+
+
+def quit_game():
+    return command(f'{KEEP_AWAKE}; quit all; wait 2s')
+
+
+def launch_game():
+    return command(f'{KEEP_AWAKE}; launch {pipeline.VITA_TITLE_ID}')
+
+
+def args_line(flags):
+    """Flags as args.txt takes them: ProbeFiles splits the file at spaces and keeps "quoted words"
+    whole, so a value with spaces ("Station Square", "A>B") is quoted. A word that starts with a dash
+    stays as it is: `args "-crow-heartbeat 5"` is still two words."""
+    return ' '.join(f'"{f}"' if ' ' in f and not f.startswith('-') and '"' not in f else f for f in flags)
+
+
+def set_args(flags):
+    """Writes the probe's flags for the next launch into args.txt (none: an empty file); the line."""
+    line = args_line(flags)
+    with ftp() as connection:
+        makedirs(connection, REMOTE, set())
+        upload(connection, ARGS, line.encode())
+    return line
+
+
+def show_args():
+    try:
+        return read(ARGS).decode(errors='replace').strip()
+    except ftplib.error_perm:
+        return ''  # no args.txt: none
 
 
 def main():
@@ -682,26 +802,42 @@ def run_command():
         '--prev', type=int, nargs='?', const=1, default=0, metavar='N', help='log: the log of the run N before (1 or 2)'
     )
     parser.add_argument('--dump', type=Path, help='crashes: symbolize this local dump instead (no console needed)')
-    # The options may come anywhere; everything else after the command is its arguments, in order
-    # (the probe flags of args, the chain of do, the file of shot and screenshot).
+    parser.add_argument('--show', action='store_true', help='args: print the flags of the next launch, change nothing')
+    # The options may come anywhere; everything else after the command is its words, in order (the
+    # probe flags of args, the chain of do, the file of shot, the folder of files). The probe's flags
+    # start with one dash; a word with two is an option this script doesn't have (it used to go into
+    # args.txt as a flag).
     args, args.rest = parser.parse_known_args()
-    check_lock(args.command)
-    build = args.build or pipeline.ROOT / 'builds' / f'crow-{pipeline.TARGET}-vita'
+    unknown = [word for word in args.rest if word.startswith('--')]
+    if unknown:
+        parser.error(f'unknown option {unknown[0]}')
+    most = WORDS.get(args.command, 0)
+    if most is not None and len(args.rest) > most:
+        parser.error(
+            f'{args.command} takes {f"at most {most} word" if most else "no words"} after it: {" ".join(args.rest)}'
+        )
+    if args.show and args.command != 'args':
+        parser.error('--show goes with args')
+    if args.show and args.rest:
+        parser.error('args --show changes nothing: give it no flags')
+    if args.command in CHANGING and not args.show:
+        check_lock(args.command)
+    build = args.build or build_folder('vita')
 
     if args.command in ('quit', 'run'):
-        print(command(f'{KEEP_AWAKE}; quit all; wait 2s'))
+        print(quit_game())
     if args.command == 'seed':
         seed(build)
     if args.command in ('sync', 'run'):
         sync(build)
     if args.command in ('launch', 'run'):
-        print(command(f'{KEEP_AWAKE}; launch {pipeline.VITA_TITLE_ID}'))
+        print(launch_game())
     if args.command == 'install':
         install(build)
     if args.command == 'do':
         print(command(' '.join(args.rest), timeout=30))
     if args.command == 'shot':
-        shot(Path(args.rest[0]) if args.rest else pipeline.ROOT / 'artifacts' / 'vita' / 'shot.png')
+        shot(Path(args.rest[0]) if args.rest else OUT / 'shot.png')
     if args.command == 'perf':
         require('perf')
         print(command('perf', timeout=5))
@@ -715,10 +851,8 @@ def run_command():
         lines = read(f'{REMOTE}/{name}').decode(errors='replace').splitlines()
         print('\n'.join(lines[-args.tail :] if args.tail else lines))
     if args.command == 'args':
-        with ftp() as connection:
-            makedirs(connection, REMOTE, set())
-        write(f'{REMOTE}/args.txt', ' '.join(args.rest).encode())
-        print('args.txt: ' + (' '.join(args.rest) or '(empty)'))
+        line = show_args() if args.show else set_args(args.rest)
+        print('args.txt: ' + (line or '(empty)'))
     if args.command == 'crashes' and args.dump:
         symbolize(args.dump, build, args.thread)
     elif args.command == 'crashes':

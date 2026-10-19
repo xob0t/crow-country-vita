@@ -36,10 +36,7 @@ namespace CrowCompat
         {
             if (consoleMode == null)
             {
-                string[] args = ProbeFiles.Args;
-                int index = Array.IndexOf(args, "-crow-console");
-                int value;
-                consoleMode = index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) ? value : Vita ? 1 : 0;
+                consoleMode = CrowFlags.Int(ProbeFiles.Args, "-crow-console", Vita ? 1 : 0);
             }
             return consoleMode.Value;
         }
@@ -59,9 +56,7 @@ namespace CrowCompat
         {
             if (switchAnimation == null)
             {
-                string[] args = ProbeFiles.Args;
-                int index = Array.IndexOf(args, "-crow-platform-anim");
-                string value = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+                string value = CrowFlags.Value(ProbeFiles.Args, "-crow-platform-anim");
                 switchAnimation = value != null ? value == "switch" : Vita;
                 if (switchAnimation.Value) Debug.Log("CROW_SETTINGS platform animations as on the Switch");
             }

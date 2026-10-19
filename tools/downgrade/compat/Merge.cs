@@ -68,12 +68,11 @@ using UnityEngine.SceneManagement;
 //   -crow-merge-cell <m>, -crow-merge-max-vertices <n>, -crow-merge-max-kb <n>, -crow-merge-drop
 //                               the run-time merge's cell, part size, memory budget, and Drop
 //   -crow-merge-enemies         the enemy mode at run time (the build's default)
-//   -crow-merge-enemy-strip     what the build does with CROW_MERGE=on, after each scene loads: the
-//                               merged enemy parts that are bare leaves (a Transform, MeshFilter and
-//                               MeshRenderer, inert scripts and random picks made once only; no
-//                               children, no tag but MeshCombineEnemy) and that nothing in the scene
-//                               names (no FSM's object or string, no mark of the analysis) destroyed,
-//                               so the enemies' hierarchies are smaller
+//   (The build with CROW_MERGE=on also strips the enemies: the merged enemy parts that are bare
+//                               leaves (a Transform, MeshFilter and MeshRenderer, inert scripts and
+//                               random picks made once only; no children, no tag but MeshCombineEnemy)
+//                               and that nothing in the scene names (no FSM's object or string, no mark
+//                               of the analysis) destroyed, so the enemies' hierarchies are smaller.)
 //   -crow-merge-materials       the report lists the enemies' merged materials (CROW_MERGE_MATERIALS=1
 //                               for the build)
 //   -crow-merge-check           every second, each merged renderer's parts: still there, active with
@@ -144,9 +143,9 @@ namespace CrowCompat
                         else if (part.enabled) why = "its renderer is on";
                         else if (!part.sharedMaterials.SequenceEqual(looks)) why = "material " + string.Join(",", part.sharedMaterials.Select(m => m == null ? "null" : m.name).ToArray());
                     }
-                    if (why == null || part == null && reported.Contains(group.transform.GetComponent<Renderer>())) continue;
+                    if (why == null) continue;
                     differences++;
-                    if (part != null && !reported.Add(part)) continue;
+                    if (!reported.Add(part != null ? part : (Renderer)merged)) continue;  // once each (a destroyed part: once per group)
                     Debug.Log("CROW_MERGE_CHECK " + (part == null ? Perf.Path(group.transform, 4) + " part" : Perf.Path(part.transform, 5)) + ": " + why);
                 }
             }
@@ -178,35 +177,19 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            int index = Array.IndexOf(args, "-crow-merge");
-            mode = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-            int cell = Array.IndexOf(args, "-crow-merge-cell");
-            float metres;
-            if (cell >= 0 && cell + 1 < args.Length && float.TryParse(args[cell + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out metres)) Cell = metres;
-            int limit = Array.IndexOf(args, "-crow-merge-max-vertices");
-            int vertices;
-            if (limit >= 0 && limit + 1 < args.Length && int.TryParse(args[limit + 1], out vertices)) MaxPartVertices = vertices;
-            if (args.Contains("-crow-merge-check")) Check.Install();
-            if (args.Contains("-crow-merge-drop")) Drop = true;
-            if (args.Contains("-crow-merge-enemies")) Enemies = true;
-            bool strip = args.Contains("-crow-merge-enemy-strip");
-            if (strip) Enemies = true;
-            int budgetAt = Array.IndexOf(args, "-crow-merge-max-kb");
-            int kilobytes;
-            if (budgetAt >= 0 && budgetAt + 1 < args.Length && int.TryParse(args[budgetAt + 1], out kilobytes)) MaxBytes = kilobytes * 1024L;
+            mode = CrowFlags.Value(args, "-crow-merge");
+            Cell = CrowFlags.Number(args, "-crow-merge-cell", Cell);
+            MaxPartVertices = CrowFlags.Int(args, "-crow-merge-max-vertices", MaxPartVertices);
+            if (CrowFlags.Has(args, "-crow-merge-check")) Check.Install();
+            if (CrowFlags.Has(args, "-crow-merge-drop")) Drop = true;
+            if (CrowFlags.Has(args, "-crow-merge-enemies")) Enemies = true;
+            int kilobytes = CrowFlags.Int(args, "-crow-merge-max-kb", -1);
+            if (kilobytes >= 0) MaxBytes = kilobytes * 1024L;
+            if (mode == null) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
-                if (mode != null) Set(mode, scene);
-                if (!strip) return;
-                try
-                {
-                    Debug.Log(Strip(scene));
-                }
-                catch (Exception exception)
-                {
-                    Debug.Log("CROW_MERGE strip failed: " + exception);
-                }
+                Set(mode, scene);
             };
         }
 
@@ -451,7 +434,6 @@ namespace CrowCompat
         static Analysis Analyze(Scene scene, Dictionary<string, int> scripts, bool bake)
         {
             var analysis = new Analysis();
-            lastAnalysis = analysis;
             Type combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
             if (Enemies)
                 foreach (GameObject root in Roots(scene))
@@ -998,7 +980,6 @@ namespace CrowCompat
         // Strip's: whatever an FSM names, by object or by string, in its variables and its actions' parameters
         // (ParamDataType's lists, whatever the action).
         static bool collectReferences;
-        static Analysis lastAnalysis;
 
         static void References(object fsm, Array states, Analysis analysis)
         {
@@ -1083,24 +1064,8 @@ namespace CrowCompat
             }
         }
 
-        // -crow-merge-enemy-strip (see the top): returns the CROW_MERGE strip line.
-        static string Strip(Scene scene)
-        {
-            collectReferences = true;
-            try
-            {
-                Analyze(scene, new Dictionary<string, int>(), false);
-            }
-            finally
-            {
-                collectReferences = false;
-            }
-            return Strip(scene, lastAnalysis, Resources.FindObjectsOfTypeAll<MergedRenderer>(), false);
-        }
-
-        // The build's (immediate: DestroyImmediate, with the analysis Process made with references) and the
-        // run-time flag's.
-        static string Strip(Scene scene, Analysis analysis, IEnumerable<MergedRenderer> groups, bool immediate)
+        // The build's, with the analysis Process made with references.
+        static string Strip(Scene scene, Analysis analysis, IEnumerable<MergedRenderer> groups)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var kept = new Dictionary<string, int>();
@@ -1117,8 +1082,7 @@ namespace CrowCompat
                     string why = StripBlocker(part, analysis);
                     if (why == null)
                     {
-                        if (immediate) UnityEngine.Object.DestroyImmediate(part.gameObject);
-                        else UnityEngine.Object.Destroy(part.gameObject);
+                        UnityEngine.Object.DestroyImmediate(part.gameObject);
                         stripped++;
                         continue;
                     }
@@ -1723,7 +1687,7 @@ namespace CrowCompat
             report.Append("CROW_MERGE ").Append(sceneName).Append(" biggest groups: ")
                 .Append(string.Join(" ", merging.OrderByDescending(g => g.Count).Take(12).Select(g => g[0].material.name.Replace(' ', '_') + "=" + g.Count).ToArray())).Append('\n');
             // Last: the report above reads the parts this destroys.
-            if (strip) report.Append(Strip(scene, analysis, created.Select(go => go.GetComponent<MergedRenderer>()), true)).Append('\n');
+            if (strip) report.Append(Strip(scene, analysis, created.Select(go => go.GetComponent<MergedRenderer>()))).Append('\n');
             if (rebuild) report.Append(Rebuild(scene, analysis, created)).Append('\n');
             return report.ToString();
         }

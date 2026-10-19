@@ -17,7 +17,7 @@ import re
 from pathlib import Path
 
 import cpuprofile
-from common import ROOT, TARGET
+from common import build_folder
 
 # Frames of the allocator itself and of the probe's callback, skipped to find the method that allocates.
 RUNTIME = re.compile(
@@ -31,7 +31,7 @@ RUNTIME = re.compile(
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('stacks', type=Path)
-    parser.add_argument('--build', type=Path, default=ROOT / 'builds' / f'crow-{TARGET}-il2cpp')
+    parser.add_argument('--build', type=Path, default=build_folder('windows', 'il2cpp'))
     parser.add_argument('--top', type=int, default=40)
     parser.add_argument('--depth', type=int, default=4)
     args = parser.parse_args()

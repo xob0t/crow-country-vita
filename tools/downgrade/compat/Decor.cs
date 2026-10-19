@@ -29,10 +29,9 @@ using UnityEngine.SceneManagement;
 //     tweens on a Transform (the fixed and manual updates keep theirs).
 //   -crow-decor-log           every 10 s (CROW_DECOR): targets looked at, the share slowed, runs and
 //                             skips, what was refused and why
-// -crow-cycle / -crow-ab take decor=on|off, decorhidden=, decorfar=, decorfarrate=, and
-// the experiment breathpause=off|on (Mara's breathing tweens paused or played: what her ~600 transforms cost;
-// Cuts.cs' breath= is the rule). -crow-decor-visible <n> (Cuts.cs parses it; decorvisible=, the PS Vita's 2):
-// decoration that was drawn runs on one frame in n too, with the frames' time.
+// -crow-cycle / -crow-ab take decor=on|off, decorhidden=, decorfar=, decorfarrate=. -crow-decor-visible <n>
+// (Cuts.cs parses it; decorvisible=, the PS Vita's 2): decoration that was drawn runs on one frame in n too,
+// with the frames' time.
 // The probe:
 //   -crow-motion-report <s>   every s seconds, for 6 frames in a row, every transform in the loaded
 //                             scenes that changed in the frame (Transform.hasChanged, cleared each
@@ -64,18 +63,18 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            float report = Quality.Number(args, "-crow-motion-report", -1f);
+            float report = CrowFlags.Number(args, "-crow-motion-report", -1f);
             if (report > 0f) MotionReport.Install(report);
-            string mode = Perf.Value(args, "-crow-decor");
+            string mode = CrowFlags.Value(args, "-crow-decor");
             if (mode != null) On = mode == "on";
             DecorTweens.Active = On;
-            HiddenDivisor = Divisor(Quality.Number(args, "-crow-decor-hidden", HiddenDivisor));
-            FarDivisor = Divisor(Quality.Number(args, "-crow-decor-far-rate", FarDivisor));
-            Far = Quality.Number(args, "-crow-decor-far", Far);
+            HiddenDivisor = Divisor(CrowFlags.Number(args, "-crow-decor-hidden", HiddenDivisor));
+            FarDivisor = Divisor(CrowFlags.Number(args, "-crow-decor-far-rate", FarDivisor));
+            Far = CrowFlags.Number(args, "-crow-decor-far", Far);
             log = Array.IndexOf(args, "-crow-decor-log") >= 0;
             SceneManager.sceneUnloaded += scene => Views.Clear();
             if (log) Canvas.willRenderCanvases += Views.Log;
-            string moverName = Perf.Value(args, "-crow-find-movers");
+            string moverName = CrowFlags.Value(args, "-crow-find-movers");
             if (moverName != null)
             {
                 float after = 5f;
@@ -110,21 +109,6 @@ namespace CrowCompat
                 };
         }
 
-        // An experiment (-crow-cycle breathpause=off|on): the player's breathing tweens (on "breath_vert_1",
-        // which moves about 600 of Mara's transforms every frame) paused or played again through DOTween,
-        // to measure what those transform changes cost.
-        static void Breath(bool play)
-        {
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
-            Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween");
-            if (player == null || dotween == null) return;
-            MethodInfo method = dotween.GetMethod(play ? "Play" : "Pause", new[] { typeof(object) });
-            int count = 0;
-            foreach (Transform t in player.GetComponentsInChildren<Transform>(true))
-                if (t.name == "breath_vert_1") count += (int)method.Invoke(null, new object[] { t });
-            Debug.Log("CROW_DECOR breath " + (play ? "played" : "paused") + ": " + count + " tweens");
-        }
-
         // -crow-player-tree: the player's hierarchy below its root, subtrees of 40 transforms or more to
         // depth levels, with their size and whether they are active.
         static void Tree(Transform node, int level, int depth, StringBuilder line)
@@ -153,7 +137,7 @@ namespace CrowCompat
             {
                 case "decor":
                     On = value == "on";
-                    DecorTweens.Active = On || DecorTweens.Active;
+                    Cuts.Refresh();  // DecorTweens.Active, which the cuts' rules share
                     break;
                 case "decorhidden":
                     HiddenDivisor = Divisor(number);
@@ -164,87 +148,11 @@ namespace CrowCompat
                 case "decorfarrate":
                     FarDivisor = Divisor(number);
                     break;
-                case "breathpause":
-                    Breath(value != "off");
-                    break;
-                case "lift":
-                    Lift.Set(value == "on");
-                    break;
                 default:
                     return false;
             }
             Debug.Log("CROW_DECOR " + key + "=" + value);
             return true;
-        }
-    }
-
-    // An experiment (-crow-cycle lift=on|off), to measure what a moving part costs inside a big hierarchy:
-    // on watches the loaded areas' roots of 1,000 transforms or more for 6 frames, and every transform
-    // whose change starts there (it changed, its parent didn't) leaves its parents for the scene's root,
-    // keeping its world pose; off puts them back. Not safe for play (FSMs that look parts up by path,
-    // parents switched off or destroyed): a measurement only.
-    static class Lift
-    {
-        static readonly List<KeyValuePair<Transform, Transform>> lifted = new List<KeyValuePair<Transform, Transform>>();
-        static readonly List<int> siblings = new List<int>();
-        static Transform[] watched;
-        static int frames = -1;
-
-        internal static void Set(bool on)
-        {
-            if (!on)
-            {
-                for (int i = lifted.Count - 1; i >= 0; i--)
-                    if (lifted[i].Key != null && lifted[i].Value != null)
-                    {
-                        lifted[i].Key.SetParent(lifted[i].Value, true);
-                        lifted[i].Key.SetSiblingIndex(siblings[i]);
-                    }
-                Debug.Log("CROW_DECOR lift off: " + lifted.Count + " back");
-                lifted.Clear();
-                siblings.Clear();
-                return;
-            }
-            var all = new List<Transform>();
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                Scene scene = SceneManager.GetSceneAt(i);
-                if (!scene.isLoaded || scene.name == "CrowMara" || scene.name == "DontDestroyOnLoad") continue;
-                foreach (GameObject root in scene.GetRootGameObjects())
-                    if (root.transform.hierarchyCount >= 1000) all.AddRange(root.GetComponentsInChildren<Transform>(true));
-            }
-            watched = all.ToArray();
-            foreach (Transform t in watched) t.hasChanged = false;
-            if (frames < 0) Application.onBeforeRender += Tick;
-            frames = 0;
-        }
-
-        static readonly HashSet<Transform> starts = new HashSet<Transform>();
-
-        static void Tick()
-        {
-            if (frames < 0) return;
-            foreach (Transform t in watched)
-            {
-                if (t == null || !t.hasChanged) continue;
-                if (t.parent != null && !t.parent.hasChanged) starts.Add(t);
-            }
-            foreach (Transform t in watched)
-                if (t != null) t.hasChanged = false;
-            if (++frames < 6) return;
-            frames = -1;
-            Application.onBeforeRender -= Tick;
-            int moved = 0;
-            foreach (Transform t in starts)
-            {
-                if (t == null || t.parent == null) continue;
-                lifted.Add(new KeyValuePair<Transform, Transform>(t, t.parent));
-                siblings.Add(t.GetSiblingIndex());
-                moved += t.GetComponentsInChildren<Transform>(true).Length;
-                t.SetParent(null, true);
-            }
-            Debug.Log("CROW_DECOR lift on: " + starts.Count + " moving parts (" + moved + " transforms) out of their big roots");
-            starts.Clear();
         }
     }
 
@@ -438,6 +346,8 @@ namespace CrowCompat
 
         static int failures;
 
+        // A hook's failure (the tween or script then runs every frame): the first 5 logged, all counted
+        // (failures= in CROW_DECOR).
         internal static void Failed(Exception exception)
         {
             if (failures++ < 5) Debug.Log("CROW_DECOR failed: " + exception);
@@ -454,7 +364,7 @@ namespace CrowCompat
             logAt = now;
             var reasons = refused.Values.GroupBy(r => r).OrderByDescending(g => g.Count()).Select(g => g.Key.Replace(' ', '_') + "=" + g.Count());
             Debug.Log("CROW_DECOR on=" + Decor.On + " views=" + list.Count + " slowed=" + (counted == 0 ? 0 : 100 * slowed / counted) + "% runs=" + ran + " skips=" + skipped +
-                      " tweenCalls=" + DecorTweens.Count + " scriptCalls=" + DecorScripts.Count +
+                      " tweenCalls=" + DecorTweens.Count + " scriptCalls=" + DecorScripts.Count + " failures=" + failures +
                       " refused: " + string.Join(" ", reasons.ToArray()));
             counted = slowed = ran = skipped = 0;
             DecorTweens.Count = DecorScripts.Count = 0;
@@ -541,7 +451,8 @@ namespace CrowCompat
         }
 
         // At the start of AbstractAnimationScript.Update: false skips this frame's update (its time is
-        // kept in pending for the next run).
+        // kept in pending for the next run). A script refused once (entry < 0) stays refused for its
+        // life, whatever the generation (Resolve isn't called again for it).
         public static bool Step(Component script, ref float pending, ref int entry)
         {
             float dt = Time.deltaTime;

@@ -6,42 +6,41 @@ has the calibration, measured on this PC's CPU, a Ryzen 7 5800X3D).
                             [--build dir] [--no-guard] -- <-crow-* flags...>
     uv run tools/downgrade/vitalike.py summary <tag>...
 
-The player (a copy of builds/crow-<version>-il2cpp, refreshed when the build changes) starts
-suspended inside a Job Object that limits it to <cores> logical processors, one per physical core,
-core 0 left out, at high priority. A controller thread then lets it run <cap> percent of the wall
-time in slices of <period> ms (all its threads suspended in between), so each core acts about
-100/<cap> times slower. Between slices a busy loop on each game core (a guard) keeps other programs
-off them, so they don't empty its caches. The GPU and file reads are not slowed: the runs predict
-script and game logic costs, not rendering. --cap 100 gives a PC baseline with the same flags.
+The player (a copy of builds/crow-<version>-il2cpp without Steam's files, refreshed when the build
+changes) runs through run_player.py, on a desktop of its own, windowed and muted. Once it runs it is
+limited to <cores> logical processors, one per physical core, core 0 left out, at high priority, and
+a controller thread lets it run <cap> percent of the wall time in slices of <period> ms (all its
+threads suspended in between), so each core acts about 100/<cap> times slower. Between slices a busy
+loop on each game core (a guard) keeps other programs off them, so they don't empty its caches. The
+GPU and file reads are not slowed: the runs predict script and game logic costs, not rendering.
+--cap 100 gives a PC baseline with the same flags.
 
 Output goes to artifacts/vitalike/<tag>/: player.log (the player's output, with the probe's
 HEARTBEAT lines) and vitalike.txt (the setup and the measured duty). The player runs unsynchronized
-(-crow-no-vsync) with its window off-screen. `summary` averages the heartbeats in the last scene,
-the first one after the load left out.
+(-crow-no-vsync). `summary` averages the heartbeats in the last scene, the first one after the load
+left out. fightbench.py --vitalike slows its player the same way (slow_down).
 """
 
 import argparse
 import ctypes
 import ctypes.wintypes as wt
 import re
-import shutil
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-from common import ROOT, TARGET, WORK
+from common import ROOT, WORK, build_folder, number, split_at_dashes
 
-BUILD = ROOT / 'builds' / f'crow-{TARGET}-il2cpp'
+BUILD = build_folder('windows', 'il2cpp')
 COPY = WORK / 'vitalike' / 'player'
 OUT = ROOT / 'artifacts' / 'vitalike'
 DEFAULT_CAP = 5.5
 DEFAULT_PERIOD_MS = 4.0
-WINDOW_SECONDS = 600  # how long the slowed player gets to open its window
+DEFAULT_CORES = 3
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
-user32 = ctypes.WinDLL('user32', use_last_error=True)
 ntdll = ctypes.WinDLL('ntdll')
 kernel32.CreateJobObjectW.restype = wt.HANDLE
 kernel32.GetCurrentThread.restype = wt.HANDLE
@@ -138,7 +137,7 @@ def pick_cpus(count):
     return game, cores[-1] & -cores[-1]
 
 
-JOB_LIMIT_AFFINITY, JOB_KILL_ON_CLOSE = 0x10, 0x2000  # JOB_OBJECT_LIMIT_*
+JOB_KILL_ON_CLOSE = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
 EXTENDED_LIMITS = 9  # JOBOBJECTINFOCLASS
 
 
@@ -228,45 +227,42 @@ def start_guards(mask):
     return job, handles
 
 
-def prepare_player(build: Path):
-    """A real copy of the build, so runs never hold its files open while pipeline.py rebuilds it.
-    Refreshed when the build's GameAssembly.dll or globalgamemanagers changes."""
-    sources = [build / 'GameAssembly.dll', build / 'CrowCountry_Data' / 'globalgamemanagers']
-    if not all(s.exists() for s in sources):
-        sys.exit(f'No IL2CPP player in {build}: pipeline.py build --platform windows --backend il2cpp')
-    stamp = ' '.join(f'{s.stat().st_size}:{s.stat().st_mtime_ns}' for s in sources)
-    marker = COPY / 'vitalike-source.txt'
-    if marker.exists() and marker.read_text() == stamp:
-        return
-    if COPY.exists():
-        shutil.rmtree(COPY)
-    shutil.copytree(build, COPY)
-    marker.write_text(stamp)
+def slow_down(pid, cap, period_ms=DEFAULT_PERIOD_MS, cores=DEFAULT_CORES, guard=True):
+    """Slows a running player (run_player's on_start): <cores> processors after core 0, high
+    priority, and at a cap under 100 the duty cycle (cap percent of the wall time, busy guards between
+    slices). Returns (the Duty, a function that stops it and the guards), or None when the player
+    can't be opened."""
+    handle = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, pid)  # PROCESS_ALL_ACCESS
+    if not handle:
+        print(f'vitalike: cannot open the player ({pid})')
+        return None
+    handle = wt.HANDLE(handle)
+    game_mask, controller_mask = pick_cpus(cores)
+    kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(game_mask))
+    kernel32.SetPriorityClass(handle, 0x80)  # HIGH_PRIORITY_CLASS
+    slowed = cap < 100
+    guards = start_guards(game_mask) if guard and slowed else None
+    duty = Duty(handle, cap / 100, period_ms / 1000, controller_mask, guards[1] if guards else ())
+    if slowed:
+        duty.start()
 
+    def stop():
+        duty.stop.set()
+        if duty.is_alive():
+            duty.join(2)
+        if guards is not None:
+            kernel32.TerminateJobObject(guards[0], 0)
+            kernel32.CloseHandle(guards[0])
 
-def offscreen(pid):
-    """Moves the player's window past the right edge of the desktop, so the cursor never hovers it."""
-    found = []
-    callback_type = ctypes.WINFUNCTYPE(wt.BOOL, wt.HWND, wt.LPARAM)
-
-    def callback(hwnd, _):
-        owner = wt.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
-        if owner.value == pid and user32.IsWindowVisible(hwnd):
-            found.append(hwnd)
-        return True
-
-    deadline = time.time() + WINDOW_SECONDS
-    while time.time() < deadline and not found:
-        user32.EnumWindows(callback_type(callback), 0)
-        time.sleep(0.5)
-    right = user32.GetSystemMetrics(76) + user32.GetSystemMetrics(78)  # SM_XVIRTUALSCREEN + SM_CXVIRTUALSCREEN
-    for hwnd in found:
-        user32.SetWindowPos(hwnd, 0, right + 200, 0, 0, 0, 0x0001 | 0x0004 | 0x0010)  # NOSIZE|NOZORDER|NOACTIVATE
+    return duty, stop
 
 
 def launch(args, flags):
-    prepare_player(args.build.resolve())
+    import run_player
+
+    exe = run_player.player_copy(
+        args.build.resolve(), COPY, link=False, sources=['GameAssembly.dll', 'CrowCountry_Data/globalgamemanagers']
+    )
     out = (OUT / args.tag).resolve()
     out.mkdir(parents=True, exist_ok=True)
     for stale in out.glob('*'):
@@ -276,58 +272,26 @@ def launch(args, flags):
         flags += ['-crow-quit-after', '120']
     if '-crow-heartbeat' not in flags:
         flags += ['-crow-heartbeat', '5']
-    command = [
-        str(COPY / 'CrowCountry.exe'),
-        '-screen-fullscreen',
-        '0',
-        '-screen-width',
-        '960',
-        '-screen-height',
-        '544',
-        '-logFile',
-        '-',
-        '-crow-no-vsync',
-        '-crow-windowed',
-        '-crow-mute',
-        *flags,
-    ]
-    mode = 'none' if args.cap >= 100 else 'duty'
-    game_mask, controller_mask = pick_cpus(args.cores)
+    flags = ['-crow-no-vsync', *flags]
+    game_mask, _ = pick_cpus(args.cores)
     (out / 'vitalike.txt').write_text(
         f'vitalike cap {args.cap}% period {args.period} ms cores {args.cores} (mask {game_mask:#x}) '
-        f'guard {args.guard}\nargs {" ".join(command[1:])}\n'
+        f'guard {args.guard}\nargs {" ".join(flags)} (through run_player.py)\n'
     )
-    job = job_object(JOB_LIMIT_AFFINITY | JOB_KILL_ON_CLOSE, game_mask)
-    guards = start_guards(game_mask) if args.guard and mode == 'duty' else None
-    log = (out / 'player.log').open('w', encoding='utf-8', errors='replace')
-    process = subprocess.Popen(command, cwd=COPY, stdout=log, stderr=subprocess.STDOUT, creationflags=0x4)
-    handle = wt.HANDLE(int(process._handle))
-    duty = None
+    duties = []
+
+    def on_start(pid):
+        slowed = slow_down(pid, args.cap, args.period, args.cores, args.guard)
+        if slowed is None:
+            return None
+        duties.append(slowed[0])
+        return slowed[1]
+
     started = time.time()
-    try:
-        check(kernel32.AssignProcessToJobObject(job, handle), 'AssignProcessToJobObject')
-        check(kernel32.SetPriorityClass(handle, 0x80), 'SetPriorityClass')  # HIGH_PRIORITY_CLASS
-        if mode == 'duty':
-            duty = Duty(handle, args.cap / 100, args.period / 1000, controller_mask, guards[1] if guards else ())
-            duty.start()
-        else:
-            ntdll.NtResumeProcess(handle)
-        offscreen(process.pid)
-        process.wait(timeout=args.timeout)
-    except subprocess.TimeoutExpired:
-        print(f'timed out after {args.timeout} s')
-    finally:
-        if duty is not None:
-            duty.stop.set()
-            duty.join(2)
-        process.kill()
-        process.wait()
-        log.close()
-        kernel32.CloseHandle(job)
-        if guards is not None:
-            kernel32.TerminateJobObject(guards[0], 0)
-            kernel32.CloseHandle(guards[0])
-    note = f'run {time.time() - started:.0f} s' + (f'; {duty.report()}' if duty is not None else '')
+    code = run_player.run(exe, out / 'player.log', flags, timeout=args.timeout, on_start=on_start)
+    note = f'run {time.time() - started:.0f} s, exit {code}'
+    if duties and args.cap < 100:
+        note += f'; {duties[0].report()}'
     with open(out / 'vitalike.txt', 'a') as file:
         file.write(note + '\n')
     print(note)
@@ -352,11 +316,11 @@ def summary(tag):
         return f'{tag}: one heartbeat in {scene}'
 
     def mean(key):
-        return sum(float(b[key].replace(',', '.')) for b in last) / len(last)
+        return sum(number(b[key]) for b in last) / len(last)
 
     return (
         f'{tag}: {scene}, {len(last)} heartbeats: fps {mean("fps"):.1f}, ms {mean("ms"):.1f}, '
-        f'worst {max(float(b["worst"].replace(",", ".")) for b in last):.0f}, gc {mean("gc"):.2f} per beat, '
+        f'worst {max(number(b["worst"]) for b in last):.0f}, gc {mean("gc"):.2f} per beat, '
         f'visible {mean("visible"):.0f}'
     )
 
@@ -366,13 +330,12 @@ def main():
         for tag in sys.argv[2:]:
             print(summary(tag))
         return
-    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
-    own, flags = sys.argv[1:split], sys.argv[split + 1 :]
+    own, flags = split_at_dashes(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('tag')
     parser.add_argument('--cap', type=float, default=DEFAULT_CAP, help='percent of the wall time the player runs')
     parser.add_argument('--period', type=float, default=DEFAULT_PERIOD_MS, help='slice length in ms')
-    parser.add_argument('--cores', type=int, default=3)
+    parser.add_argument('--cores', type=int, default=DEFAULT_CORES)
     parser.add_argument('--timeout', type=float, default=900)
     parser.add_argument('--build', type=Path, default=BUILD)
     parser.add_argument('--no-guard', dest='guard', action='store_false')

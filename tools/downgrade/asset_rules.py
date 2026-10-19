@@ -1172,57 +1172,11 @@ def i2_font_overlay(exported: Path, overlay: dict, excluded: set):
     return moved, gone
 
 
-# ProBuilder's ProBuilderMesh keeps its own copy of the mesh it built (positions, faces, UVs, shared
-# vertices). The player prefab, which is loaded all the time, has 839 of them (the scenes none): 10 MB
-# of the Windows player's managed heap at the title, the second largest holder after PlayMaker. They
-# can't be left out: in the export, 842 of the prefab's MeshFilters have no mesh, because ProBuilder
-# builds those meshes at run time from its own copy. Left out on the PS Vita, Mara's body and the
-# prefab's other ProBuilder parts drew nothing (only her pistol, a plain mesh, showed). The PS Vita
-# build now builds those meshes with ProBuilder's own code as it writes the player's scene, and drops
-# the components there (unity/ProBuilderMeshes.cs); this rule stays off.
-PROBUILDER_MESH_SCRIPT = script_file_id('UnityEngine.ProBuilder', 'ProBuilderMesh')
-PLATFORM_STRIPPED_SCRIPTS: dict[str, set[int]] = {}
-
-
-def stripped_component_overlay(exported: Path, overlay: dict, platform: str):
-    scripts = PLATFORM_STRIPPED_SCRIPTS.get(platform)
-    if not scripts:
-        return {}
-    keys = [f'm_Script: {{fileID: {script},'.encode() for script in sorted(scripts)]
-    has = scan(
-        f'stripped-components-{platform}',
-        exported / 'Assets',
-        lambda relative: relative.suffix in ('.prefab', '.unity'),
-        lambda path: any(key in path.read_bytes() for key in keys),
-        version=' '.join(map(str, sorted(scripts))),
-    )
-    document = re.compile(r'^--- !u!114 &(-?\d+)[^\n]*\n(?:(?!--- !u!).*\n?)*', re.M)
-    result, removed = {}, 0
-    for found, named in has.items():
-        relative = Path('Assets') / found
-        if relative in overlay:
-            named = any(key in overlay[relative] for key in keys)
-        if not named:
-            continue
-        text = current_text(exported, overlay, relative)
-        ids = set()
-
-        def drop(m, ids=ids):
-            script = re.search(r'^  m_Script: \{fileID: (-?\d+),', m[0], re.M)
-            if script and int(script[1]) in scripts:
-                ids.add(m[1])
-                return ''
-            return m[0]
-
-        text = document.sub(drop, text)
-        text = re.sub(
-            r'^  - component: \{fileID: (-?\d+)\}\n', lambda m, ids=ids: '' if m[1] in ids else m[0], text, flags=re.M
-        )
-        removed += len(ids)
-        result[relative] = text.encode('utf-8')
-    log(f'{platform}: {removed} ProBuilderMesh components left out of {len(result)} prefabs and scenes')
-    return result
-
+# ProBuilder's ProBuilderMesh components (839 in the player prefab, 10 MB of managed heap) can't be
+# left out of the project: in the export, 842 of the prefab's MeshFilters have no mesh, because
+# ProBuilder builds those meshes at run time from its own copy. The PS Vita build builds them with
+# ProBuilder's own code as it writes the player's scene and drops the components there
+# (unity/ProBuilderMeshes.cs).
 
 IMPORTED_BINARY = {'.png', '.ogg', '.wav', '.mp3', '.ttf', '.otf', '.mp4', '.webm', '.txt', '.bytes', '.json'}
 # A native asset's m_Name is in its first lines; reading this much of each file finds it.
@@ -1598,7 +1552,8 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     # CrowVita/Post, the camera effect's filters in three passes (compat/CamEffect.cs; Shader.Find finds it).
     post = VITA_SHADERS / 'CrowPost.shader'
     result[VITA_LIT_FOLDER / post.name] = post.read_bytes()
-    result[meta_of(VITA_LIT_FOLDER / post.name)] = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter').encode()
+    post_meta = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter')
+    result[meta_of(VITA_LIT_FOLDER / post.name)] = post_meta.encode()
     for index, keywords in enumerate(sorted(sets)):
         name = f'CrowLitVariant{index}'
         relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'

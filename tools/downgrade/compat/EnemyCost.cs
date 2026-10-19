@@ -17,10 +17,6 @@ using UnityEngine.SceneManagement;
 //                     while her own sources, Dynamic, moved per frame, and the frames with no step or two
 //                     gave her own sounds a Doppler shift (a 1 kHz tone on her body: steps of up to 1.9%
 //                     as she moved, 0 with both per step); with both per frame they move together again.
-//   -crow-enemy-readable
-//                     the enemies' MeshCombineStudio combiners keep their combined meshes readable
-//                     (makeMeshesUnreadable off, set as each scene loads, before they combine), so the
-//                     enemies' part renderers can be merged across materials (emerge=)
 //   -crow-corpses off|game
 //                     a dead enemy's scripts off once it lies still (off; game, the default, keeps them:
 //                     on the PS Vita it saved ~0.3 ms once the Blob trail's exceptions were gone). A corpse keeps its FSMs running for the rest of the area (a dead Grinner 11:
@@ -36,54 +32,34 @@ using UnityEngine.SceneManagement;
 // Experiments, as -crow-ab / -crow-cycle / -crow-fight-cycle changes (Quality.Change), each reversible
 // (they act on the enemies alive when applied; for measurements, not play):
 //   eaudio=off|on     the enemies' enabled AudioSources off, and back on
-//   evel=dynamic|auto the enemies' AudioSources' velocityUpdateMode
 //   erender=off|on    the enemies' enabled renderers off, and back on
 //   etrig=off|on      the enemies' enabled trigger colliders off, and back on
 //   ekin=on|off       the enemies' non-kinematic root bodies kinematic, and back (they stop moving)
 //   eprobes=off|on    the enemies' renderers' light probe use off (and back to what it was)
 //   erefl=off|on      the same for reflection probes (both log the scene's probe counts)
-//   etrail=off|on     the Blobs' trails off (BlobTrailSpawn off, its pieces hidden), and back on: what
-//                     the trails cost (a visible change: for measurements only)
-//   edebris=out|in    each enemy's topmost inactive subtrees (death debris, mostly) moved to a root of
-//                     their own, and back to their places: whether the physics step's pose writes cost by
-//                     hierarchy size (for measurements with no deaths: the death code expects them in place)
-//   emerge=on|off     the enabled mesh renderers of awake enemies that share a parent, one renderer
-//                     with a submesh each (readable meshes), the originals off; and back (what fewer
-//                     renderers would save: the game's later switches of single parts aren't followed)
-//   einertia=fixed|auto the enemies' root bodies' centre of mass and inertia set to what they are now
-//                     (Unity then stops working them out again when a child collider moves), and back
-//   eanimcol=off|on   the enemies' enabled colliders below their root object off, and back (measurement)
 //   edebrissleep=on|off every dynamic body but the player's, the live enemies' roots and the bullets (the
 //                     death debris: Grinner spikes and shards, Blob chunks, Spindle limbs) gets a sleep
 //                     threshold of 0.5 instead of its own, so a settled piece sleeps; and back
 //   eslice=on|off     awake enemies' FSMs (but Pause/Cull, spawn/kill, the damage FSMs and any with delayed
 //                     events) update every other frame, half the enemies on even frames, half on odd
 //                     (Fsm.ManualUpdate; no time correction yet: a measurement of what slicing saves)
-//   eculled=off|on    the behaviours of enemies paused beyond the camera's reach (their Pause/Cull
-//                     FSM not "visible") off, but that FSM and spawn/kill, and back on
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
     public static class EnemyCost
     {
-        static bool dynamicVelocity, stopCorpses, readable;
+        static bool dynamicVelocity, stopCorpses;
         static float scanAt = -1f, corpseScanAt = -1f, nextCorpseCheck;
 
         // From Diag.Install (every player, flags or not).
         internal static void Install(string[] args)
         {
-            EnemyChores.Install(args);
-            int flag = Array.IndexOf(args, "-crow-audio-velocity");
-            string mode = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
+            string mode = CrowFlags.Value(args, "-crow-audio-velocity");
             dynamicVelocity = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "dynamic";
-            flag = Array.IndexOf(args, "-crow-corpses");
-            mode = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
-            stopCorpses = mode == "off";
-            readable = Array.IndexOf(args, "-crow-enemy-readable") >= 0;
-            if (!dynamicVelocity && !stopCorpses && !readable) return;
+            stopCorpses = CrowFlags.Value(args, "-crow-corpses") == "off";
+            if (!dynamicVelocity && !stopCorpses) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
-                if (readable) KeepReadable(scene);
                 scanAt = Time.realtimeSinceStartup + 1f;
                 corpseScanAt = Time.realtimeSinceStartup + 3f;
             };
@@ -125,26 +101,6 @@ namespace CrowCompat
                         count++;
                     }
             return count;
-        }
-
-        // The enemies' combiners in a scene just loaded: their output readable.
-        static void KeepReadable(Scene scene)
-        {
-            Type combiner = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
-            System.Reflection.FieldInfo unreadable = combiner == null ? null : combiner.GetField("makeMeshesUnreadable");
-            if (unreadable == null) return;
-            int count = 0;
-            foreach (GameObject root in scene.GetRootGameObjects())
-                foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
-                {
-                    if (!body.name.StartsWith("Enemy ", StringComparison.Ordinal)) continue;
-                    foreach (Component component in body.GetComponentsInChildren(combiner, true))
-                    {
-                        unreadable.SetValue(component, false);
-                        count++;
-                    }
-                }
-            if (count > 0) Debug.Log("CROW_ENEMY " + count + " enemy combiners keep their meshes readable");
         }
 
         // A new copy of an enemy (Fight's stress mode): the same defaults.
@@ -297,22 +253,11 @@ namespace CrowCompat
         // Quality.Change's last resort: true when the key is one of these.
         internal static bool Change(string key, string value)
         {
-            if (EnemyChores.Change(key, value)) return true;
             if (EnemyRebuild.Change(key, value)) return true;  // eatlas=, eflatten=, edebrisout= (EnemyRebuild.cs)
             switch (key)
             {
                 case "eaudio":
                     Toggle(key, value, enemy => enemy.GetComponentsInChildren<AudioSource>(false));
-                    return true;
-                case "evel":
-                    int count = 0;
-                    foreach (GameObject enemy in Enemies())
-                        foreach (AudioSource source in enemy.GetComponentsInChildren<AudioSource>(true))
-                        {
-                            source.velocityUpdateMode = value == "dynamic" ? AudioVelocityUpdateMode.Dynamic : AudioVelocityUpdateMode.Auto;
-                            count++;
-                        }
-                    Debug.Log("CROW_ENEMY evel=" + value + " on " + count + " sources");
                     return true;
                 case "erender":
                     if (value == "off")
@@ -375,79 +320,6 @@ namespace CrowCompat
                 case "erefl":
                     Probes(key == "eprobes", value == "off");
                     return true;
-                case "etrail":
-                    if (value == "off")
-                    {
-                        foreach (GameObject enemy in Enemies())
-                            foreach (MonoBehaviour behaviour in enemy.GetComponentsInChildren<MonoBehaviour>(false))
-                            {
-                                if (behaviour == null || !behaviour.enabled) continue;
-                                string name = behaviour.GetType().Name;
-                                if (name == "BlobTrailSpawn")
-                                {
-                                    behaviour.enabled = false;
-                                    trailOff.Add(behaviour);
-                                }
-                                else if (name == "BlobTrailPiece" && behaviour.gameObject.activeSelf)
-                                {
-                                    behaviour.gameObject.SetActive(false);
-                                    piecesOff.Add(behaviour.gameObject);
-                                }
-                            }
-                    }
-                    else
-                    {
-                        foreach (Behaviour behaviour in trailOff)
-                            if (behaviour != null) behaviour.enabled = true;
-                        trailOff.Clear();
-                        piecesOff.Clear();  // they come back as the trails spawn them
-                    }
-                    Debug.Log("CROW_ENEMY etrail=" + value + " (" + trailOff.Count + " trails, " + piecesOff.Count + " pieces off)");
-                    return true;
-                case "edebris":
-                    Debris(value == "out");
-                    return true;
-                case "emerge":
-                    MergeExperiment(value == "on");
-                    return true;
-                case "einertia":
-                    foreach (GameObject enemy in Enemies())
-                    {
-                        var body = enemy.GetComponent<Rigidbody>();
-                        if (body == null || !enemy.activeInHierarchy) continue;
-                        if (value == "fixed")
-                        {
-                            body.centerOfMass = body.centerOfMass;
-                            body.inertiaTensor = body.inertiaTensor;
-                            body.inertiaTensorRotation = body.inertiaTensorRotation;
-                        }
-                        else
-                        {
-                            body.ResetCenterOfMass();
-                            body.ResetInertiaTensor();
-                        }
-                    }
-                    Debug.Log("CROW_ENEMY einertia=" + value);
-                    return true;
-                case "eanimcol":
-                    if (value == "off")
-                    {
-                        foreach (GameObject enemy in Enemies())
-                            foreach (Collider collider in enemy.GetComponentsInChildren<Collider>(false))
-                                if (collider.enabled && collider.gameObject != enemy)
-                                {
-                                    collider.enabled = false;
-                                    animOff.Add(collider);
-                                }
-                    }
-                    else
-                    {
-                        foreach (Collider collider in animOff)
-                            if (collider != null) collider.enabled = true;
-                        animOff.Clear();
-                    }
-                    Debug.Log("CROW_ENEMY eanimcol=" + value + " (" + animOff.Count + " off)");
-                    return true;
                 case "edebrissleep":
                     if (value == "on")
                     {
@@ -475,9 +347,6 @@ namespace CrowCompat
                         Canvas.willRenderCanvases += SliceFrame;
                     }
                     Debug.Log("CROW_ENEMY eslice=" + value);
-                    return true;
-                case "eculled":
-                    Toggle(key, value, Culled);
                     return true;
             }
             return false;
@@ -564,130 +433,7 @@ namespace CrowCompat
             if (name.StartsWith("Enemy ", StringComparison.Ordinal) || name.EndsWith("bullet", StringComparison.OrdinalIgnoreCase)) return false;
             return body.transform.root.name.IndexOf("CharacterCameraPrefab", StringComparison.Ordinal) < 0;
         }
-        static readonly List<Collider> animOff = new List<Collider>();
-        static readonly List<GameObject> mergedObjects = new List<GameObject>();
-        static readonly List<Renderer> mergedSources = new List<Renderer>();
 
-        static void MergeExperiment(bool on)
-        {
-            if (!on)
-            {
-                foreach (GameObject merged in mergedObjects)
-                    if (merged != null) UnityEngine.Object.Destroy(merged);
-                foreach (Renderer source in mergedSources)
-                    if (source != null) source.enabled = true;
-                Debug.Log("CROW_ENEMY emerge=off: " + mergedObjects.Count + " merged renderers gone, " + mergedSources.Count + " back");
-                mergedObjects.Clear();
-                mergedSources.Clear();
-                return;
-            }
-            int groups = 0, sources = 0, seen = 0, unreadable = 0;
-            foreach (GameObject enemy in Enemies())
-            {
-                if (!enemy.activeInHierarchy) continue;
-                var byParent = new Dictionary<Transform, List<MeshRenderer>>();
-                foreach (MeshRenderer renderer in enemy.GetComponentsInChildren<MeshRenderer>(false))
-                {
-                    if (!renderer.enabled || renderer.transform.parent == null) continue;
-                    var filter = renderer.GetComponent<MeshFilter>();
-                    seen++;
-                    if (filter == null || filter.sharedMesh == null) continue;
-                    if (!filter.sharedMesh.isReadable)
-                    {
-                        unreadable++;
-                        continue;
-                    }
-                    if (filter.sharedMesh.subMeshCount != 1) continue;
-                    List<MeshRenderer> list;
-                    if (!byParent.TryGetValue(renderer.transform.parent, out list)) byParent[renderer.transform.parent] = list = new List<MeshRenderer>();
-                    list.Add(renderer);
-                }
-                foreach (KeyValuePair<Transform, List<MeshRenderer>> pair in byParent)
-                {
-                    if (pair.Value.Count < 2) continue;
-                    var instances = new List<CombineInstance>();
-                    var materials = new List<Material>();
-                    int vertices = 0;
-                    foreach (MeshRenderer renderer in pair.Value)
-                    {
-                        Mesh mesh = renderer.GetComponent<MeshFilter>().sharedMesh;
-                        if (vertices + mesh.vertexCount > 60000) break;
-                        vertices += mesh.vertexCount;
-                        instances.Add(new CombineInstance { mesh = mesh, transform = pair.Key.worldToLocalMatrix * renderer.transform.localToWorldMatrix });
-                        materials.Add(renderer.sharedMaterial);
-                    }
-                    var combined = new Mesh { name = "CrowEnemyMerge" };
-                    combined.CombineMeshes(instances.ToArray(), false, true);
-                    var merged = new GameObject("CrowEnemyMerge");
-                    merged.layer = pair.Value[0].gameObject.layer;
-                    merged.transform.SetParent(pair.Key, false);
-                    merged.AddComponent<MeshFilter>().sharedMesh = combined;
-                    var mergedRenderer = merged.AddComponent<MeshRenderer>();
-                    mergedRenderer.sharedMaterials = materials.ToArray();
-                    mergedRenderer.shadowCastingMode = pair.Value[0].shadowCastingMode;
-                    mergedRenderer.receiveShadows = pair.Value[0].receiveShadows;
-                    mergedObjects.Add(merged);
-                    for (int i = 0; i < instances.Count; i++)
-                    {
-                        pair.Value[i].enabled = false;
-                        mergedSources.Add(pair.Value[i]);
-                    }
-                    groups++;
-                    sources += instances.Count;
-                }
-            }
-            Debug.Log("CROW_ENEMY emerge=on: " + sources + " renderers in " + groups + " merged, of " + seen + " (" + unreadable + " unreadable)");
-        }
-
-        class Moved
-        {
-            public Transform Part, Parent;
-            public int Sibling;
-            public Vector3 Position, Scale;
-            public Quaternion Rotation;
-        }
-
-        static readonly List<Moved> moved = new List<Moved>();
-        static Transform debrisRoot;
-
-        static void Debris(bool takeOut)
-        {
-            int transforms = 0;
-            if (takeOut)
-            {
-                if (debrisRoot == null) debrisRoot = new GameObject("CrowDebrisOut").transform;
-                foreach (GameObject enemy in Enemies())
-                {
-                    if (!enemy.activeInHierarchy) continue;
-                    var tops = new List<Transform>();
-                    foreach (Transform t in enemy.GetComponentsInChildren<Transform>(true))
-                        if (!t.gameObject.activeSelf && t.parent != null && t.parent.gameObject.activeInHierarchy) tops.Add(t);
-                    foreach (Transform t in tops)
-                    {
-                        transforms += t.GetComponentsInChildren<Transform>(true).Length;
-                        moved.Add(new Moved { Part = t, Parent = t.parent, Sibling = t.GetSiblingIndex(), Position = t.localPosition, Rotation = t.localRotation, Scale = t.localScale });
-                        t.SetParent(debrisRoot, true);
-                    }
-                }
-            }
-            else
-            {
-                foreach (Moved m in moved)
-                {
-                    if (m.Part == null || m.Parent == null) continue;
-                    m.Part.SetParent(m.Parent, false);
-                    m.Part.SetSiblingIndex(m.Sibling);
-                    m.Part.localPosition = m.Position;
-                    m.Part.localRotation = m.Rotation;
-                    m.Part.localScale = m.Scale;
-                    transforms++;
-                }
-                moved.Clear();
-            }
-            Debug.Log("CROW_ENEMY edebris=" + (takeOut ? "out: " + moved.Count + " subtrees, " + transforms + " transforms" : "in: " + transforms + " subtrees"));
-        }
-        static readonly List<Behaviour> trailOff = new List<Behaviour>();
-        static readonly List<GameObject> piecesOff = new List<GameObject>();
         static readonly Dictionary<Renderer, int> probeUsage = new Dictionary<Renderer, int>(), reflectionUsage = new Dictionary<Renderer, int>();
 
         static void Probes(bool light, bool off)
@@ -721,31 +467,6 @@ namespace CrowCompat
             LightProbes probes = LightmapSettings.lightProbes;
             Debug.Log("CROW_ENEMY " + (light ? "eprobes" : "erefl") + "=" + (off ? "off" : "on") + " on " + changed + " renderers; light probes in the scene: " +
                       (probes == null ? 0 : probes.count) + ", reflection probes: " + UnityEngine.Object.FindObjectsOfType<ReflectionProbe>().Length);
-        }
-
-        // An enemy paused out of reach: its Pause/Cull FSM's state isn't "visible" ("not visible",
-        // "paused"; "KO" is a dead one, left alone). Its behaviours but that FSM and spawn/kill's.
-        static Behaviour[] Culled(GameObject enemy)
-        {
-            Type fsmType = Type.GetType("PlayMakerFSM, PlayMaker");
-            var cull = new List<Behaviour>();
-            foreach (Behaviour fsm in enemy.GetComponentsInChildren(fsmType, false))
-            {
-                string owner = fsm.gameObject.name;
-                if (owner != "Pause/Cull" && owner != "Pause/Cull?") continue;
-                string state = fsmType.GetProperty("ActiveStateName").GetValue(fsm, null) as string;
-                if (state == "visible" || state == "KO") return new Behaviour[0];
-                cull.Add(fsm);
-            }
-            if (cull.Count == 0) return new Behaviour[0];
-            var off = new List<Behaviour>();
-            foreach (MonoBehaviour behaviour in enemy.GetComponentsInChildren<MonoBehaviour>(false))
-            {
-                string owner = behaviour.gameObject.name;
-                if (owner == "Pause/Cull" || owner == "Pause/Cull?" || owner == "spawn/kill") continue;
-                off.Add(behaviour);
-            }
-            return off.ToArray();
         }
 
         static void Toggle(string key, string value, Func<GameObject, Behaviour[]> find)

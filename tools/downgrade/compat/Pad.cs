@@ -39,8 +39,6 @@ using UnityEngine.SceneManagement;
 //                                  button, down, up, negative button, negative down and up, axis and raw axis
 //                                  and the any-button queries are compared (CROW_PAD_DIFF with the pad's raw
 //                                  input, the first 300; CROW_PAD compare every 10 s)
-//   -crow-pad-stick 2d|axial       (padstick=) the sticks' dead zone: 2d, Rewired's 2D axes (radial, the
-//                                  default); axial, each axis on its own (a test of which Rewired applies)
 //   -crow-pad-press "<t>:<inputs>[:<s>];..."  synthetic input for the reader (Windows tests; on the PS Vita
 //                                  vitacompanion's press reaches Rewired and the reader alike): t seconds after
 //                                  the start (or after -crow-pad-press-from <scene> first loads), held for s
@@ -57,7 +55,7 @@ namespace CrowCompat
     {
         const int Rewired = 0, Reader = 1, Compare = 2;
         static int mode;
-        static bool axial, log;
+        static bool log;
         // Read by the patched code: Rewired's FixedUpdate and LateUpdate return at once while it is set.
         public static bool Serving;
 
@@ -125,11 +123,10 @@ namespace CrowCompat
         // From Diag.Install (every player).
         internal static void Install(string[] args)
         {
-            string value = Perf.Value(args, "-crow-pad");
+            string value = CrowFlags.Value(args, "-crow-pad");
             Set(value ?? (Application.platform == RuntimePlatform.PSP2 ? "reader" : "rewired"));
-            axial = Perf.Value(args, "-crow-pad-stick") == "axial";
             log = Array.IndexOf(args, "-crow-pad-log") >= 0;
-            Presses.Install(Perf.Value(args, "-crow-pad-press"), Perf.Value(args, "-crow-pad-press-from"), Perf.Value(args, "-crow-pad-shots"));
+            Presses.Install(CrowFlags.Value(args, "-crow-pad-press"), CrowFlags.Value(args, "-crow-pad-press-from"), CrowFlags.Value(args, "-crow-pad-shots"));
             if (log || mode != (Application.platform == RuntimePlatform.PSP2 ? Reader : Rewired)) Debug.Log("CROW_PAD mode=" + Describe());
         }
 
@@ -147,14 +144,13 @@ namespace CrowCompat
 
         static string Describe()
         {
-            return (mode == Reader ? "reader" : mode == Compare ? "compare" : "rewired") + (axial ? " stick=axial" : "");
+            return mode == Reader ? "reader" : mode == Compare ? "compare" : "rewired";
         }
 
         // A -crow-cycle / -crow-fight-cycle / -crow-ab change; false when it isn't one of these.
         internal static bool Change(string key, string value)
         {
             if (key == "pad") Set(value);
-            else if (key == "padstick") axial = value == "axial";
             else return false;
             Debug.Log("CROW_PAD " + key + "=" + value + ": mode=" + Describe());
             return true;
@@ -367,18 +363,12 @@ namespace CrowCompat
             f[side + 2] |= !on && was;
         }
 
-        // A stick's two axes: Rewired's Axis2DCalibration.GetCalibrated2DValue (radial dead zone), or each
-        // axis's AxisCalibration with its own dead zone (-crow-pad-stick axial).
+        // A stick's two axes: Rewired's Axis2DCalibration.GetCalibrated2DValue (radial dead zone; a dead zone
+        // per axis, tried on 19 Oct, isn't what Rewired applies).
         static void Stick(int x, int y)
         {
             Calibration cx = calibration[x], cy = calibration[y];
             float rawX = raw[StickAxes[x]], rawY = raw[StickAxes[y]];
-            if (axial)
-            {
-                element[x] = Calibrated(cx, rawX, cx.DeadZone, true, true);
-                element[y] = Calibrated(cy, rawY, cy.DeadZone, true, true);
-                return;
-            }
             Vector2 v;
             if (deadZone2D == 2 || ApproximatelyZero(cx.DeadZone))
             {

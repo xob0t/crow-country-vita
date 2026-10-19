@@ -239,11 +239,6 @@ def signer_is_unity(status, subject):
     )
 
 
-def signer_is_microsoft(status, subject):
-    """Get-AuthenticodeSignature's Status and SignerCertificate.Subject of a Microsoft file."""
-    return status == 'Valid' and re.search(r'(^|,\s*)O=Microsoft Corporation\s*(,|$)', subject, re.I) is not None
-
-
 def license_log_problem(text, returncode, platform):
     """Why a short batch-mode run of the editor failed, or None if it worked."""
     for pattern in (

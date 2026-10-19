@@ -26,7 +26,7 @@ partial class DowngradeAssemblies
 {
     static FieldReference TrimField(ModuleDefinition module, string name)
     {
-        return module.ImportReference(compat["CrowCompat.FsmTrim"].Fields.Single(f => f.Name == name));
+        return CompatField(module, "FsmTrim", name);
     }
 
     static FieldDefinition InternalField(TypeDefinition type, string name)

@@ -11,21 +11,20 @@ dependencies = [
     "lz4>=4.4.5",
     "numpy>=2.5.3",
     "pillow>=12.3.0",
+    "pycryptodome>=3.24.0",
     # vita.py crashes --pull reads the dump with vita-parse-core, which imports elftools.common.py3compat;
     # later releases removed it.
-    "pycryptodome>=3.24.0",
     "pyelftools==0.29",
-    # Downloads check TLS with Windows' certificate store (common.py): a fresh Windows fetches root
-    # certificates on first use, so Python's own copy of the store lacks some (archive.org's).
     "pyyaml>=6.0.3",
     "quicktex>=0.3.1",
     "rich>=15.0.0",
     "soundfile>=0.14.0",
+    # Downloads check TLS with Windows' certificate store (common.py): a fresh Windows fetches root
+    # certificates on first use, so Python's own copy of the store lacks some (archive.org's).
     "truststore>=0.10",
     # The exported project's texture and atlas data; pinned to the version the rules were written against.
     "unitypy==1.25.3",
 ]
-# Not dependencies: tools/downgrade/mute_players.py runs with `uv run --with pycaw`.
 
 [tool.uv]
 package = false

@@ -36,8 +36,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            int flag = Array.IndexOf(args, "-crow-idle-audio");
-            string mode = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
+            string mode = CrowFlags.Value(args, "-crow-idle-audio");
             on = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "on";
             if (!on) return;
             log = args.Contains("-crow-idle-audio-log");

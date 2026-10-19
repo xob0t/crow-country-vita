@@ -31,7 +31,7 @@ using UnityEngine.SceneManagement;
 //   -crow-light-report <s>          every s seconds, the forward renderer's light passes as Unity
 //                                   assigns them, per light (CROW_LIGHTS, CROW_LIGHT; see LightReport)
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
-//                                   the changes (comma-separated: lights=vita, pixel=<n>,
+//                                   the changes (comma-separated: pixel=<n>,
 //                                   shadows=off|hard|all, distance=<m>, resolution=<0-3>, and
 //                                   Perf.cs's) and save <path>-b.png of the same moment; several sets
 //                                   split by '/' are applied in turn, -c.png, -d.png... after them
@@ -57,27 +57,22 @@ namespace CrowCompat
         public static void Install()
         {
             string[] args = ProbeFiles.Args;
-            float profile = Number(args, "-crow-loop-profile", -1);
+            float profile = CrowFlags.Number(args, "-crow-loop-profile", -1);
             if (profile > 0) LoopProfile.Install(profile);
-            float report = Number(args, "-crow-light-report", -1);
+            float report = CrowFlags.Number(args, "-crow-light-report", -1);
             if (report > 0) LightReport.Install(report);
-            LightRules.Install(args);
             Draws.Install(args);
             Perf.Install(args);
             VitaLit.Install(args);
-            int ab =Array.IndexOf(args, "-crow-ab");
-            if (ab >= 0 && ab + 3 < args.Length) AB.Install(Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3], Number(args, "-crow-ab-hold", 0f));
-            float census = Number(args, "-crow-census", -1);
-            int disable = Array.IndexOf(args, "-crow-disable");
-            int disableIn = Array.IndexOf(args, "-crow-disable-in");
-            if (census > 0 || disable >= 0)
-                Census.Install(census, disable >= 0 && disable + 1 < args.Length ? args[disable + 1] : null,
-                               disableIn >= 0 && disableIn + 1 < args.Length ? args[disableIn + 1] : null);
-            pixelLights = (int)Number(args, "-crow-pixel-lights", -1);
-            shadowResolution = (int)Number(args, "-crow-shadow-resolution", -1);
-            shadowDistance = Number(args, "-crow-shadow-distance", -1);
-            int index = Array.IndexOf(args, "-crow-shadows");
-            shadows = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            int ab = Array.IndexOf(args, "-crow-ab");
+            if (ab >= 0 && ab + 3 < args.Length) AB.Install(CrowFlags.Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3], CrowFlags.Number(args, "-crow-ab-hold", 0f));
+            float census = CrowFlags.Number(args, "-crow-census", -1);
+            if (census > 0 || CrowFlags.Has(args, "-crow-disable"))
+                Census.Install(census, CrowFlags.Value(args, "-crow-disable"), CrowFlags.Value(args, "-crow-disable-in"));
+            pixelLights = (int)CrowFlags.Number(args, "-crow-pixel-lights", -1);
+            shadowResolution = (int)CrowFlags.Number(args, "-crow-shadow-resolution", -1);
+            shadowDistance = CrowFlags.Number(args, "-crow-shadow-distance", -1);
+            shadows = CrowFlags.Value(args, "-crow-shadows");
             if (Application.platform == RuntimePlatform.PSP2)
             {
                 // The PS Vita's shadows: hard, Low resolution, 12 m, and (Draws.cs) only the player's
@@ -93,15 +88,16 @@ namespace CrowCompat
             SceneManager.sceneLoaded += (scene, mode) => Apply();
         }
 
-        internal static float Number(string[] args, string flag, float fallback)
+        // The modules' own change keys, asked in turn after Quality's: each takes the keys it knows and
+        // returns false for the others.
+        static readonly Func<string, string, bool>[] modules =
         {
-            int index = Array.IndexOf(args, flag);
-            float value;
-            return index >= 0 && index + 1 < args.Length &&
-                   float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
+            Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
+            FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, Pad.Change,
+            Clock.Change
+        };
 
-        // Applies a -crow-ab change list.
+        // Applies a change list (-crow-ab, -crow-cycle, -crow-fight-cycle).
         internal static void Change(string changes)
         {
             foreach (string change in changes.Split(','))
@@ -110,8 +106,7 @@ namespace CrowCompat
                 if (pair.Length != 2) continue;
                 float number;
                 float.TryParse(pair[1], NumberStyles.Float, CultureInfo.InvariantCulture, out number);
-                if (pair[0] == "lights" && pair[1] == "vita") LightRules.Enable();
-                else if (pair[0] == "lit") VitaLit.Set(pair[1]);
+                if (pair[0] == "lit") VitaLit.Set(pair[1]);
                 else if (pair[0] == "litkeys" || pair[0] == "litrange") VitaLit.SetLimits(pair[0], number);
                 else if (pair[0] == "litsoa") VitaLit.SetLimits(pair[0], pair[1] == "off" ? 0f : 1f);
                 else if (pair[0] == "pixel") pixelLights = (int)number;
@@ -119,12 +114,7 @@ namespace CrowCompat
                 else if (pair[0] == "distance") shadowDistance = number;
                 else if (pair[0] == "resolution") shadowResolution = (int)number;
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
-                else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1]) && !FixedStep.Change(pair[0], pair[1]) &&
-                         !FastPaths.Change(pair[0], pair[1]) && !Decor.Change(pair[0], pair[1]) && !SharedClosures.Change(pair[0], pair[1]) &&
-                         !FilterGate.Change(pair[0], pair[1]) && !Cuts.Change(pair[0], pair[1]) && !Audit.Change(pair[0], pair[1]) &&
-                         !CamEffect.Change(pair[0], pair[1]) && !FsmTrim.Change(pair[0], pair[1]) &&
-                         !Pad.Change(pair[0], pair[1]))
-                    Debug.Log("CROW_QUALITY unknown change " + change);
+                else if (!modules.Any(module => module(pair[0], pair[1]))) Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();
         }
@@ -137,70 +127,6 @@ namespace CrowCompat
             if (shadows == "off") QualitySettings.shadows = ShadowQuality.Disable;
             else if (shadows == "hard") QualitySettings.shadows = ShadowQuality.HardOnly;
             else if (shadows == "all") QualitySettings.shadows = ShadowQuality.All;
-        }
-    }
-
-    // Which lights the forward renderer may draw per pixel. A scene's second directional light is a
-    // dim fill (Driving Intro: 0.1 against the main light's 0.2), but as a directional light it
-    // outranks every point and spot light, so it takes one of the pixel light slots on every object
-    // it reaches and adds a full-size additive pass to each (138 of Driving Intro's 384). The rule
-    // draws it through the objects' spherical harmonics instead (LightRenderMode.ForceVertex): it
-    // demotes a directional light when a brighter one reaches every layer it reaches (so the UI's
-    // own light stays), and checks again every 2 s, since the game turns lights on and off. Not a
-    // default: on the PS Vita it saved 3.5 ms of 59 in Driving Intro, but the scene drew about a
-    // fifth darker (the fill light's share is not in the harmonics).
-    //   -crow-lights game|vita   game (the default) keeps every light as the scene has it; vita
-    //                            applies the rule
-    static class LightRules
-    {
-        static readonly Dictionary<Light, LightRenderMode> original = new Dictionary<Light, LightRenderMode>();
-        static float lastCheck = -10f;
-
-        public static void Install(string[] args)
-        {
-            int index = Array.IndexOf(args, "-crow-lights");
-            string value = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-            if (value == "vita") Enable();
-        }
-
-        static bool enabled;
-
-        public static void Enable()
-        {
-            if (enabled) return;
-            enabled = true;
-            SceneManager.sceneLoaded += (scene, mode) => lastCheck = -10f;
-            Application.onBeforeRender += Tick;
-            lastCheck = -10f;
-            Tick();
-            Debug.Log("CROW_QUALITY lights vita: secondary directional lights per vertex");
-        }
-
-        static float Score(Light light)
-        {
-            return light.intensity * (light.color.r * 0.3f + light.color.g * 0.59f + light.color.b * 0.11f);
-        }
-
-        static void Tick()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (now - lastCheck < 2f) return;
-            lastCheck = now;
-            var directional = UnityEngine.Object.FindObjectsOfType<Light>()
-                .Where(l => l.type == LightType.Directional && l.isActiveAndEnabled && l.intensity > 0f).ToList();
-            foreach (Light light in directional)
-            {
-                LightRenderMode mode;
-                if (!original.TryGetValue(light, out mode)) original[light] = mode = light.renderMode;
-                if (mode != LightRenderMode.Auto) continue;
-                float score = Score(light);
-                bool outranked = directional.Any(other => other != light && (other.cullingMask & light.cullingMask) == light.cullingMask &&
-                                                          (Score(other) > score || (Score(other) == score && other.GetInstanceID() < light.GetInstanceID())));
-                LightRenderMode wanted = outranked ? LightRenderMode.ForceVertex : LightRenderMode.Auto;
-                if (light.renderMode != wanted) light.renderMode = wanted;
-            }
-            if (original.Count > 256)
-                foreach (Light gone in original.Keys.Where(l => l == null).ToList()) original.Remove(gone);
         }
     }
 

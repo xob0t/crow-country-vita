@@ -136,23 +136,10 @@ namespace CrowCompat
         // Diag's -crow-scene when none is given.
         internal static string Scene { get { return mode == null ? null : area.Scene; } }
 
-        static string Value(string[] args, string flag)
-        {
-            int index = Array.IndexOf(args, flag);
-            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-        }
-
-        static float Number(string[] args, string flag, float fallback)
-        {
-            float value;
-            string text = Value(args, flag);
-            return text != null && float.TryParse(text, NumberStyles.Float, Inv, out value) ? value : fallback;
-        }
-
         // From Diag.Install.
         internal static void Install(string[] args)
         {
-            mode = Value(args, "-crow-fight");
+            mode = CrowFlags.Value(args, "-crow-fight");
             if (mode == null) return;
             if (mode != "real" && mode != "stress" && mode != "idle" && mode != "stand" && mode != "discover" && mode != "physics" && mode != "walk")
             {
@@ -160,38 +147,41 @@ namespace CrowCompat
                 mode = null;
                 return;
             }
-            string scene = Value(args, "-crow-fight-area") ?? Value(args, "-crow-scene") ?? "Station Square";
+            string scene = CrowFlags.Value(args, "-crow-fight-area") ?? CrowFlags.Value(args, "-crow-scene") ?? "Station Square";
             area = Areas.FirstOrDefault(a => a.Scene == scene) ?? new Area { Scene = scene };
             spot = area.Spot;
-            string spotText = Value(args, "-crow-fight-spot");
-            if (spotText != null)
-                spot = spotText.Split(',').Select(v => float.Parse(v, Inv)).ToArray();
-            extra = (int)Number(args, "-crow-fight-extra", extra);
-            poolSize = (int)Number(args, "-crow-fight-pool", poolSize);
-            seconds = Number(args, "-crow-fight-seconds", seconds);
-            window = Number(args, "-crow-fight-window", window);
-            settle = Number(args, "-crow-fight-settle", settle);
-            engage = Number(args, "-crow-fight-engage", engage);
-            fireEvery = Number(args, "-crow-fight-fire", fireEvery);
+            string spotText = CrowFlags.Value(args, "-crow-fight-spot");
+            if (spotText != null && (spot = Floats(spotText)) == null)
+            {
+                Debug.Log("CROW_FIGHT bad -crow-fight-spot " + spotText + ": the area's spot instead");
+                spot = area.Spot;
+            }
+            extra = (int)CrowFlags.Number(args, "-crow-fight-extra", extra);
+            poolSize = (int)CrowFlags.Number(args, "-crow-fight-pool", poolSize);
+            seconds = CrowFlags.Number(args, "-crow-fight-seconds", seconds);
+            window = CrowFlags.Number(args, "-crow-fight-window", window);
+            settle = CrowFlags.Number(args, "-crow-fight-settle", settle);
+            engage = CrowFlags.Number(args, "-crow-fight-engage", engage);
+            fireEvery = CrowFlags.Number(args, "-crow-fight-fire", fireEvery);
             if (Array.IndexOf(args, "-crow-fight-log") >= 0) shotLog = 40;
             dump = Array.IndexOf(args, "-crow-fight-dump") >= 0;
             fixedDump = Array.IndexOf(args, "-crow-fight-fixed") >= 0;
-            fsmDump = Value(args, "-crow-fight-fsm");
-            string cycle = Value(args, "-crow-fight-cycle");
+            fsmDump = CrowFlags.Value(args, "-crow-fight-fsm");
+            string cycle = CrowFlags.Value(args, "-crow-fight-cycle");
             if (cycle != null) cycleSets = cycle.Split('/');
-            killEvery = Number(args, "-crow-fight-kill", mode == "stress" ? 6f : 8f);
-            explosionKills = Value(args, "-crow-fight-kill-mode") == "explosion";
-            noAim = Value(args, "-crow-fight-aim") == "off";
-            extraGlobals = Value(args, "-crow-fight-globals");
-            string movesValue = Value(args, "-crow-fight-moves");
+            killEvery = CrowFlags.Number(args, "-crow-fight-kill", mode == "stress" ? 6f : 8f);
+            explosionKills = CrowFlags.Value(args, "-crow-fight-kill-mode") == "explosion";
+            noAim = CrowFlags.Value(args, "-crow-fight-aim") == "off";
+            extraGlobals = CrowFlags.Value(args, "-crow-fight-globals");
+            string movesValue = CrowFlags.Value(args, "-crow-fight-moves");
             if (movesValue != null)
                 foreach (string move in movesValue.Split(';'))
                 {
                     string[] parts = move.Split(':');
                     float at;
                     if (parts.Length != 2 || !float.TryParse(parts[0], NumberStyles.Float, Inv, out at)) continue;
-                    float[] place = parts[1].Split(',').Select(v => float.Parse(v, Inv)).ToArray();
-                    if (place.Length >= 4) moves.Add(new KeyValuePair<float, float[]>(at, place));
+                    float[] place = Floats(parts[1]);
+                    if (place != null && place.Length >= 4) moves.Add(new KeyValuePair<float, float[]>(at, place));
                 }
             if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
@@ -207,6 +197,16 @@ namespace CrowCompat
             };
             Debug.Log("CROW_FIGHT installed mode=" + mode + " area=" + area.Scene.Replace(' ', '_') + " seconds=" + F(seconds) +
                       " window=" + F(window) + " extra=" + extra + " fire=" + F(fireEvery));
+        }
+
+        // "x,y,z,..." as numbers, or null when one isn't a number.
+        static float[] Floats(string text)
+        {
+            string[] parts = text.Split(',');
+            var values = new float[parts.Length];
+            for (int i = 0; i < parts.Length; i++)
+                if (!float.TryParse(parts[i], NumberStyles.Float, Inv, out values[i])) return null;
+            return values;
         }
 
         // From Diag, just before it loads the area: the globals the area's FSMs read as they start.
@@ -437,7 +437,24 @@ namespace CrowCompat
             if (phase == Phase.Settle)
             {
                 if (now - phaseStart < settle) return;
-                if (!Setup()) return;
+                bool ready;
+                try
+                {
+                    ready = Setup();
+                }
+                catch (Exception exception)
+                {
+                    // Tried again each frame (the player may not be ready yet), logged once, and given
+                    // up after 20 s with the reason (fightbench.py reads it).
+                    if (setupFailedAt < 0f)
+                    {
+                        setupFailedAt = now;
+                        Debug.Log("CROW_FIGHT setup failed (trying again): " + exception);
+                    }
+                    if (now - setupFailedAt >= 20f) Fail("setup-" + exception.GetType().Name);
+                    return;
+                }
+                if (!ready) return;
                 if (mode == "physics")
                 {
                     LoopProfile.FixedHook = PhysicsTest;
@@ -1331,7 +1348,6 @@ namespace CrowCompat
                 rigidbody.position = copy.transform.position;
                 rigidbody.velocity = Vector3.zero;
             }
-            EnemySplit.Split(copy.transform);
             Enemy tracked = Track(copy, true);
             enemies.Add(tracked);
             placed++;
@@ -1477,7 +1493,7 @@ namespace CrowCompat
         static string extraGlobals;  // -crow-fight-globals "name=value;...": more globals before the load
         static bool noAim;  // -crow-fight-aim off: no aiming and no shots (the pad free for menus)
         static GameObject fakeBullet;
-        static Func<string> damageState;
+        static float setupFailedAt = -1f;  // the first Setup exception
 
         // The death a bullet gives (no explosion: a Grinner falls, as when it's shot): health just above
         // the damage FSM's 0.01, its "the bullet" a stand-in at the enemy's middle (the headshot check

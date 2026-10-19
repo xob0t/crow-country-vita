@@ -530,24 +530,19 @@ partial class DowngradeAssemblies
         }
     }
 
-    // Turns an instruction into a nop; it stays where branches may point at it.
-    static void Erase(Instruction instruction)
+    // Starts a void method with a test that returns at once: the test's instructions leave a bool,
+    // and the method returns (by its last ret) when it is true (exitWhen brtrue) or false (brfalse).
+    static void ReturnAtStartIf(MethodDefinition method, OpCode exitWhen, params Instruction[] test)
     {
-        instruction.OpCode = OpCodes.Nop;
-        instruction.Operand = null;
+        Instruction ret = method.Body.Instructions.Last(i => i.OpCode == OpCodes.Ret);
+        Prepend(method, test.Concat(new[] { Instruction.Create(exitWhen, ret) }).ToArray());
     }
 
-    // The name or full name of the method an instruction names (a call, ldftn, ...), or "".
+    // The name of the method an instruction names (a call, ldftn, ...), or "".
     static string CalledName(Instruction instruction)
     {
         var called = instruction.Operand as MethodReference;
         return called == null ? "" : called.Name;
-    }
-
-    static string CalledFullName(Instruction instruction)
-    {
-        var called = instruction.Operand as MethodReference;
-        return called == null ? "" : called.FullName;
     }
 
     // Whether an instruction names the method <type>::<name>, the type by full name.
@@ -572,5 +567,33 @@ partial class DowngradeAssemblies
             yield return type;
             foreach (TypeDefinition nested in AllTypes(type.NestedTypes)) yield return nested;
         }
+    }
+
+    // The first method that matches in the base types of a type, nearest first (an inherited getter,
+    // the virtual method an override would override), or null.
+    static MethodDefinition BaseMethod(TypeDefinition type, Func<MethodDefinition, bool> match)
+    {
+        for (TypeReference current = type.BaseType; current != null;)
+        {
+            TypeDefinition resolved = current.Resolve();
+            MethodDefinition found = resolved.Methods.SingleOrDefault(match);
+            if (found != null) return found;
+            current = resolved.BaseType;
+        }
+        return null;
+    }
+
+    // A new private [NonSerialized] field, added at the end of the type's fields.
+    static FieldDefinition AddField(TypeDefinition type, string name, TypeReference fieldType)
+    {
+        var field = new FieldDefinition(name, FieldAttributes.Private | FieldAttributes.NotSerialized, fieldType);
+        type.Fields.Add(field);
+        return field;
+    }
+
+    // Compat's static field CrowCompat.<type>.<name>, imported (a switch or counter the patched code reads).
+    static FieldReference CompatField(ModuleDefinition module, string type, string name)
+    {
+        return module.ImportReference(compat["CrowCompat." + type].Fields.Single(f => f.Name == name));
     }
 }

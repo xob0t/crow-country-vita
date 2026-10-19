@@ -43,16 +43,6 @@ using UnityEngine.SceneManagement;
 //                            one frame s seconds after the fight starts (or after the load), through
 //                            RenderDoc's in-application API (CROW_RENDERDOC); -crow-renderdoc-count <n>
 //                            more, 2 s apart
-// GPU experiments for -crow-cycle / -crow-fight-cycle / -crow-ab (reversible; not for play):
-//   post=on|plain|nosfb|nopsx|noblur|nocrt   the camera effect's four filters (plain: all four drawn as
-//                            plain copies, the same passes and targets; noX: that one only)
-//   tex=game|tiny            every scene material's _MainTex a 4x4 grey texture (what texture fetches cost)
-//   flatten=on|<type>        CPU experiment, one way: in every live enemy (or those of one type), each active
-//                            pivot (no component but the build-time random picks and MeshCombineStudio's
-//                            markers, not moved by anything found (MotionReport's drivers), not named by any
-//                            action of any state of the enemy's FSMs, with children) gives its children to its
-//                            parent, world poses kept, and leaves the enemy (to the scene's root, switched off):
-//                            what a build-time flattening would save (CROW_AUDIT_FLATTEN)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -67,11 +57,11 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            after = Quality.Number(args, "-crow-audit", -1f);
-            every = Quality.Number(args, "-crow-audit-every", -1f);
-            frames = Math.Max(2, (int)Quality.Number(args, "-crow-audit-frames", 10f));
-            captureAfter = Quality.Number(args, "-crow-renderdoc", -1f);
-            captures = Math.Max(1, (int)Quality.Number(args, "-crow-renderdoc-count", 1f));
+            after = CrowFlags.Number(args, "-crow-audit", -1f);
+            every = CrowFlags.Number(args, "-crow-audit-every", -1f);
+            frames = Math.Max(2, (int)CrowFlags.Number(args, "-crow-audit-frames", 10f));
+            captureAfter = CrowFlags.Number(args, "-crow-renderdoc", -1f);
+            captures = Math.Max(1, (int)CrowFlags.Number(args, "-crow-renderdoc-count", 1f));
             if (after < 0f && captureAfter < 0f) return;
             SceneManager.sceneLoaded += (scene, mode) =>
             {
@@ -126,121 +116,6 @@ namespace CrowCompat
 
         static int auditsDone;
 
-        // ------------------------------------------------------------------------------ experiments
-
-        internal static bool Change(string key, string value)
-        {
-            if (key == "post") Post(value);
-            else if (key == "tex") Textures(value == "tiny");
-            else if (key == "flatten") Flatten(value);
-            else return false;
-            Debug.Log("CROW_AUDIT_SET " + key + "=" + value);
-            return true;
-        }
-
-        static void Flatten(string which)
-        {
-            ReflectFsm();
-            MotionReport.InsideEnemies = true;
-            MotionReport.PrepareDrivers();
-            int enemiesDone = 0, moved = 0, before = 0, after = 0;
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                Scene scene = SceneManager.GetSceneAt(i);
-                if (!scene.isLoaded) continue;
-                foreach (GameObject sceneRoot in scene.GetRootGameObjects())
-                    foreach (Rigidbody body in sceneRoot.GetComponentsInChildren<Rigidbody>(false))
-                    {
-                        if (!body.name.StartsWith("Enemy ", StringComparison.Ordinal)) continue;
-                        string type = body.name.Substring(6);
-                        int paren = type.IndexOf(" (", StringComparison.Ordinal);
-                        if (paren > 0) type = type.Substring(0, paren);
-                        if (which != "on" && which != type.Replace(' ', '_')) continue;
-                        Transform root = body.transform;
-                        HashSet<Transform> named = Named(root);
-                        Transform[] all = root.GetComponentsInChildren<Transform>(true);
-                        before += all.Length;
-                        foreach (Transform t in all)
-                        {
-                            if (t == root || t.childCount == 0 || !t.gameObject.activeInHierarchy || named.Contains(t) || MotionReport.IsDriven(t)) continue;
-                            if (t.GetComponents<Component>().Any(c => c != null && !(c is Transform) && !Inert.Contains(c.GetType().Name))) continue;
-                            Transform parent = t.parent;
-                            var children = new List<Transform>();
-                            foreach (Transform child in t) children.Add(child);
-                            int index = t.GetSiblingIndex();
-                            foreach (Transform child in children)
-                            {
-                                child.SetParent(parent, true);
-                                child.SetSiblingIndex(++index);
-                            }
-                            t.SetParent(null, true);
-                            t.gameObject.SetActive(false);
-                            moved++;
-                        }
-                        after += root.GetComponentsInChildren<Transform>(true).Length;
-                        enemiesDone++;
-                    }
-            }
-            Debug.Log("CROW_AUDIT_FLATTEN " + which + ": " + enemiesDone + " enemies, " + moved + " pivots out, transforms " + before + " -> " + after);
-        }
-
-        static readonly string[] Filters = { "enableSFBFilter", "enablePSXFilter", "enableCRTBlurFilter", "enableCRTPostFilter" };
-
-        static void Post(string value)
-        {
-            int changed = 0;
-            foreach (MonoBehaviour behaviour in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
-            {
-                if (behaviour == null || behaviour.GetType().Name != "CrowCountryCamEffect") continue;
-                for (int i = 0; i < Filters.Length; i++)
-                {
-                    FieldInfo field = behaviour.GetType().GetField(Filters[i], Fields);
-                    if (field == null) continue;
-                    bool on = value == "on" || (value == "nosfb" && i != 0) || (value == "nopsx" && i != 1) || (value == "noblur" && i != 2) || (value == "nocrt" && i != 3);
-                    field.SetValue(behaviour, on);
-                }
-                changed++;
-            }
-            Debug.Log("CROW_AUDIT post=" + value + " on " + changed + " camera effects");
-        }
-
-        static Texture2D tiny;
-        static readonly Dictionary<Material, Texture> swapped = new Dictionary<Material, Texture>();
-
-        static void Textures(bool on)
-        {
-            int id = Shader.PropertyToID("_MainTex");
-            if (!on)
-            {
-                foreach (KeyValuePair<Material, Texture> pair in swapped)
-                    if (pair.Key != null) pair.Key.SetTexture(id, pair.Value);
-                Debug.Log("CROW_AUDIT tex=game: " + swapped.Count + " materials back");
-                swapped.Clear();
-                return;
-            }
-            if (tiny == null)
-            {
-                tiny = new Texture2D(4, 4, TextureFormat.RGBA32, false);
-                var pixels = new Color32[16];
-                for (int i = 0; i < pixels.Length; i++) pixels[i] = new Color32(150, 150, 150, 255);
-                tiny.SetPixels32(pixels);
-                tiny.Apply(false, true);
-            }
-            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-            {
-                if (renderer == null || renderer is ParticleSystemRenderer) continue;
-                foreach (Material material in renderer.sharedMaterials)
-                {
-                    if (material == null || swapped.ContainsKey(material) || !material.HasProperty(id)) continue;
-                    Texture texture = material.GetTexture(id);
-                    if (texture == null) continue;
-                    swapped[material] = texture;
-                    material.SetTexture(id, tiny);
-                }
-            }
-            Debug.Log("CROW_AUDIT tex=tiny: " + swapped.Count + " materials");
-        }
-
         // ------------------------------------------------------------------------------ the census
 
         sealed class Enemy
@@ -273,7 +148,6 @@ namespace CrowCompat
         static int sceneChanged, sceneEnemyChanged, scenePlayerChanged, sceneHierarchies, sceneHierarchyTransforms;
         static int movedEnemyRenderers, movedPlayerRenderers, movedOtherRenderers;
         static readonly Dictionary<string, int> hierarchyMoves = new Dictionary<string, int>();
-        static readonly StringBuilder cameraLog = new StringBuilder();
         static int cameraRenders;
         static readonly Dictionary<string, int> cameraCounts = new Dictionary<string, int>();
         static bool depthTexture, shadowTexture;
@@ -368,7 +242,7 @@ namespace CrowCompat
             sceneChanged = sceneEnemyChanged = scenePlayerChanged = sceneHierarchies = sceneHierarchyTransforms = 0;
             movedEnemyRenderers = movedPlayerRenderers = movedOtherRenderers = 0;
             hierarchyMoves.Clear();
-            cameraLog.Length = 0;
+            depthTexture = shadowTexture = false;  // this audit's frames
             cameraRenders = 0;
             cameraCounts.Clear();
             sample = 0;

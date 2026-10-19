@@ -7,7 +7,8 @@ whose module_start registers the name and address of each function with Register
 The SDK's libScePower_stub.a has no clock functions. Each of its function stubs is an object that
 names the function and holds its NID; scePowerSetConfigurationMode's name has the same length (28)
 as scePowerSetArmClockFrequency and scePowerGetArmClockFrequency, so a copy of its object with the
-name and NID replaced imports those (the firmware's user ScePower library exports them). The NIDs
+name and NID replaced imports those (the firmware's user ScePower library exports them); the 32-character
+crossbar ones are copies of scePowerGetBatteryRemainCapacity's. The NIDs
 object (absolute _NID_ symbols) gets the same treatment, its other names made unique per copy.
 
     uv run tools/downgrade/native/clock/build.py
@@ -25,15 +26,22 @@ OUT = ROOT / 'work' / 'native' / 'clock'
 SDK = Path(os.environ.get('SCE_PSP2_SDK_DIR', r'C:\vitasdk\sdk'))
 BIN = SDK / 'host_tools' / 'build' / 'bin'
 
-BASE_NAME = b'scePowerSetConfigurationMode'
-BASE_NID = 0x3CE187B6
-# The functions to import, by NID (vitasdk's db, vita-headers db/360/ScePower.yml, user library ScePower):
-# name lengths must equal BASE_NAME's.
+# The SDK stub each new one is copied from, by name length.
+BASES = {
+    28: (b'scePowerSetConfigurationMode', 0x3CE187B6),
+    32: (b'scePowerGetBatteryRemainCapacity', 0x94F5A53F),
+}
+# The functions to import, by NID (vitasdk's db, vita-headers db/360/ScePower.yml, user library ScePower;
+# the bus and crossbar ones checked against wiki.henkaku.xyz's ScePower page): name lengths must be in BASES.
 FUNCTIONS = {
     b'scePowerSetArmClockFrequency': 0x74DB5AE5,
     b'scePowerGetArmClockFrequency': 0xABC6F88F,
     b'scePowerSetGpuClockFrequency': 0x717DB06C,
     b'scePowerGetGpuClockFrequency': 0x1B04A1D6,
+    b'scePowerSetBusClockFrequency': 0xB8D7B3FB,
+    b'scePowerGetBusClockFrequency': 0x478FE6F5,
+    b'scePowerSetGpuXbarClockFrequency': 0xA7739DBE,
+    b'scePowerGetGpuXbarClockFrequency': 0x0A750DEE,
 }
 
 
@@ -46,6 +54,10 @@ extern "C" int CrowClockSetArm();
 extern "C" int CrowClockGetArm();
 extern "C" int CrowClockSetGpu();
 extern "C" int CrowClockGetGpu();
+extern "C" int CrowClockSetBus();
+extern "C" int CrowClockGetBus();
+extern "C" int CrowClockSetXbar();
+extern "C" int CrowClockGetXbar();
 extern "C" int CrowThreadSelf();
 extern "C" int CrowThreadQuery();
 extern "C" int CrowThreadSet();
@@ -59,6 +71,10 @@ static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_Functi
   { "CrowClockGetArm", &CrowClockGetArm },
   { "CrowClockSetGpu", &CrowClockSetGpu },
   { "CrowClockGetGpu", &CrowClockGetGpu },
+  { "CrowClockSetBus", &CrowClockSetBus },
+  { "CrowClockGetBus", &CrowClockGetBus },
+  { "CrowClockSetXbar", &CrowClockSetXbar },
+  { "CrowClockGetXbar", &CrowClockGetXbar },
   { "CrowThreadSelf", &CrowThreadSelf },
   { "CrowThreadQuery", &CrowThreadQuery },
   { "CrowThreadSet", &CrowThreadSet },
@@ -85,10 +101,11 @@ def run(*command, cwd=OUT):
 
 
 def patch(data: bytes, name: bytes, nid: int, mangle: bytes | None = None) -> bytes:
-    old, new = BASE_NID.to_bytes(4, 'little'), nid.to_bytes(4, 'little')
-    if data.count(old) < 1 or BASE_NAME not in data:
+    base_name, base_nid = BASES[len(name)]
+    old, new = base_nid.to_bytes(4, 'little'), nid.to_bytes(4, 'little')
+    if data.count(old) < 1 or base_name not in data:
         sys.exit('libScePower_stub.a is not the one this script knows')
-    data = data.replace(BASE_NAME, name).replace(old, new)
+    data = data.replace(base_name, name).replace(old, new)
     if mangle:
         # Every other _NID_ symbol of the NIDs object gets a name no other copy defines.
         data = data.replace(b'_NID_', mangle).replace(mangle + name, b'_NID_' + name)
@@ -103,11 +120,11 @@ def stub_library(folder: Path) -> Path:
     run(BIN / 'psp2snarl.exe', 'x', stub, cwd=extract)
     head = extract / '_ScePower-0001_head.o'
     nids = (extract / '_ScePower-0001_NIDS.o').read_bytes()
-    function = (extract / f'_ScePower-0001_F00_{BASE_NID:08x}.o').read_bytes()
+    functions = {n: (extract / f'_ScePower-0001_F00_{nid:08x}.o').read_bytes() for n, (_, nid) in BASES.items()}
     members = [head]
     for index, (name, nid) in enumerate(FUNCTIONS.items()):
         f = extract / f'_ScePower-0001_F00_{nid:08x}.o'  # psp2ld wants this name
-        f.write_bytes(patch(function, name, nid))
+        f.write_bytes(patch(functions[len(name)], name, nid))
         n = extract / f'_ScePower-0001_NIDS_{index}.o'
         n.write_bytes(patch(nids, name, nid, b'_N%d__' % index))
         members += [f, n]

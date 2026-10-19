@@ -64,6 +64,7 @@ TOOLS = ROOT / 'tools'
 EXTERNAL = TOOLS / 'external'
 HERE = Path(__file__).resolve().parent
 WORK = ROOT / 'work'
+BUILDS = ROOT / 'builds'
 ARTIFACTS = ROOT / 'artifacts' / 'downgrade'
 EDITORS = Path(os.environ['LOCALAPPDATA']) / 'Unity' / 'Editors'
 # Steam's default install folder, and the game's folder in its library.
@@ -80,6 +81,31 @@ def default_game():
 DEFAULT_GAME = default_game()
 # The newest 2018.2 release whose PS Vita build module is known to exist.
 TARGET = '2018.2.19f1'
+
+
+# Where the pipeline's stages put their output, per target platform ('vita' or 'windows'); the other
+# tools find the builds there.
+def vita_suffix(platform):
+    return '-vita' if platform == 'vita' else ''
+
+
+def rewritten_folder(version, platform):
+    """work/assemblies-<version>[-vita]: the code stage's rewritten assemblies."""
+    return WORK / f'assemblies-{version}{vita_suffix(platform)}'
+
+
+def project_folder(version, platform):
+    """work/crow-<version>[-vita]: the project stage's Unity project."""
+    return WORK / f'crow-{version}{vita_suffix(platform)}'
+
+
+def build_folder(platform, backend='mono', scenes=False, version=TARGET):
+    """builds/crow-<version>[-vita][-il2cpp][-scenes]: a player built by pipeline.py build (a Windows
+    player is CrowCountry.exe in it); scenes: a test build of some scenes (build --scenes)."""
+    il2cpp = '-il2cpp' if platform == 'windows' and backend == 'il2cpp' else ''
+    return BUILDS / f'crow-{version}{vita_suffix(platform)}{il2cpp}{"-scenes" if scenes else ""}'
+
+
 SOURCE_VERSION = '2022.3.49f1'
 USCSANDBOX_COMMIT = '563391b849116de5d470420cc0e3f1bc6a4b6157'
 USCSANDBOX_SHA256 = '05459f727bd591cd588b1b4d3baa8d8c0b0b8bf4ad3990e7f1f1a187594f9c82'  # its GitHub zip
@@ -179,27 +205,17 @@ def fetch(url, part: Path):
                 step.advance(len(chunk))
 
 
-def memory_gb():
-    """(total, available) physical memory in GB."""
-    import ctypes
+def split_at_dashes(argv):
+    """(the words before '--', the words after it): a tool's own options, and those it passes on."""
+    if '--' not in argv:
+        return list(argv), []
+    split = argv.index('--')
+    return argv[:split], argv[split + 1 :]
 
-    class Status(ctypes.Structure):
-        _fields_ = [
-            ('dwLength', ctypes.c_ulong),
-            ('dwMemoryLoad', ctypes.c_ulong),
-            ('ullTotalPhys', ctypes.c_ulonglong),
-            ('ullAvailPhys', ctypes.c_ulonglong),
-            ('ullTotalPageFile', ctypes.c_ulonglong),
-            ('ullAvailPageFile', ctypes.c_ulonglong),
-            ('ullTotalVirtual', ctypes.c_ulonglong),
-            ('ullAvailVirtual', ctypes.c_ulonglong),
-            ('ullAvailExtendedVirtual', ctypes.c_ulonglong),
-        ]
 
-    status = Status()
-    status.dwLength = ctypes.sizeof(Status)
-    ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
-    return status.ullTotalPhys / 2**30, status.ullAvailPhys / 2**30
+def number(text: str):
+    """A number as the probe logs it, with a decimal point or (in some locales) a comma."""
+    return float(text.replace(',', '.'))
 
 
 def file_hash(path: Path, algorithm='sha256'):

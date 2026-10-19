@@ -29,8 +29,6 @@ using UnityEngine.SceneManagement;
 //                               every s seconds apply the next change set of <sets> (sets separated by
 //                               '/', changes in a set by ','; Quality.Change's keys and these: particles=,
 //                               fixed=, maxdt=, iter=, sync=, gpu=<MHz>, vsync=<n>, camera=624|550|416,
-//                               batch=all (Draws.cs's static batching, now), hide=static|safe|none
-//                               (StaticBatch.Hide: its candidates' renderers off, a cost test),
 //                               merge=on|off|merged|report (Merge.cs, in the loaded scenes),
 //                               sort=default|nodistance|
 //                               fronttoback (the cameras' opaque sort), probes=off and reflections=off
@@ -53,19 +51,19 @@ using UnityEngine.SceneManagement;
 //                               changing a box instead (see ScaledColliders); report only logs them
 //                               (CROW_SCALED); -crow-cycle takes scaled=
 //   -crow-scene-split off|on|check|report
-//                               the PS Vita build's split areas (see SceneSplit): off puts the parts
+//                               the PS Vita build's split areas (SceneSplit.cs): off puts the parts
 //                               back in their places, on takes them out again (-crow-cycle takes
 //                               scenesplit=), check compares each part with its old place every second
 //                               (CROW_SPLIT_CHECK), report logs what the split would take (CROW_SPLIT)
-//   -crow-split-follow off      the split parts no longer follow their old places when those move (see
-//                               SplitFollow); -crow-cycle takes splitfollow=
+//   -crow-split-follow off      the split parts no longer follow their old places when those move
+//                               (SceneSplit.cs' SplitFollow); -crow-cycle takes splitfollow=
 //   -crow-map-pan on|game       on (the PS Vita's default): the map's scrolled content moves in whole
 //                               cells of the UI's pixel grid, and its pixelated images keep their meshes
-//                               while it moves (see MapPan); game rebuilds every image at every frame of a
+//                               while it moves (MapPan.cs); game rebuilds every image at every frame of a
 //                               scroll, as the game does; -crow-cycle takes mappan=
 //   -crow-map-arrows canvas|game
 //                               canvas (the PS Vita's default): the map's bobbing scroll arrows under a
-//                               canvas of their own (see MapPan); -crow-cycle takes maparrows=
+//                               canvas of their own (MapPan.cs); -crow-cycle takes maparrows=
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -78,15 +76,15 @@ namespace CrowCompat
             PlayerSplit.Install(args);
             ScaledColliders.Install(args);
             SceneSplit.Install(args);
-            float moving = Quality.Number(args, "-crow-moving-report", -1f);
+            float moving = CrowFlags.Number(args, "-crow-moving-report", -1f);
             if (moving > 0f) MovingReport.Install(moving);
-            float particles = Quality.Number(args, "-crow-particles-report", -1f);
+            float particles = CrowFlags.Number(args, "-crow-particles-report", -1f);
             if (particles > 0f) ParticleReport.Install(particles);
-            string rule = Value(args, "-crow-particles");
+            string rule = CrowFlags.Value(args, "-crow-particles");
             if (rule != null) Change("particles", rule);
-            float physics = Quality.Number(args, "-crow-physics-report", -1f);
+            float physics = CrowFlags.Number(args, "-crow-physics-report", -1f);
             if (physics > 0f) PhysicsReport.Install(physics);
-            string changes = Value(args, "-crow-physics");
+            string changes = CrowFlags.Value(args, "-crow-physics");
             if (changes != null)
                 foreach (string change in changes.Split(','))
                 {
@@ -94,13 +92,7 @@ namespace CrowCompat
                     if (pair.Length == 2) Change(pair[0], pair[1]);
                 }
             int cycle = Array.IndexOf(args, "-crow-cycle");
-            if (cycle >= 0 && cycle + 2 < args.Length) Cycle.Install(Quality.Number(args, "-crow-cycle", 10f), args[cycle + 2]);
-        }
-
-        internal static string Value(string[] args, string flag)
-        {
-            int index = Array.IndexOf(args, flag);
-            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            if (cycle >= 0 && cycle + 2 < args.Length) Cycle.Install(CrowFlags.Number(args, "-crow-cycle", 10f), args[cycle + 2]);
         }
 
         // A change Quality.Change doesn't know; false when it isn't one of these either.
@@ -112,12 +104,6 @@ namespace CrowCompat
             {
                 case "particles":
                     ParticleRule.Set(value);
-                    return true;
-                case "batch":
-                    StaticBatch.Set(value, true);
-                    return true;
-                case "hide":
-                    StaticBatch.Hide(value);
                     return true;
                 case "merge":
                     Merge.Set(value);
@@ -246,7 +232,7 @@ namespace CrowCompat
 
         public static void Install(string[] args)
         {
-            string value = Perf.Value(args, "-crow-rewired");
+            string value = CrowFlags.Value(args, "-crow-rewired");
             if (value != null ? value == "pad" : Application.platform == RuntimePlatform.PSP2) Set(true);
         }
 
@@ -320,7 +306,7 @@ namespace CrowCompat
 
         public static void Install(string[] args)
         {
-            string value = Perf.Value(args, "-crow-player-split");
+            string value = CrowFlags.Value(args, "-crow-player-split");
             if (value != null) Set(value);
             else if (Application.platform == RuntimePlatform.PSP2) Set("ui");
         }
@@ -725,7 +711,7 @@ namespace CrowCompat
 
         public static void Install(string[] args)
         {
-            string value = Perf.Value(args, "-crow-scaled-colliders");
+            string value = CrowFlags.Value(args, "-crow-scaled-colliders");
             if (value != null) Set(value);
             else if (Application.platform == RuntimePlatform.PSP2) Set("box");
         }
@@ -799,8 +785,10 @@ namespace CrowCompat
                 MeshCollider collider = candidates[i];
                 if (!watching[i] || collider == null || changes[i] < Often) continue;
                 if (found == null) found = new List<string>();
-                if (mode == "box") Swap(collider);
-                Bounds bounds = collider.enabled ? collider.bounds : swapped[collider].bounds;
+                // Not one the game switched off meanwhile: its box would collide where nothing should.
+                if (mode == "box" && collider.enabled) Swap(collider);
+                BoxCollider box;
+                Bounds bounds = swapped.TryGetValue(collider, out box) ? box.bounds : collider.bounds;
                 if (found.Count < 12)
                     found.Add(Perf.Path(collider.transform, 5) + "(" + collider.sharedMesh.vertexCount + "v" + (collider.convex ? ",convex" : "") + ",layer" +
                               collider.gameObject.layer + ",y" + bounds.min.y.ToString("F2", CultureInfo.InvariantCulture) + ".." +
@@ -906,643 +894,6 @@ namespace CrowCompat
                 Quality.Change(sets[step]);
             }
             else Debug.Log("CROW_CYCLE done");
-        }
-    }
-
-    // An area is one transform hierarchy of 20,000 transforms or more under its root (Station Square
-    // 21,600, Pool 22,400), and a few of its parts move every frame (bunting, crows, flies, an NPC's
-    // breathing, the pool's swirl). Each engine system that follows transform changes then walks the
-    // whole hierarchy every frame: the renderers' update (PostLateUpdate.UpdateAllRenderers), physics'
-    // transform sync (FixedUpdate.PhysicsFixedUpdate) and the particle systems. The PS Vita build takes
-    // the parts nothing acts on out to the scene's root as it writes each scene (Merge.Split, called by
-    // DowngradeBuild's CrowMergeScenes; CROW_SPLIT=on, the default, or off), each with a SplitPart
-    // naming its old parent and place; below objects the game switches on and off, a SplitHolder in
-    // the part's place switches it. A first run-time test that took out every subtree that didn't move
-    // in 60 frames: main thread Station Square 30.6 -> 26.8 ms, Pool 31.0 -> 24.4 ms.
-    //   -crow-scene-split off|on|check|report
-    //       off: after each area load, every part goes back where it was (its old parent, place,
-    //       sibling index and activity), for A/B runs on one build; on: out again (-crow-cycle takes
-    //       scenesplit=off|on, now); check: every second and at each switch of a holder, whether each
-    //       part is active exactly when it would be in its old place and where it would be there
-    //       (CROW_SPLIT_CHECK, once per part that differs, and a count every 30 s); report: log what
-    //       Merge.Split would take out of each area (for builds made without it); apply, apply-check:
-    //       split each area as it loads, as the build would (and check); report-movers,
-    //       apply-movers, apply-movers-check: the same with Merge.Split's movers (the parts that move on
-    //       their own, below split parents, and the way below destroyed objects)
-    public class SplitPart : MonoBehaviour
-    {
-        public Transform parent;
-        public int sibling;
-        public Vector3 position, scale;
-        public Quaternion rotation;
-        public bool active;  // its own activity before the split
-        public SplitHolder holder;  // its place below a switched object, or none
-    }
-
-    // A split part's place below objects the game switches on and off: it stands for the part there
-    // (its activeSelf is the part's own, so ActivateChildren on its parent switches it as it would the
-    // part), and the part, built switched off, is on exactly while this is. While this is off because
-    // of its parents, own keeps the part's own activity; switched off itself, the part is on again
-    // when it is.
-    public class SplitHolder : MonoBehaviour
-    {
-        public GameObject part;
-        public bool own = true;
-
-        void OnEnable()
-        {
-            if (part == null) return;
-            part.SetActive(own);
-            SceneSplit.Switched(this);
-        }
-
-        // Destroyed with what is above it (the game's DestroyObject, DestroySelf), the part goes too, as
-        // it would have in its old place (the movers' split goes below destroyed objects).
-        void OnDestroy()
-        {
-            if (part != null && gameObject.scene.isLoaded) Destroy(part);
-        }
-
-        void OnDisable()
-        {
-            if (part == null) return;
-            // Torn down (its scene unloading, the game quitting) rather than switched off: then nothing
-            // here or above is off itself (scene.isLoaded can still be true), and nothing is done.
-            bool switchedOff = !gameObject.activeSelf;
-            for (Transform t = transform.parent; t != null && !switchedOff; t = t.parent) switchedOff = !t.gameObject.activeSelf;
-            if (!switchedOff) return;
-            own = !gameObject.activeSelf || part.activeSelf;
-            if (part.activeSelf) part.SetActive(false);
-            SceneSplit.Switched(this);
-        }
-    }
-
-    // The split parts' old places followed: in any frame an old parent's world pose changed (an elevator
-    // moving the whole level, anything the split's analysis couldn't see), each part taken out from below
-    // it is put back where it would be there (its old local pose below the old parent's world pose), so
-    // it moves as it did before the split. Checked just before rendering, once per old parent: a matrix
-    // read and a comparison. -crow-split-follow off (or -crow-cycle splitfollow=off) leaves the parts where
-    // they are, for A/B; CROW_SPLIT_FOLLOW logs each old parent the first time it moves, and a count every
-    // 30 s while any did.
-    static class SplitFollow
-    {
-        sealed class Place
-        {
-            public Transform Old;
-            public Matrix4x4 Last;
-            public readonly List<SplitPart> Parts = new List<SplitPart>();
-            public bool Logged;
-            public int Moves;
-        }
-
-        static bool on = true, hooked, dirty = true;
-        static readonly List<Place> places = new List<Place>();
-        static int moves, followed;
-        static float summaryAt;
-
-        internal static void Install(string[] args)
-        {
-            if (Perf.Value(args, "-crow-split-follow") == "off") on = false;
-            if (hooked) return;
-            hooked = true;
-            // Collected in the frame after a load: the split (at run time) and the holders' switching
-            // happen while the scene loads.
-            SceneManager.sceneLoaded += (scene, mode) => Dirty();
-            SceneManager.sceneUnloaded += scene => Dirty();
-            Application.onBeforeRender += Tick;
-        }
-
-        static int collectFrame;
-
-        // Whether the parts are where following keeps them (not between a load and the next frame's step).
-        internal static bool Ready
-        {
-            get { return !on || !dirty; }
-        }
-
-        static void Dirty()
-        {
-            dirty = true;
-            collectFrame = Time.frameCount + 1;
-        }
-
-        internal static void Set(string value)
-        {
-            on = value != "off";
-            Dirty();
-            Debug.Log("CROW_SPLIT follow " + (on ? "on" : "off"));
-        }
-
-        static void Collect()
-        {
-            dirty = false;
-            places.Clear();
-            var byParent = new Dictionary<Transform, Place>();
-            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
-            {
-                if (part == null || part.parent == null || !part.gameObject.scene.IsValid() || part.transform.parent == part.parent) continue;
-                Place place;
-                if (!byParent.TryGetValue(part.parent, out place))
-                {
-                    // Where the old parent was when the part left it (from the part and its old local
-                    // pose): it may have moved since, as the elevator rooms do while the area starts.
-                    Matrix4x4 then = part.transform.localToWorldMatrix * Matrix4x4.TRS(part.position, part.rotation, part.scale).inverse;
-                    byParent[part.parent] = place = new Place { Old = part.parent, Last = then };
-                    places.Add(place);
-                }
-                place.Parts.Add(part);
-            }
-            if (places.Count > 0) Debug.Log("CROW_SPLIT_FOLLOW watching " + places.Count + " old parents of " + places.Sum(p => p.Parts.Count) + " parts");
-        }
-
-        internal static void Tick()
-        {
-            if (!on) return;
-            try
-            {
-                if (dirty)
-                {
-                    if (Time.frameCount < collectFrame) return;
-                    Collect();
-                }
-                for (int i = 0; i < places.Count; i++)
-                {
-                    Place place = places[i];
-                    if (place.Old == null) continue;
-                    Matrix4x4 now = place.Old.localToWorldMatrix;
-                    if (now == place.Last) continue;
-                    place.Last = now;
-                    moves++;
-                    place.Moves++;
-                    // Each part where it would be below the old parent: its old local position through the
-                    // parent's matrix, its rotation after the parent's (Unity's world rotation, also below a
-                    // mirroring parent). Its scale stays: the rooms move and turn, they don't scale.
-                    Quaternion rotation = place.Old.rotation;
-                    int count = 0;
-                    foreach (SplitPart part in place.Parts)
-                    {
-                        if (part == null) continue;
-                        Transform t = part.transform;
-                        if (t.parent == part.parent) continue;  // put back (-crow-scene-split off)
-                        t.SetPositionAndRotation(now.MultiplyPoint3x4(part.position), rotation * part.rotation);
-                        count++;
-                    }
-                    followed += count;
-                    if (!place.Logged && count > 0)
-                    {
-                        place.Logged = true;
-                        Debug.Log("CROW_SPLIT_FOLLOW " + Perf.Path(place.Old, 4) + " moved: " + count + " parts taken out from below it follow it");
-                    }
-                }
-                float time = Time.realtimeSinceStartup;
-                if (moves > 0 && time >= summaryAt)
-                {
-                    summaryAt = time + 30f;
-                    Debug.Log("CROW_SPLIT_FOLLOW " + places.Count + " old parents watched, " + moves + " moves, " + followed + " parts placed; most: " +
-                              string.Join(" ", places.Where(p => p.Moves > 0 && p.Old != null).OrderByDescending(p => p.Moves).Take(4)
-                                  .Select(p => Perf.Path(p.Old, 3) + "=" + p.Moves).ToArray()));
-                    moves = followed = 0;
-                    foreach (Place p in places) p.Moves = 0;
-                }
-            }
-            catch (Exception exception)
-            {
-                Debug.Log("CROW_SPLIT_FOLLOW failed: " + exception);
-                Dirty();
-            }
-        }
-    }
-
-    static class SceneSplit
-    {
-        static string mode;
-        static bool hooked, checking;
-        static float nextCheck, lastSummary;
-        static int checks, differences, switches;
-        static readonly HashSet<SplitPart> reported = new HashSet<SplitPart>();
-        static readonly List<SplitPart> found = new List<SplitPart>();
-
-        internal static void Install(string[] args)
-        {
-            string value = Perf.Value(args, "-crow-scene-split");
-            Merge.MoverDebug = Array.IndexOf(args, "-crow-split-mover-log") >= 0;
-            SplitFollow.Install(args);  // first: its frame step runs before the check's
-            if (value != null) Set(value);
-        }
-
-        internal static void Set(string value)
-        {
-            mode = value;
-            Apply();
-            if (hooked) return;
-            hooked = true;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
-            {
-                bool area = scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara" && scene.name != "CrowGap";
-                if (area && (mode.StartsWith("report") || mode.StartsWith("apply")))
-                {
-                    Merge.SplitMovers = mode.Contains("movers");
-                    Debug.Log("CROW_" + Merge.Split(scene, !mode.StartsWith("report")));
-                }
-                else Apply();
-            };
-            checking = mode == "check" || mode.EndsWith("-check");
-            if (checking) Application.onBeforeRender += Check;
-        }
-
-        static void Apply()
-        {
-            if (mode != "off" && mode != "on") return;
-            int count = 0;
-            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
-            {
-                if (part == null || part.parent == null || !part.gameObject.scene.IsValid()) continue;
-                Transform transform = part.transform;
-                SplitHolder holder = part.holder;
-                if (mode == "off" && transform.parent != part.parent)
-                {
-                    // Its own activity: the holder's, and below it the part's (or what the holder kept).
-                    bool own = holder == null ? part.gameObject.activeSelf || (part.active && !part.parent.gameObject.activeInHierarchy)
-                        : holder.gameObject.activeSelf && (holder.gameObject.activeInHierarchy ? part.gameObject.activeSelf : holder.own);
-                    if (holder != null)
-                    {
-                        holder.part = null;
-                        holder.gameObject.SetActive(false);
-                        holder.transform.SetAsLastSibling();
-                    }
-                    transform.SetParent(part.parent, false);
-                    transform.SetSiblingIndex(part.sibling);
-                    transform.localPosition = part.position;
-                    transform.localRotation = part.rotation;
-                    transform.localScale = part.scale;
-                    part.gameObject.SetActive(own);
-                    count++;
-                }
-                else if (mode == "on" && transform.parent == part.parent)
-                {
-                    bool own = part.gameObject.activeSelf;
-                    if (holder != null || (own && !part.parent.gameObject.activeInHierarchy)) part.gameObject.SetActive(false);
-                    transform.SetParent(null, true);
-                    if (holder != null)
-                    {
-                        holder.transform.SetSiblingIndex(part.sibling);
-                        holder.own = true;
-                        holder.part = part.gameObject;
-                        holder.gameObject.SetActive(own);
-                    }
-                    count++;
-                }
-            }
-            Debug.Log("CROW_SPLIT " + mode + ": " + count + " parts " + (mode == "off" ? "back in their places" : "out"));
-        }
-
-        // -crow-cycle splittoggle=parents-off|parents-on|self-off|self-on: every held part's old parent (as
-        // an ancestor's ActivateGameObject would) or its holder (as ActivateChildren on its parent would)
-        // switched off, or back as it was; with -crow-scene-split check, a test of the holders.
-        static readonly List<KeyValuePair<GameObject, bool>> toggled = new List<KeyValuePair<GameObject, bool>>();
-
-        internal static void Toggle(string value)
-        {
-            if (value.EndsWith("-on"))
-            {
-                for (int i = toggled.Count - 1; i >= 0; i--) if (toggled[i].Key != null) toggled[i].Key.SetActive(toggled[i].Value);
-                Debug.Log("CROW_SPLIT toggle " + value + ": " + toggled.Count + " objects back");
-                toggled.Clear();
-                return;
-            }
-            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
-            {
-                // Held parts only; parents: its old parent, also with the parts back in place (off).
-                if (part == null || part.holder == null || part.parent == null || !part.gameObject.scene.IsValid()) continue;
-                GameObject target = value.StartsWith("parents") ? part.parent.gameObject : part.holder.gameObject;
-                toggled.Add(new KeyValuePair<GameObject, bool>(target, target.activeSelf));
-                target.SetActive(false);
-            }
-            Debug.Log("CROW_SPLIT toggle " + value + ": " + toggled.Count + " objects off");
-        }
-
-        // From a holder's OnEnable and OnDisable: with check, the part against its place right away.
-        internal static void Switched(SplitHolder holder)
-        {
-            if (!checking) return;
-            switches++;
-            var part = holder.part.GetComponent<SplitPart>();
-            SplitFollow.Tick();  // the parts where following puts them this frame
-            if (part != null) Compare(part);
-        }
-
-        // -crow-scene-split check: each part against its old place.
-        static void Check()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (now < nextCheck) return;
-            nextCheck = now + 1f;
-            SplitFollow.Tick();
-            found.Clear();
-            foreach (SplitPart part in Resources.FindObjectsOfTypeAll<SplitPart>())
-                if (part != null && part.parent != null && part.gameObject.scene.IsValid() && part.transform.parent != part.parent) found.Add(part);
-            foreach (SplitPart part in found) Compare(part);
-            if (now - lastSummary < 30f) return;
-            lastSummary = now;
-            Debug.Log("CROW_SPLIT_CHECK " + found.Count + " parts, " + checks + " checks, " + switches + " holder switches, " + differences + " differences, " +
-                      reported.Count + " parts differed");
-        }
-
-        // Active exactly when it would be in its old place (its holder's, or its parents' with its own
-        // activity), and where it would be there.
-        static void Compare(SplitPart part)
-        {
-            if (!SplitFollow.Ready) return;  // a load's parts before following placed them
-            checks++;
-            SplitHolder holder = part.holder;
-            bool active = part.gameObject.activeInHierarchy;
-            // Nothing names a part's root, so it is on exactly while its holder, or its old parents with
-            // its own first activity, would show it.
-            bool wanted = holder != null ? holder.gameObject.activeInHierarchy : part.parent.gameObject.activeInHierarchy && part.active;
-            Matrix4x4 there = holder != null ? holder.transform.localToWorldMatrix
-                : part.parent.localToWorldMatrix * Matrix4x4.TRS(part.position, part.rotation, part.scale);
-            Matrix4x4 here = part.transform.localToWorldMatrix;
-            bool placed = true;
-            for (int i = 0; i < 16; i++)
-                if (Mathf.Abs(here[i] - there[i]) > 1e-3f * Mathf.Max(1f, Mathf.Abs(there[i]))) placed = false;
-            if (active == wanted && placed) return;
-            differences++;
-            if (!reported.Add(part)) return;
-            Debug.Log("CROW_SPLIT_CHECK " + Perf.Path(part.transform, 3) + " (from " + Perf.Path(part.parent, 3) + "): " +
-                      (active == wanted ? "" : "active " + active + " where it would be " + wanted + " ") + (placed ? "" : "moved from its place (" + (here.GetColumn(3) - there.GetColumn(3)).magnitude.ToString("0.###", CultureInfo.InvariantCulture) + " m, parent " + (part.transform.parent == null ? "none" : part.transform.parent.name) + ")"));
-        }
-    }
-
-    // In the place of a part PlayerSplit made a root of its own: the part follows the player's
-    // activation and goes with it.
-    public class SplitMirror : MonoBehaviour
-    {
-        internal GameObject part;
-        internal bool active = true;
-
-        void OnEnable()
-        {
-            if (part == null) return;
-            part.SetActive(active);
-            Debug.Log("CROW_SPLIT " + part.name + (active ? " on" : " stays off") + " with the player");
-        }
-
-        void OnDisable()
-        {
-            if (part == null) return;
-            active = part.activeSelf;
-            part.SetActive(false);
-            Debug.Log("CROW_SPLIT " + part.name + " off with the player");
-        }
-
-        void OnDestroy()
-        {
-            if (part != null) Destroy(part);
-        }
-    }
-
-    // The map (the player's "UI Canvas Map OFF": one overlay canvas, about 700 images with SFB's
-    // UIPixelate mesh effect and 120 texts below the scrolled "map scroll me y0 / y-393") scrolls
-    // vertically by MoveTowardsUI at 400 units a second while up or down is held. UIPixelate snaps each
-    // image's pixel pattern to a 416x234 grid on the screen: its uv1 holds the image's offset from the
-    // grid (its lower left corner's world position modulo a cell) and its size in cells, and its Update
-    // dirties the image's mesh whenever its transform has changed. A scroll moves every image's
-    // transform, so every image was rebuilt (OnPopulateMesh, ModifyMesh, the uv1 shim per vertex) at
-    // every frame of a scroll: PostLateUpdate.PlayerUpdateCanvases 42-44 ms a frame on the PS Vita
-    // (Fairy Forest, every map page known), the frame 80-83 ms. With the rule on, after the canvases'
-    // update of each frame the scroller is put on the lattice of whole grid cells (in each axis) through
-    // the position it had when the map was first shown (every image builds its mesh then, as the canvas
-    // switches on, and again whenever it is switched on), so each image's offset from the grid, and with
-    // it its mesh, stays what it was; and while the map is shown, UIPixelate.Update of the images below
-    // the scroller returns at once (it starts with Skip, rewriter PatchUIPixelate: an instance ID looked
-    // up, about 3 us; reading and clearing each moved transform's hasChanged instead cost about 100 us an
-    // image on the PS Vita). Scrolling: the frame 82.6 -> 41.4 ms, the canvases 43.8 -> 7.2 ms, the
-    // same as the map standing still. The scroll moves in steps of one grid cell (about 2 screen pixels)
-    // and stops within half a cell of where the game's stops; the picture is the same. What an image's
-    // Update also caught, a change of its own scale or of the camera's size while the map is shown, waits
-    // for its next switch-on (none of the map's images scale while shown, but for the rare lure ring's
-    // pulse; size changes rebuild through uGUI itself). CROW_MAP logs the scroller once found and, as the
-    // map closes, the moves and the rebuilds left out; -crow-map-log every 5 s while it is shown.
-    public static class MapPan
-    {
-        static bool on, hooked;
-        static GameObject canvas;
-        static RectTransform scroller;
-        static HashSet<int> images;  // the instance IDs of the UIPixelates below the scroller
-        static Type pixelate;
-        static System.Reflection.FieldInfo toWidth, toHeight;
-        static Vector2 origin, last, cell;
-        static bool open;
-        static float nextFind;
-        static int moves, snapped, skipped;
-
-        public static void Install(string[] args)
-        {
-            probe = Array.IndexOf(args, "-crow-map-log") >= 0;
-            string arrowsValue = Perf.Value(args, "-crow-map-arrows");
-            if (arrowsValue != null ? arrowsValue == "canvas" : Application.platform == RuntimePlatform.PSP2) SetArrows(true);
-            string value = Perf.Value(args, "-crow-map-pan");
-            if (value != null ? value == "on" : Application.platform == RuntimePlatform.PSP2) Set(true);
-        }
-
-        internal static void Set(bool value)
-        {
-            on = value;
-            open = false;
-            if (!hooked)
-            {
-                hooked = true;
-                Canvas.willRenderCanvases += Tick;
-                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
-            }
-            Debug.Log("CROW_MAP pan " + (on ? "on" : "game"));
-        }
-
-        static Transform Named(Transform root, string prefix, int depth)
-        {
-            if (root.name.StartsWith(prefix, StringComparison.Ordinal)) return root;
-            if (depth == 0) return null;
-            for (int i = 0; i < root.childCount; i++)
-            {
-                Transform found = Named(root.GetChild(i), prefix, depth - 1);
-                if (found != null) return found;
-            }
-            return null;
-        }
-
-        static void Find()
-        {
-            canvas = null;
-            scroller = null;
-            images = null;
-            GameObject holder = GameObject.Find("UI Canvases");
-            if (holder == null) return;
-            Transform map = null;
-            for (int i = 0; i < holder.transform.childCount; i++)
-                if (holder.transform.GetChild(i).name == "UI Canvas Map OFF") map = holder.transform.GetChild(i);
-            if (map == null) return;
-            if (pixelate == null)
-            {
-                foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
-                {
-                    pixelate = assembly.GetType("com.sfbgames.general.materials.UIPixelate");
-                    if (pixelate != null) break;
-                }
-                if (pixelate == null)
-                {
-                    Debug.Log("CROW_MAP no UIPixelate type: off");
-                    on = false;
-                    return;
-                }
-                const System.Reflection.BindingFlags Field = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-                toWidth = pixelate.GetField("_screenToPixelatedWidth", Field);
-                toHeight = pixelate.GetField("_screenToPixelatedHeight", Field);
-            }
-            Transform found = Named(map, "map scroll me", 6);
-            if (found == null || !(found is RectTransform)) return;
-            canvas = map.gameObject;
-            scroller = (RectTransform)found;
-            images = new HashSet<int>(scroller.GetComponentsInChildren(pixelate, true).Select(c => c.GetInstanceID()));
-            arrows = Named(map, "scroll arrows", 8);
-            Debug.Log("CROW_MAP scroller " + scroller.name + ": " + images.Count + " pixelated images; arrows " + (arrows == null ? "none" : arrows.name));
-            Arrows();
-        }
-
-        // -crow-map-arrows canvas|game: the map's scroll arrows (their FSM bobs them up and down, a
-        // DOTween loop that never stops while the map is shown) under a canvas of their own (the PS
-        // Vita's default), so their motion rebuilds the batches of 10 objects instead of the whole map's
-        // canvas at every frame; the nested canvas takes the map canvas's shader channels (UIPixelate
-        // reads uv1 and uv2) and draws where the arrows did, in hierarchy order. game: as the game has
-        // them. -crow-cycle takes maparrows=.
-        static bool arrowsOn;
-        static Transform arrows;
-        static Canvas arrowsCanvas;
-
-        internal static void SetArrows(bool value)
-        {
-            arrowsOn = value;
-            if (!hooked)
-            {
-                hooked = true;
-                Canvas.willRenderCanvases += Tick;
-                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
-            }
-            Arrows();
-            Debug.Log("CROW_MAP arrows " + (arrowsOn ? "canvas" : "game"));
-        }
-
-        static void Arrows()
-        {
-            if (arrows == null || canvas == null) return;
-            if (arrowsOn && arrowsCanvas == null && arrows.GetComponent<Canvas>() == null)
-            {
-                Canvas root = canvas.GetComponent<Canvas>();
-                arrowsCanvas = arrows.gameObject.AddComponent<Canvas>();
-                if (root != null) arrowsCanvas.additionalShaderChannels = root.additionalShaderChannels;
-            }
-            else if (!arrowsOn && arrowsCanvas != null)
-            {
-                UnityEngine.Object.Destroy(arrowsCanvas);
-                arrowsCanvas = null;
-            }
-        }
-
-        // The grid cell in the scroller's parent's units, from an image that has built its mesh.
-        static bool Cell()
-        {
-            if (toWidth == null || toHeight == null) return false;
-            Component built = scroller.GetComponentsInChildren(pixelate, false).FirstOrDefault(c => (float)toHeight.GetValue(c) > 0f);
-            if (built == null) return false;
-            Vector3 scale = scroller.parent == null ? Vector3.one : scroller.parent.lossyScale;
-            float w = (float)toWidth.GetValue(built), h = (float)toHeight.GetValue(built);
-            if (w <= 0f || scale.x <= 0f || scale.y <= 0f) return false;
-            cell = new Vector2(1f / w / scale.x, 1f / h / scale.y);
-            return true;
-        }
-
-        static float Snap(float value, float from, float step)
-        {
-            return from + Mathf.Round((value - from) / step) * step;
-        }
-
-        // After the canvases' update (their meshes built for this frame's dirt), before they draw.
-        static void Tick()
-        {
-            if (!on && !open && !arrowsOn) return;
-            if (scroller == null || canvas == null)
-            {
-                open = false;
-                if (Time.realtimeSinceStartup < nextFind) return;
-                nextFind = Time.realtimeSinceStartup + 2f;
-                Find();
-                if (scroller == null) return;
-            }
-            if (!on && !open) return;
-            if (!on || !canvas.activeInHierarchy)
-            {
-                if (open && moves > 0) Debug.Log("CROW_MAP closed: " + moves + " moves, " + snapped + " snapped, " + skipped + " rebuilds left out, cell " + cell.x.ToString("0.###", CultureInfo.InvariantCulture) + "x" + cell.y.ToString("0.###", CultureInfo.InvariantCulture));
-                open = false;
-                return;
-            }
-            Vector2 at = scroller.anchoredPosition;
-            if (!open)
-            {
-                // The first frame shown: every image built its mesh where the scroller is now.
-                if (!Cell()) return;
-                open = true;
-                origin = last = at;
-                moves = snapped = skipped = lastSkipped = lastMoves = 0;
-                return;
-            }
-            Place();
-            Log();
-        }
-
-        // The scroller on the lattice, if it moved since the last look.
-        static void Place()
-        {
-            Vector2 at = scroller.anchoredPosition;
-            if (at == last) return;
-            moves++;
-            var put = new Vector2(Snap(at.x, origin.x, cell.x), Snap(at.y, origin.y, cell.y));
-            if (put != at)
-            {
-                scroller.anchoredPosition = put;
-                snapped++;
-            }
-            last = put;
-        }
-
-        // From the start of every UIPixelate.Update (rewriter PatchUIPixelate): true skips the rest, which
-        // would dirty the image's mesh because its transform changed.
-        public static bool Skip(Component effect)
-        {
-            if (!open) return false;
-            long start = probe ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
-            calls++;
-            bool skip = images.Contains(effect.GetInstanceID());
-            if (skip) skipped++;
-            if (probe) ticks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
-            return skip;
-        }
-
-        // -crow-map-log: every 5 s while the map is open, the calls of Skip, their time, rebuilds left
-        // out, moves and the scroller's place (CROW_MAP_LOG).
-        static bool probe;
-        static long ticks, calls;
-        static float nextLog;
-        static int lastSkipped, lastMoves;
-
-        static void Log()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (!probe || now < nextLog) return;
-            nextLog = now + 5f;
-            Debug.Log("CROW_MAP_LOG calls=" + calls + " skipMs=" + (ticks * 1000.0 / System.Diagnostics.Stopwatch.Frequency).ToString("0.0", CultureInfo.InvariantCulture) +
-                      " skipped=" + (skipped - lastSkipped) + " moves=" + (moves - lastMoves) + " frames=" + Time.frameCount + " y=" + scroller.anchoredPosition.y.ToString("0.00", CultureInfo.InvariantCulture));
-            calls = ticks = 0;
-            lastSkipped = skipped;
-            lastMoves = moves;
         }
     }
 }

@@ -21,12 +21,21 @@ using Mono.Cecil.Cil;
 //   Redirect.cs             missing types and members to CrowCompat, attributes, references,
 //                           the IL helpers the passes share
 //   Runtime.cs              type layouts the target's Mono rejects (interfaces)
-//   Patches.cs              single game methods that call CrowCompat rules (the camera's post chain)
+//   Patches.cs              single game methods that call CrowCompat rules (the camera's post chain,
+//                           Rewired's platform, scene loads, the player prefab)
 //   ScriptCost.cs           per-frame PlayMaker and fade work skipped where it has no effect
+//   FsmTrim.cs              PlayMaker FSM updates that would do nothing, skipped
 //   IdleAudio.cs            AudioSource play calls and Behaviour.enabled through CrowCompat IdleAudio
+//   Cuts.cs                 the fights' cuts: FSM rate gates, light flicker, particle bursts, Rewired
+//   EnemySplit.cs           the game's SetActive and transform calls through CrowCompat EnemySplit
 //   Alloc.cs                allocation in play: PlayMaker's DOTween tweens recyclable, delegates and
 //                           DOTween's shortcut closures made once
 //   Decor.cs                decoration off screen: DOTween's and the animation scripts' hooks
+//   Pad.cs                  Rewired's queries and update through CrowCompat's PS Vita pad reader
+//   PlayMakerData.cs        load time: ActionData's lists as arrays, action fields set without reflection
+//   FastPaths.cs            PlayMaker's Get and Set Property, and object names, without reflection
+//   LoadStats.cs            load time: PlayMaker's load methods timed (-crow-load-stats)
+//   ActionProfile.cs        profiling builds only (CROW_ACTION_PROFILE=1): actions and behaviours timed
 partial class DowngradeAssemblies
 {
     // Types that exist in the target under another name.
@@ -146,7 +155,6 @@ partial class DowngradeAssemblies
         new Pass("cuts", Scope.All, FsmDeltaTime),
         new Pass("cuts", Scope.Game, CutsLightFlicker),
         new Pass("cuts", Scope.Game, CutsParticleBursts),
-        new Pass("cuts", Scope.All, CutsRendererEnabled),
         new Pass("cuts", Scope.All, CutsRewired),
         new Pass("rewiredsites", Scope.All, CutsRewiredSites),  // probing builds only: CROW_REWIRED_SITES=1
         // Pad.cs (PadUpdate after CutsRewired: its skip goes ahead of RewiredProbe.Begin)

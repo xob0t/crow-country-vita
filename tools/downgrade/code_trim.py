@@ -65,4 +65,5 @@ def trim_assemblies(folder: Path, version: str, references: list):
     (ARTIFACTS / 'trim.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:
         raise SystemExit(f'TrimAssemblies failed ({result.returncode}); see {ARTIFACTS / "trim.log"}')
-    log(f'{len(names)} PlayMaker action types in the data. {result.stdout.strip().splitlines()[-1]}')
+    last = (result.stdout.strip().splitlines() or ['(no output)'])[-1]
+    log(f'{len(names)} PlayMaker action types in the data. {last}')

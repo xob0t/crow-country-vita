@@ -26,25 +26,23 @@ import ctypes
 import ctypes.wintypes as wt
 import os
 import re
-import shutil
 import sys
 import threading
 import time
 from pathlib import Path
 
 import vitalike
-from common import ROOT
+from common import EDITORS, ROOT, TARGET, WORK, split_at_dashes
 
 OUT = ROOT / 'artifacts' / 'cpuprofile'
-UNITY_PDB_DIR = (
-    Path.home()
-    / 'AppData/Local/Unity/Editors/2018.2.19f1/Editor/Data/PlaybackEngines/windowsstandalonesupport'
-    / 'Variations/win64_nondevelopment_il2cpp'
-)
+# The installed editor's UnityPlayer.pdb for the IL2CPP player (the engine's names).
+PLAYBACK_ENGINES = EDITORS / TARGET / 'Editor' / 'Data' / 'PlaybackEngines'
+UNITY_PDB_DIR = PLAYBACK_ENGINES / 'windowsstandalonesupport' / 'Variations' / 'win64_nondevelopment_il2cpp'
+SYSTEM32 = Path(os.environ['SYSTEMROOT']) / 'System32'
 
 kernel32 = vitalike.kernel32
 ntdll = vitalike.ntdll
-dbghelp = ctypes.WinDLL(str(Path(__import__('os').environ['SystemRoot']) / 'System32' / 'dbghelp.dll'))
+dbghelp = ctypes.WinDLL(str(SYSTEM32 / 'dbghelp.dll'))
 
 TH32CS_SNAPTHREAD = 0x4
 THREAD_ALL = 0x0008 | 0x0010 | 0x0040 | 0x0002  # GET_CONTEXT | SET_CONTEXT | QUERY_INFORMATION | SUSPEND_RESUME
@@ -235,7 +233,7 @@ def symbolize(keys, build):
     backup = build / 'CrowCountry_BackUpThisFolder_ButDontShipItWithYourGame'  # GameAssembly.pdb
     if not dbghelp.SymInitializeW(process, ';'.join(str(p) for p in (build, backup, UNITY_PDB_DIR)), False):
         raise OSError(ctypes.get_last_error(), 'SymInitialize failed')
-    system = Path(__import__('os').environ['SystemRoot']) / 'System32'
+    system = SYSTEM32
     bases, names = {}, {}
     info = SymbolInfo()
     displacement = ctypes.c_uint64()
@@ -352,34 +350,17 @@ class SamplingDuty(vitalike.Duty):
 HEARTBEAT = re.compile(r'^HEARTBEAT t=\S+ scene=(\S+)', re.M)
 
 
-COPY = ROOT / 'work' / 'cpuprofile' / 'player'
+COPY = WORK / 'cpuprofile' / 'player'
 
 
 def prepare_player(build: Path):
-    """A hard-linked copy of the IL2CPP build (nothing copied twice), without Steam's steam_api library
-    and steam_appid.txt; refreshed when the build's GameAssembly.dll changes."""
-    source = build / 'GameAssembly.dll'
-    if not source.exists():
+    """A hard-linked copy of the IL2CPP build (nothing copied twice), without Steam's files (run_player's
+    player_copy); refreshed when the build's GameAssembly.dll changes."""
+    import run_player
+
+    if not (build / 'GameAssembly.dll').exists():
         sys.exit(f'No IL2CPP player in {build}: pipeline.py build --platform windows --backend il2cpp')
-    stamp = f'{source.stat().st_size}:{source.stat().st_mtime_ns}'
-    marker = COPY / 'cpuprofile-source.txt'
-    if marker.exists() and marker.read_text() == stamp:
-        return
-    if COPY.exists():
-        shutil.rmtree(COPY)
-    for item in build.rglob('*'):
-        if item.name.lower().startswith(('steam_api', 'steam_appid')):
-            continue
-        target = COPY / item.relative_to(build)
-        if item.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            os.link(item, target)
-        except OSError:
-            shutil.copy2(item, target)
-    marker.write_text(stamp)
+    return run_player.player_copy(build, COPY, sources=['GameAssembly.dll'])
 
 
 def run(args, flags):
@@ -389,7 +370,7 @@ def run(args, flags):
 
     kernel32.OpenProcess.restype = wt.HANDLE
     kernel32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
-    prepare_player(args.build.resolve())
+    exe = prepare_player(args.build.resolve())
     out = (OUT / args.tag).resolve()
     out.mkdir(parents=True, exist_ok=True)
     for stale in out.glob('*'):
@@ -435,7 +416,6 @@ def run(args, flags):
 
         return stop
 
-    exe = COPY / 'CrowCountry.exe'
     runner = threading.Thread(
         target=run_player.run,
         args=(exe, log_path, flags),
@@ -661,8 +641,7 @@ def main():
         args = parser.parse_args(sys.argv[2:])
         report(args.tag, args.top)
         return
-    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
-    own, flags = sys.argv[1:split], sys.argv[split + 1 :]
+    own, flags = split_at_dashes(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('tag')
     parser.add_argument('--scene')

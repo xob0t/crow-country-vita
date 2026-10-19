@@ -75,19 +75,27 @@ namespace CrowCompat
                 nextScan = Time.realtimeSinceStartup + 0.5f;
                 fullScan = true;
             };
+            SceneManager.sceneUnloaded += scene => Forget();
             Canvas.willRenderCanvases += Frame;
+        }
+
+        // The destroyed bodies' entries (spent chambers, debris and an unloaded area's bodies), at each unload.
+        static void Forget()
+        {
+            var dead = new List<Rigidbody>();
+            foreach (Rigidbody body in gameDrag.Keys) if (body == null) dead.Add(body);
+            foreach (Rigidbody body in dead) gameDrag.Remove(body);
+            dead.Clear();
+            foreach (Rigidbody body in ownCollider.Keys) if (body == null) dead.Add(body);
+            foreach (Rigidbody body in dead) ownCollider.Remove(body);
         }
 
         // From Diag.Install (every player, flags or not).
         internal static void Install(string[] args)
         {
-            int flag = Array.IndexOf(args, "-crow-fixed-dt");
-            string value = flag >= 0 && flag + 1 < args.Length ? args[flag + 1] : null;
-            int ccd = Array.IndexOf(args, "-crow-bullet-ccd");
-            bulletCcd = !(ccd >= 0 && ccd + 1 < args.Length && args[ccd + 1] == "off");
-            int capFlag = Array.IndexOf(args, "-crow-physics-cap");
-            string capValue = capFlag >= 0 && capFlag + 1 < args.Length ? args[capFlag + 1]
-                : Application.platform == RuntimePlatform.PSP2 ? "2" : null;
+            string value = CrowFlags.Value(args, "-crow-fixed-dt");
+            bulletCcd = CrowFlags.Value(args, "-crow-bullet-ccd") != "off";
+            string capValue = CrowFlags.Value(args, "-crow-physics-cap") ?? (Application.platform == RuntimePlatform.PSP2 ? "2" : null);
             if (capValue != null) Cap(capValue);
             // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
             if (value == null && Application.platform == RuntimePlatform.PSP2) value = "30";

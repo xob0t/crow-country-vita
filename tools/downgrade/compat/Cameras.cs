@@ -69,11 +69,11 @@ namespace CrowCompat
                 Hook();
                 Camera.onPreCull += Count;
             }
-            string value = Perf.Value(args, "-crow-rt-cameras") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string value = CrowFlags.Value(args, "-crow-rt-cameras") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
             if (value != null) Set(value);
-            string menu = Perf.Value(args, "-crow-menu-cull") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string menu = CrowFlags.Value(args, "-crow-menu-cull") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
             if (menu != null) MenuCull.Set(menu == "on");
-            string fog = Perf.Value(args, "-crow-fog-far");
+            string fog = CrowFlags.Value(args, "-crow-fog-far");
             if (fog != null) FogFar(fog == "on");
         }
 
@@ -159,7 +159,7 @@ namespace CrowCompat
             if (now < nextFog) return;
             nextFog = now + 2f;
             Camera camera = Camera.main;
-            if (camera != fogCamera || (setFar > 0f && !Mathf.Approximately(camera.farClipPlane, setFar))) UndoFog();
+            if (camera == null || camera != fogCamera || (setFar > 0f && !Mathf.Approximately(camera.farClipPlane, setFar))) UndoFog();
             if (camera == null || !RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear) return;
             float end = RenderSettings.fogEndDistance;
             if (fogCamera == null)

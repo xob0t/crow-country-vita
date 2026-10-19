@@ -45,11 +45,11 @@ namespace CrowCompat
     {
         public static void Install(string[] args)
         {
-            string property = Perf.Value(args, "-crow-fast-property");
+            string property = CrowFlags.Value(args, "-crow-fast-property");
             if (property == "game") FastProperty.On = false;
             FastProperty.Check = property == "check";
-            if (Perf.Value(args, "-crow-lit-camera") == "game") VitaLit.CacheCamera = false;
-            if (Perf.Value(args, "-crow-fast-names") == "game") Names.On = false;
+            if (CrowFlags.Value(args, "-crow-lit-camera") == "game") VitaLit.CacheCamera = false;
+            if (CrowFlags.Value(args, "-crow-fast-names") == "game") Names.On = false;
             UnityEngine.SceneManagement.SceneManager.sceneUnloaded += scene => Names.Clear();
         }
 

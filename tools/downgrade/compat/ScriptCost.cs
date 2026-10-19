@@ -42,9 +42,7 @@ namespace CrowCompat
 
         static bool GameFlag()
         {
-            string[] args = ProbeFiles.Args;
-            int index = Array.IndexOf(args, "-crow-script-cost");
-            bool game = index >= 0 && index + 1 < args.Length && args[index + 1] == "game";
+            bool game = CrowFlags.Value(ProbeFiles.Args, "-crow-script-cost") == "game";
             if (game) UnityEngine.Debug.Log("CROW_SCRIPT_COST game: the game's per-frame PlayMaker and fade work");
             return game;
         }
@@ -62,14 +60,13 @@ namespace CrowCompat
         }
 
         static readonly Predicate<UnityEngine.GameObject> destroyed = piece => piece == null;
-        static readonly bool trailGuard = Fast && !(Array.IndexOf(ProbeFiles.Args, "-crow-blob-trail") >= 0 &&
-                                                    Array.IndexOf(ProbeFiles.Args, "game") == Array.IndexOf(ProbeFiles.Args, "-crow-blob-trail") + 1);
+        static readonly bool trailGuard = Fast && CrowFlags.Value(ProbeFiles.Args, "-crow-blob-trail") != "game";
 
         // The fade actions between OnEnter and OnExit, with their FSM's GameObject (FsmStateAction.Owner).
         static readonly Dictionary<object, UnityEngine.Object> guiActions = new Dictionary<object, UnityEngine.Object>(new SameObject());
         static readonly List<object> gone = new List<object>();
 
-        static readonly bool log = Array.IndexOf(ProbeFiles.Args, "-crow-script-cost-log") >= 0;
+        static readonly bool log = CrowFlags.Has(ProbeFiles.Args, "-crow-script-cost-log");
 
         public static void GuiEnter(object action, UnityEngine.Object owner)
         {

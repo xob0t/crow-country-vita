@@ -10,29 +10,23 @@ using UnityEngine.SceneManagement;
 // it dies. In Station Square's fight (6 enemies awake, PS Vita) taking every enemy's topmost inactive
 // subtrees out (3,000 transforms) cut physics by 0.3 ms a step, the frame by about 3 ms; in the stress
 // fight 15-25 ms.
-//   -crow-enemy-split on|off|check
-//       on: 4 s after each area load, each enemy's topmost inactive subtrees (but the Blob trails'
-//       pieces, which their spawner switches on all the time) go to a root of their own, keeping their
-//       local place; the first time the game's code switches one on, reparents it, or reads or sets its
-//       world position or rotation or its parent, it goes back exactly where it was first (the
-//       rewriter's RouteEnemySplit sends GameObject.SetActive and those Transform members here), so the
-//       death code finds everything in place. check: the same, and any of those calls on a part inside
-//       a moved subtree (not its root) is logged (CROW_SPLIT_MISS).
 // The PS Vita build moves the enemies' death debris out when it writes each scene (compat/EnemyRebuild.cs,
-// CROW_ENEMY_DEBRIS): its EnemyDebrisHolder hands the parts it holds to Adopt as the scene loads, and
-// they come back the same way. A call on a part inside a moved subtree (not only its root) puts the
-// subtree back too, logged in check mode.
+// CROW_ENEMY_DEBRIS): its EnemyDebrisHolder hands the parts it holds to Adopt as the scene loads. The
+// first time the game's code switches one on, reparents it, or reads or sets its world position or
+// rotation or its parent, it goes back exactly where it was first (the rewriter's RouteEnemySplit sends
+// GameObject.SetActive and those Transform members here), so the death code finds everything in place;
+// a call on a part inside a moved subtree (not only its root) puts the subtree back too, logged with
+// -crow-enemy-debris check (CROW_SPLIT_MISS). (The run-time split of 18 Oct, -crow-enemy-split, which
+// this replaced, is gone.)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
     public static class EnemySplit
     {
-        static string mode = "off";
         static bool check;
         // Per scene: the root the moved parts go under, in the enemy's own scene (unloaded with it).
         static readonly Dictionary<int, Transform> holders = new Dictionary<int, Transform>();
         const string HolderName = "CrowEnemySplit";
-        static float splitAt = -1f;
         static readonly Dictionary<Transform, Place> moved = new Dictionary<Transform, Place>(Same.Comparer);
         // Every transform below a moved part (not the parts themselves): a call on one puts its part back.
         static readonly HashSet<Transform> inside = new HashSet<Transform>(Same.Comparer);
@@ -74,33 +68,7 @@ namespace CrowCompat
         {
             EnemyRebuild.Install(args);
             SceneManager.sceneUnloaded += scene => Purge();
-            int flag = Array.IndexOf(args, "-crow-enemy-split");
-            if (flag >= 0 && flag + 1 < args.Length) mode = args[flag + 1];
-            check = mode == "check" || EnemyRebuild.CheckDebris;
-            if (mode != "on" && mode != "check") return;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
-            {
-                if (scene.name != "CrowGap" && scene.name != "CrowMara" && scene.name != "Title" && scene.name != "Logos")
-                    splitAt = Time.realtimeSinceStartup + 4f;
-            };
-            Canvas.willRenderCanvases += Frame;
-            Debug.Log("CROW_SPLIT_ENEMY " + mode);
-        }
-
-        static void Frame()
-        {
-            if (splitAt < 0f || Time.realtimeSinceStartup < splitAt) return;
-            splitAt = -1f;
-            int subtrees = 0, transforms = 0;
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                Scene scene = SceneManager.GetSceneAt(i);
-                if (!scene.isLoaded) continue;
-                foreach (GameObject root in scene.GetRootGameObjects())
-                    foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
-                        if (body.name.StartsWith("Enemy ", StringComparison.Ordinal)) Split(body.transform, ref subtrees, ref transforms);
-            }
-            Debug.Log("CROW_SPLIT_ENEMY " + subtrees + " inactive subtrees (" + transforms + " transforms) out of the enemies");
+            check = EnemyRebuild.CheckDebris;
         }
 
         // What an unloaded scene took with it.
@@ -111,13 +79,9 @@ namespace CrowCompat
             foreach (Transform t in dead) moved.Remove(t);
             inside.RemoveWhere(t => t == null);
             adopted.RemoveAll(a => a.Part == null || a.Holder == null);
-        }
-
-        // An enemy's topmost inactive subtrees out (Fight's copies too).
-        internal static void Split(Transform enemy)
-        {
-            int subtrees = 0, transforms = 0;
-            if (mode == "on" || mode == "check") Split(enemy, ref subtrees, ref transforms);
+            var gone = new List<int>();
+            foreach (KeyValuePair<int, Transform> pair in holders) if (pair.Value == null) gone.Add(pair.Key);
+            foreach (int key in gone) holders.Remove(key);
         }
 
         static Transform HolderOf(Scene scene)
@@ -132,19 +96,6 @@ namespace CrowCompat
             return holder;
         }
 
-        static void Split(Transform enemy, ref int subtrees, ref int transforms)
-        {
-            Transform holder = HolderOf(enemy.gameObject.scene);
-            var tops = new List<Transform>();
-            foreach (Transform t in enemy.GetComponentsInChildren<Transform>(true))
-                if (!t.gameObject.activeSelf && t.parent != null && t.parent.gameObject.activeInHierarchy && !Trail(t) && !moved.ContainsKey(t)) tops.Add(t);
-            foreach (Transform t in tops)
-            {
-                transforms += Out(t, t.parent, t.GetSiblingIndex(), holder);
-                subtrees++;
-            }
-        }
-
         // A part out to the holder, local pose kept; returns its transforms.
         static int Out(Transform part, Transform parent, int sibling, Transform holder)
         {
@@ -153,14 +104,6 @@ namespace CrowCompat
             for (int i = 1; i < below.Length; i++) inside.Add(below[i]);
             if (part.parent != holder) part.SetParent(holder, false);
             return below.Length;
-        }
-
-        // A Blob trail's pool piece (its spawner switches pieces on many times a second): left in place.
-        static bool Trail(Transform t)
-        {
-            foreach (MonoBehaviour behaviour in t.GetComponentsInChildren<MonoBehaviour>(true))
-                if (behaviour != null && behaviour.GetType().Name == "BlobTrailPiece") return true;
-            return false;
         }
 
         // The build's moved parts (EnemyDebrisHolder.Awake) and the parts taken out after their pick
@@ -371,7 +314,7 @@ namespace CrowCompat
         // misses (check).
         internal static string Report()
         {
-            if (mode == "off" && adopted.Count == 0) return null;
+            if (adopted.Count == 0) return null;
             return "split=" + moved.Count + "/" + restored + "(" + restoredBySwitch + "s," + restoredByTouch + "t," + restoredByInside + "i)/" + misses;
         }
     }

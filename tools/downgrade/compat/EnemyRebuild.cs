@@ -182,14 +182,14 @@ namespace CrowCompat
     {
         static bool atlasOn = true, flattenOn = true, debrisOut = true, log;
         internal static bool CheckDebris;
-        static int adoptedParts, adoptedTransforms, variantsTaken, holdersSeen;
+        static int adoptedParts, adoptedTransforms, holdersSeen;  // since the last area's line
 
         // From EnemySplit.Install (Diag, every player).
         internal static void Install(string[] args)
         {
-            atlasOn = Perf.Value(args, "-crow-enemy-atlas") != "off";
-            flattenOn = Perf.Value(args, "-crow-enemy-flatten") != "off";
-            string debris = Perf.Value(args, "-crow-enemy-debris");
+            atlasOn = CrowFlags.Value(args, "-crow-enemy-atlas") != "off";
+            flattenOn = CrowFlags.Value(args, "-crow-enemy-flatten") != "off";
+            string debris = CrowFlags.Value(args, "-crow-enemy-debris");
             debrisOut = debris != "in";
             CheckDebris = debris == "check";
             log = args.Contains("-crow-enemy-rebuild-log");
@@ -203,6 +203,7 @@ namespace CrowCompat
                     Debug.Log("CROW_ENEMY_REBUILD " + scene.name.Replace(' ', '_') + ": holders=" + holdersSeen + " parts=" + adoptedParts + " transforms=" + adoptedTransforms +
                               " debris=" + (debrisOut ? "out" : "in") + " atlasRecords=" + Records<EnemyAtlasRecord>(scene).Count +
                               " flattenRecords=" + Records<EnemyFlattenRecord>(scene).Count + " " + atlas + " " + flatten);
+                holdersSeen = adoptedParts = adoptedTransforms = 0;
             };
         }
 
@@ -247,7 +248,6 @@ namespace CrowCompat
                     taken++;
                     Transform part = variant.transform;
                     adoptedTransforms += EnemySplit.Adopt(part, part.parent, part.GetSiblingIndex(), holder.transform, debrisOut);
-                    variantsTaken++;
                 }
             }
             if (log) Debug.Log("CROW_ENEMY_REBUILD variants: " + scripts + " RandomVariant scripts, " + onePick + " with one pick on, " + asleep + " not awake yet, " + taken + " unpicked variants out");
@@ -355,7 +355,7 @@ namespace CrowCompat
                 float.TryParse(args[at + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out after);
                 dir = args[at + 2];
             }
-            deathDir = Perf.Value(args, "-crow-enemy-death-shots");
+            deathDir = CrowFlags.Value(args, "-crow-enemy-death-shots");
             FlattenCheck.On = args.Contains("-crow-enemy-flatten-check");
             if (dir == null && deathDir == null && !FlattenCheck.On) return;
             var holder = new GameObject("CrowEnemyShots");
@@ -499,7 +499,11 @@ namespace CrowCompat
                     string side = turn == 0f ? "front" : turn > 0f ? "left" : "right";
                     Texture2D atlas = Render();
                     Save(atlas, dir, name + "-" + side + "-atlas.png");
-                    if (records.Length == 0) continue;
+                    if (records.Length == 0)
+                    {
+                        UnityEngine.Object.Destroy(atlas);  // each render is a new texture (768 KB at 512x512)
+                        continue;
+                    }
                     foreach (EnemyAtlasRecord record in records) record.Set(false);
                     Texture2D original = Render();
                     foreach (EnemyAtlasRecord record in records) record.Set(true);
@@ -516,6 +520,8 @@ namespace CrowCompat
                     }
                     Debug.Log("CROW_ENEMY_SHOT " + name + " " + side + " records=" + records.Length + " differ=" + differ + " big=" + big + " of " + a.Length +
                               " mean=" + (sum / (double)a.Length).ToString("F2", CultureInfo.InvariantCulture));
+                    UnityEngine.Object.Destroy(atlas);
+                    UnityEngine.Object.Destroy(original);
                 }
                 // The flattening, the same way: the pivots back for one render (ab builds).
                 EnemyFlattenRecord flat = type.Value.GetComponent<EnemyFlattenRecord>();
@@ -537,6 +543,8 @@ namespace CrowCompat
                 for (int i = 0; i < f.Length; i++)
                     if (Math.Max(Math.Abs(f[i].r - g[i].r), Math.Max(Math.Abs(f[i].g - g[i].g), Math.Abs(f[i].b - g[i].b))) > 2) moved++;
                 Debug.Log("CROW_ENEMY_SHOT " + name + " flatten pivots=" + pivots + " differ=" + moved + " of " + f.Length);
+                UnityEngine.Object.Destroy(flattened);
+                UnityEngine.Object.Destroy(pivoted);
             }
         }
 
@@ -557,7 +565,9 @@ namespace CrowCompat
             }
             if (deathShot >= DeathTimes.Length || now < killAt + DeathTimes[deathShot]) return;
             Zoom(killPlace, 1.3f, killFrom);
-            Save(Render(), deathDir, "death" + kills + "-" + killType + "-" + DeathTimes[deathShot].ToString("F1", CultureInfo.InvariantCulture) + ".png");
+            Texture2D shot = Render();
+            Save(shot, deathDir, "death" + kills + "-" + killType + "-" + DeathTimes[deathShot].ToString("F1", CultureInfo.InvariantCulture) + ".png");
+            UnityEngine.Object.Destroy(shot);
             Debug.Log("CROW_ENEMY_SHOT death " + kills + " " + killType + " at " + killPlace + " t=" + DeathTimes[deathShot]);
             deathShot++;
         }

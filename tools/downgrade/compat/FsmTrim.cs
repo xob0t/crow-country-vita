@@ -75,7 +75,7 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             Set(Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
-            string value = Perf.Value(args, "-crow-fsm-trim");
+            string value = CrowFlags.Value(args, "-crow-fsm-trim");
             if (value != null) Set(value);
             logStart = reportStart = Counters();
             log = Array.IndexOf(args, "-crow-fsm-trim-log") >= 0;

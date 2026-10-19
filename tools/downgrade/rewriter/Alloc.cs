@@ -12,7 +12,7 @@ partial class DowngradeAssemblies
 {
     static int RecyclePlayMakerTweens(ModuleDefinition module)
     {
-        FieldReference on = module.ImportReference(compat["CrowCompat.TweenRecycle"].Fields.Single(f => f.Name == "On"));
+        FieldReference on = CompatField(module, "TweenRecycle", "On");
         int count = 0;
         foreach (TypeDefinition type in module.Types.Where(t => t.Namespace == "HutongGames.PlayMaker.Actions" && t.Name.StartsWith("DOTween")))
         {
@@ -59,7 +59,7 @@ partial class DowngradeAssemblies
     static int CacheBoundDelegates(ModuleDefinition module)
     {
         if (!CachesDelegates(module)) return 0;
-        FieldReference on = module.ImportReference(compat["CrowCompat.SharedClosures"].Fields.Single(f => f.Name == "On"));
+        FieldReference on = CompatField(module, "SharedClosures", "On");
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types).ToArray())
         {
@@ -131,8 +131,7 @@ partial class DowngradeAssemblies
                                                 FieldReference on, int index)
     {
         TypeReference delegateType = constructor.DeclaringType;
-        var field = new FieldDefinition("crowDelegateField" + index, FieldAttributes.Private | FieldAttributes.NotSerialized, delegateType);
-        type.Fields.Add(field);
+        FieldDefinition field = AddField(type, "crowDelegateField" + index, delegateType);
         var helper = new MethodDefinition("crowDelegate" + index, MethodAttributes.Private | MethodAttributes.HideBySig, delegateType);
         ILProcessor il = helper.Body.GetILProcessor();
         Instruction fresh = Instruction.Create(OpCodes.Ldarg_0);
@@ -163,7 +162,7 @@ partial class DowngradeAssemblies
     static int CacheStaticDelegates(ModuleDefinition module)
     {
         if (!CachesDelegates(module)) return 0;
-        FieldReference on = module.ImportReference(compat["CrowCompat.SharedClosures"].Fields.Single(f => f.Name == "On"));
+        FieldReference on = CompatField(module, "SharedClosures", "On");
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types).ToArray())
         {
@@ -411,8 +410,7 @@ partial class DowngradeAssemblies
     static MethodDefinition ClosureDelegateHelper(ModuleDefinition module, TypeDefinition closure, MethodReference target, MethodReference constructor, int index)
     {
         TypeReference delegateType = constructor.DeclaringType;
-        var field = new FieldDefinition("crowDelegateField" + index, FieldAttributes.Private | FieldAttributes.NotSerialized, delegateType);
-        closure.Fields.Add(field);
+        FieldDefinition field = AddField(closure, "crowDelegateField" + index, delegateType);
         var helper = new MethodDefinition("crowDelegate" + index, MethodAttributes.Assembly | MethodAttributes.HideBySig, delegateType);
         ILProcessor il = helper.Body.GetILProcessor();
         Instruction done = Instruction.Create(OpCodes.Ret);

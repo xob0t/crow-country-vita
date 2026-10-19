@@ -8,15 +8,22 @@ since a process on another desktop gets its standard handles from its command li
     uv run tools/downgrade/run_player.py <exe> <log> [--timeout s] -- <player arguments...>
 
 Exits with the player's exit code; a player still running after --timeout seconds is killed.
+
+The test tools run a copy of a build (player_copy) without Steam's steam_api library and
+steam_appid.txt.
 """
 
 import argparse
 import ctypes
 import ctypes.wintypes as wt
+import os
+import shutil
 import subprocess
 import sys
 import time
 from pathlib import Path
+
+from common import split_at_dashes
 
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -172,14 +179,59 @@ def child_process(parent: int, name: str, wait=30.0):
     return None
 
 
+# Steam's files, left out of every player copy: with them a test player once signed in to the user's
+# Steam account (play time, achievements). The build's Steam wrappers are stubs anyway (pipeline.py's
+# STUBBED_ON).
+STEAM_FILES = ('steam_api', 'steam_appid')
+COPY_SOURCE = 'crow-copy-source.txt'  # in a copy: the sizes and times of the build files it was made from
+
+
+def player_copy(build: Path, copy: Path, link=True, sources=()):
+    """A copy of the Windows player in build, in copy, without STEAM_FILES; its executable.
+    link: hard links (nothing copied, but a file the build rewrites in place changes in the copy as
+    well), else real copies (a run then never holds the build's files open while pipeline.py rebuilds
+    it). sources: build files (relative paths) whose sizes and times decide when an existing copy
+    is made again; without them it is made again every time."""
+    exe = build / 'CrowCountry.exe'
+    if not exe.exists():
+        sys.exit(f'No Windows player in {build}')
+    missing = [name for name in sources if not (build / name).exists()]
+    if missing:
+        sys.exit(f'No {", ".join(missing)} in {build}')
+    stamp = ' '.join(f'{(build / n).stat().st_size}:{(build / n).stat().st_mtime_ns}' for n in sources)
+    marker = copy / COPY_SOURCE
+    if sources and marker.exists() and marker.read_text() == stamp:
+        return copy / exe.name
+    if copy.exists():
+        shutil.rmtree(copy)
+    for source in build.rglob('*'):
+        if source.name.lower().startswith(STEAM_FILES):
+            continue
+        target = copy / source.relative_to(build)
+        if source.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if link:
+            try:
+                os.link(source, target)
+                continue
+            except OSError:
+                pass
+        shutil.copy2(source, target)
+    if sources:
+        marker.write_text(stamp)
+    return copy / exe.name
+
+
 def main():
-    split = sys.argv.index('--') if '--' in sys.argv else len(sys.argv)
+    own, arguments = split_at_dashes(sys.argv[1:])
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('exe', type=Path)
     parser.add_argument('log', type=Path)
     parser.add_argument('--timeout', type=float, default=600)
-    args = parser.parse_args(sys.argv[1:split])
-    sys.exit(run(args.exe, args.log, sys.argv[split + 1 :], args.timeout))
+    args = parser.parse_args(own)
+    sys.exit(run(args.exe, args.log, arguments, args.timeout))
 
 
 if __name__ == '__main__':

@@ -40,8 +40,7 @@ partial class DowngradeAssemblies
     {
         TypeDefinition property = GameType(module, "HutongGames.PlayMaker.FsmProperty");
         if (property == null) return 0;
-        var cache = new FieldDefinition("crowAccessor", FieldAttributes.Private | FieldAttributes.NotSerialized, module.TypeSystem.Object);
-        property.Fields.Add(cache);
+        FieldDefinition cache = AddField(property, "crowAccessor", module.TypeSystem.Object);
         var byRef = new ByReferenceType(module.TypeSystem.Object);
         MethodDefinition setHelper = null, getHelper = null;
         int count = 0;

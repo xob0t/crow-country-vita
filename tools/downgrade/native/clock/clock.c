@@ -11,6 +11,10 @@ int scePowerSetArmClockFrequency(int mhz);
 int scePowerGetArmClockFrequency(void);
 int scePowerSetGpuClockFrequency(int mhz);
 int scePowerGetGpuClockFrequency(void);
+int scePowerSetBusClockFrequency(int mhz);
+int scePowerGetBusClockFrequency(void);
+int scePowerSetGpuXbarClockFrequency(int mhz);
+int scePowerGetGpuXbarClockFrequency(void);
 
 #define PRX_EXPORT __declspec(dllexport)
 
@@ -50,4 +54,28 @@ PRX_EXPORT int CrowClockSetGpu(int mhz)
 PRX_EXPORT int CrowClockGetGpu(void)
 {
 	return scePowerGetGpuClockFrequency();
+}
+
+/* The bus clock (the memory bus; at most 222 MHz). Returns the system's result. */
+PRX_EXPORT int CrowClockSetBus(int mhz)
+{
+	return scePowerSetBusClockFrequency(mhz);
+}
+
+/* The bus clock in MHz. */
+PRX_EXPORT int CrowClockGetBus(void)
+{
+	return scePowerGetBusClockFrequency();
+}
+
+/* The GPU crossbar clock (111 or 166 MHz). Returns the system's result. */
+PRX_EXPORT int CrowClockSetXbar(int mhz)
+{
+	return scePowerSetGpuXbarClockFrequency(mhz);
+}
+
+/* The GPU crossbar clock in MHz. */
+PRX_EXPORT int CrowClockGetXbar(void)
+{
+	return scePowerGetGpuXbarClockFrequency();
 }

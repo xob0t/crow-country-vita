@@ -140,9 +140,9 @@ namespace CrowCompat
             try
             {
                 var component = context as UnityEngine.Component;
-                if (component != null)
+                if ((object)component != null)
                 {
-                    if (component == null) return label;  // destroyed
+                    if (component == null) return label;  // destroyed (Unity's test; not an FsmState)
                     string detail = component.GetType().Name;
                     if (detail == "PlayMakerFSM")
                     {

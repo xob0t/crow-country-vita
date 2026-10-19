@@ -50,7 +50,7 @@ uv run tools/downgrade/vita.py --build builds/crow-2018.2.19f1-vita-scenes insta
 `project` keeps what it read from the export in `work/scan-cache` and leaves unchanged files with their dates, so the editor imports only what changed; a rerun takes a minute or two. Every stage writes in `work/`, `builds/` or `artifacts/`; when several jobs share the machine, run them under a lock, one pipeline at a time (`tools/downgrade/lock.py` has the details):
 
 ```powershell
-uv run tools/downgrade/lock.py run vita-build "me: what for" --wait 7200 -- uv run tools/downgrade/pipeline.py quickcode
+uv run tools/downgrade/lock.py run vita-build "me: what for" --wait 1800 -- uv run tools/downgrade/pipeline.py quickcode
 ```
 
 `--game <folder>` reads the game from another folder (or set `CROW_GAME`). The console's address comes from `CROW_VITA_HOST`, or `DRIFTER_VITA_HOST` if you set that up for The Drifter.

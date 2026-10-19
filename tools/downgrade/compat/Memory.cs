@@ -190,23 +190,17 @@ namespace CrowCompat
         [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_free_space_divisor();
         [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
 
-        static int IntArg(string[] args, string name, int fallback)
-        {
-            int index = Array.IndexOf(args, name), value;
-            return index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) ? value : fallback;
-        }
-
         static void GcSettings(string[] args)
         {
             if (Application.platform != RuntimePlatform.PSP2) return;
-            int retries = IntArg(args, "-crow-gc-retries", VitaRetries), divisor = IntArg(args, "-crow-gc-divisor", VitaDivisor);
+            int retries = CrowFlags.Int(args, "-crow-gc-retries", VitaRetries), divisor = CrowFlags.Int(args, "-crow-gc-divisor", VitaDivisor);
             string pool = PhyContPool(args);
             try
             {
                 if (retries > 0) GC_set_max_retries((UIntPtr)(uint)retries);
                 if (divisor > 0) GC_set_free_space_divisor((UIntPtr)(uint)divisor);
-                int reserve = IntArg(args, "-crow-gc-reserve", VitaReserveMB);
-                maxHeap = IntArg(args, "-crow-gc-max", 0) * 1048576L;
+                int reserve = CrowFlags.Int(args, "-crow-gc-reserve", VitaReserveMB);
+                maxHeap = CrowFlags.Int(args, "-crow-gc-max", 0) * 1048576L;
                 Debug.Log("CROW_GC max_retries=" + (ulong)GC_get_max_retries() + " free_space_divisor=" + (ulong)GC_get_free_space_divisor() +
                           " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve + " maxMB=" + maxHeap / 1048576L);
                 if (reserve > 0) Governor(reserve);
@@ -487,7 +481,6 @@ namespace CrowCompat
                     int size = PrimitiveSize(element);
                     if (size > 0) { total += 32 + (long)size * array.Length; continue; }
                     total += 32 + (long)pointer * array.Length;
-                    if (element.IsValueType) total += 0;  // structs: their fields walked below
                     foreach (object item in array) if (item != null && !(item is UnityEngine.Object)) stack.Push(item);
                     continue;
                 }
@@ -590,12 +583,22 @@ namespace CrowCompat
 
         void Types()
         {
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            if (unload)
+            if (!unload)
             {
-                Resources.UnloadUnusedAssets();
-                GC.Collect();
+                TypesPass();
+                return;
             }
+            // The unload runs over the next frames: the pass once it is done.
+            Resources.UnloadUnusedAssets().completed += operation =>
+            {
+                GC.Collect();
+                TypesPass();
+            };
+        }
+
+        void TypesPass()
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             if (fsmCensus)
             {
                 Debug.Log(FsmCensus());

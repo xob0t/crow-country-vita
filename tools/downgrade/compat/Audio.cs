@@ -27,14 +27,14 @@ using Debug = UnityEngine.Debug;
 //                             them, only while their source is idle (the PS Vita's default: reverb,idle);
 //                             -crow-audio-game keeps every filter on, as the game has them.
 //   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3), the most audible
-//                             (FilterGate); -crow-reverb-cap old applies the cap only to filters it switches
-//                             on, the rule before (filters on at the load and playing stay on).
+//                             (FilterGate), filters already on at the load included.
 //   -crow-loader-cpus <cpus>  the CPUs of Unity's loading thread (UnityPreload), digits 0-2 (the PS
 //                             Vita's default: 1; - leaves it on the player's choice, CPU 2, FMOD's).
 //   -crow-dsp-buffer <n>, -crow-real-voices <n>, -crow-sample-rate <hz>
 //                             AudioSettings.Reset with these before the first scene.
 //   -crow-load-priority <p>   the loading thread's priority (High, Normal, BelowNormal, Low) for the
-//                             player's scene read in the background on the title (Loading.cs; default High).
+//                             player's scene read in the background on the title (Loading.cs; default Normal
+//                             with the loading thread moved, else High).
 //   -crow-doppler [s]         every s seconds (default 5) a CROW_DOPPLER line: the pitch FMOD's mixer gives
 //                             1 kHz test tones (Doppler level 1, volume 0.02 to 500 m), measured inside the
 //                             mixer from each block's zero crossings: on Mara's body and on the nearest
@@ -64,26 +64,12 @@ namespace CrowCompat
 
         static string[] Args { get { return ProbeFiles.Args; } }
 
-        static string Value(string flag)
-        {
-            string[] args = Args;
-            int index = Array.IndexOf(args, flag);
-            return index >= 0 && index + 1 < args.Length && !args[index + 1].StartsWith("-crow-") ? args[index + 1] : null;
-        }
-
-        static int Int(string flag, int fallback)
-        {
-            int value;
-            string text = Value(flag);
-            return text != null && int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
-
         public static bool WantsTap { get { return Args.Contains("-crow-audio-tap"); } }
 
         // The background loading priority for the player's scene (Loading.cs's MaraScene).
         public static UnityEngine.ThreadPriority LoadPriority(UnityEngine.ThreadPriority fallback)
         {
-            string text = Value("-crow-load-priority");
+            string text = CrowFlags.Optional(Args, "-crow-load-priority");
             if (text == null) return fallback;
             try
             {
@@ -100,7 +86,7 @@ namespace CrowCompat
         // anything plays.
         internal static void Configure()
         {
-            int buffer = Int("-crow-dsp-buffer", 0), voices = Int("-crow-real-voices", 0), rate = Int("-crow-sample-rate", 0);
+            int buffer = CrowFlags.Int(Args, "-crow-dsp-buffer", 0), voices = CrowFlags.Int(Args, "-crow-real-voices", 0), rate = CrowFlags.Int(Args, "-crow-sample-rate", 0);
             AudioConfiguration config = AudioSettings.GetConfiguration();
             string before = Describe(config);
             if (buffer <= 0 && voices <= 0 && rate <= 0)
@@ -310,7 +296,6 @@ namespace CrowCompat
         static float nextFind, nextRank;
         static int switches;
         static Transform listener;
-        static bool oldCap;  // -crow-reverb-cap old: filters already on keep theirs past the cap (the rule before)
         // The cap adapts to the area: the mixer kept up with 3 reverbs on the title, in Driving Intro and
         // Roadside, but in Corridor S only with 1 (2: the DSP clock at 91-96% of real time). Each area starts at
         // -crow-reverb-max (the ceiling) or at what it came down to on an earlier visit; whenever the DSP clock
@@ -327,8 +312,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            int index = Array.IndexOf(args, "-crow-audio-filters");
-            string given = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+            string given = CrowFlags.Optional(args, "-crow-audio-filters");
             if (given == null)
             {
                 if (Application.platform != RuntimePlatform.PSP2 || args.Contains("-crow-audio-game")) return;
@@ -338,11 +322,9 @@ namespace CrowCompat
                 if (type == "idle") idleOnly = true;
                 else if (type.Length > 0) types.Add(type);
             if (types.Count == 0) return;
-            int limit = Array.IndexOf(args, "-crow-reverb-max");
-            if (limit >= 0 && limit + 1 < args.Length && !int.TryParse(args[limit + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out max)) max = 3;
+            max = CrowFlags.Int(args, "-crow-reverb-max", 3);
             if (!idleOnly) max = 0;
-            oldCap = Array.IndexOf(args, "-crow-reverb-cap") >= 0 && Array.IndexOf(args, "old") == Array.IndexOf(args, "-crow-reverb-cap") + 1;
-            adapt = !oldCap && !(Array.IndexOf(args, "-crow-reverb-adapt") >= 0 && Array.IndexOf(args, "off") == Array.IndexOf(args, "-crow-reverb-adapt") + 1);
+            adapt = CrowFlags.Value(args, "-crow-reverb-adapt") != "off";
             ceiling = max;
             active = true;
             SceneManager.sceneLoaded += (scene, mode) =>
@@ -354,7 +336,7 @@ namespace CrowCompat
                 windowDsp = -1.0;
             };
             Canvas.willRenderCanvases += Update;
-            Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" + (oldCap ? " (the cap only for filters switched on)" : "") : ""));
+            Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
         }
 
         static void Find()
@@ -449,7 +431,7 @@ namespace CrowCompat
                 {
                     Entry entry = entries[i];
                     if (entry.Filter == null) continue;
-                    bool keep = wants[i] && (kept < max || (oldCap && entry.Filter.enabled));
+                    bool keep = wants[i] && kept < max;
                     if (keep) kept++;
                     bool enabled = entry.Filter.enabled;
                     if (pass == 0)
@@ -664,8 +646,7 @@ namespace CrowCompat
         internal static void MoveLoader(string[] args)
         {
             if (Application.platform != RuntimePlatform.PSP2) return;
-            int index = Array.IndexOf(args, "-crow-loader-cpus");
-            string cpus = index >= 0 && index + 1 < args.Length ? args[index + 1] : "1";
+            string cpus = CrowFlags.Optional(args, "-crow-loader-cpus") ?? "1";
             int mask = 0;
             foreach (char c in cpus)
                 if (c >= '0' && c <= '2') mask |= 0x10000 << (c - '0');

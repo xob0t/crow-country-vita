@@ -52,9 +52,7 @@ namespace CrowCompat
             {
                 if (half == null)
                 {
-                    string[] args = ProbeFiles.Args;
-                    int index = Array.IndexOf(args, "-crow-post");
-                    string value = index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
+                    string value = CrowFlags.Value(ProbeFiles.Args, "-crow-post");
                     half = value != null ? value == "half" : Application.platform == RuntimePlatform.PSP2;
                 }
                 return half.Value;
@@ -69,11 +67,7 @@ namespace CrowCompat
             {
                 if (vsync == null)
                 {
-                    string[] args = ProbeFiles.Args;
-                    int index = Array.IndexOf(args, "-crow-vsync");
-                    int value;
-                    vsync = index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) ? value
-                        : Application.platform == RuntimePlatform.PSP2 ? 2 : -1;
+                    vsync = CrowFlags.Int(ProbeFiles.Args, "-crow-vsync", Application.platform == RuntimePlatform.PSP2 ? 2 : -1);
                 }
                 return vsync.Value;
             }
@@ -93,11 +87,8 @@ namespace CrowCompat
             {
                 if (cameraWidth == null)
                 {
-                    string[] args = ProbeFiles.Args;
-                    int index = Array.IndexOf(args, "-crow-camera");
-                    int value;
-                    cameraWidth = index >= 0 && index + 1 < args.Length && int.TryParse(args[index + 1], out value) && Height(value) > 0 ? value
-                        : Application.platform == RuntimePlatform.PSP2 ? 550 : 624;
+                    int value = CrowFlags.Int(ProbeFiles.Args, "-crow-camera", 0);
+                    cameraWidth = Height(value) > 0 ? value : Application.platform == RuntimePlatform.PSP2 ? 550 : 624;
                 }
                 return cameraWidth.Value;
             }
@@ -127,13 +118,6 @@ namespace CrowCompat
             if (camera == null) return;
             if (width * 351 != Height(width) * 624) camera.aspect = 624f / 351f;
             else camera.ResetAspect();
-        }
-
-        // The height of the camera's own picture, in pixels (TinyParts' sizes): the camera's target is set
-        // only while it renders, so its pixelHeight reads the screen's at other times.
-        internal static int PictureHeight
-        {
-            get { return Half ? Height(CameraWidth) : 702; }
         }
 
         static int Height(int width)
@@ -209,7 +193,7 @@ namespace CrowCompat
         {
             get
             {
-                if (filters < 0) filters = ParseFilters(Perf.Value(ProbeFiles.Args, "-crow-post-filters") ?? "all");
+                if (filters < 0) filters = ParseFilters(CrowFlags.Value(ProbeFiles.Args, "-crow-post-filters") ?? "all");
                 return filters;
             }
         }
@@ -219,7 +203,7 @@ namespace CrowCompat
             get
             {
                 if (vitaMode == null)
-                    vitaMode = Perf.Value(ProbeFiles.Args, "-crow-post-vita") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
+                    vitaMode = CrowFlags.Value(ProbeFiles.Args, "-crow-post-vita") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
                 return vitaMode;
             }
         }
@@ -312,7 +296,7 @@ namespace CrowCompat
 
         // Called first in CrowCountryCamEffect.OnRenderImage with the effect's switches (rewriter
         // PatchCamEffect); true when it drew the frame, false to leave it to the game's own chain: its
-        // alpha form, a filter the game (or the audit's post= experiment) switched off, or the game's
+        // alpha form, a filter the game switched off, or the game's
         // filters and no Vita chain asked for. With the Vita chain on, the filters drawn take its passes
         // where they can: SFB and PSX together (pass 0), the blur after them (pass 1), the CRT pass
         // after anything; SFB or PSX alone, and the blur after PSX alone, are the game's.
@@ -423,7 +407,7 @@ namespace CrowCompat
         static string LoadPost()
         {
             Shader shader = null;
-            string bundle = Perf.Value(ProbeFiles.Args, "-crow-post-bundle");
+            string bundle = CrowFlags.Value(ProbeFiles.Args, "-crow-post-bundle");
             if (bundle != null)
             {
                 AssetBundle loaded = AssetBundle.LoadFromFile(bundle);
