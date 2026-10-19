@@ -80,6 +80,7 @@ namespace CrowCompat
             Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
             Cuts.Install(ProbeFiles.Args);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
             Pad.Install(ProbeFiles.Args);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
+            FsmTrim.Install(ProbeFiles.Args);  // PlayMaker's updates that do nothing, skipped (FsmTrim.cs; PS Vita default)
             Audit.Install(ProbeFiles.Args);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;

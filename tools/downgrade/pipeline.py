@@ -289,6 +289,7 @@ COMPAT_SOURCES = [
             'Cuts',
             'Audit',
             'EnemyRebuild',
+            'FsmTrim',
             'Pad',
         )
     ),
@@ -323,6 +324,7 @@ REWRITER_SOURCES = [
             'FastPaths',
             'Decor',
             'Cuts',
+            'FsmTrim',
             'Pad',
         )
     ),

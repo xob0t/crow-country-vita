@@ -125,6 +125,8 @@ partial class DowngradeAssemblies
         new Pass("scriptcost", Scope.All, PatchFsmLoopReset),
         new Pass("scriptcost", Scope.All, PatchFsmDelayedEvents),
         new Pass("scriptcost", Scope.Game, PatchFullScreenColour),
+        // FsmTrim.cs (after ScriptCost's marks, before Cuts' FsmGateHooks, which go before its tests)
+        new Pass("fsmtrim", Scope.All, FsmTrimHooks),
         // IdleAudio.cs
         new Pass("idleaudio", Scope.All, RouteAudioSourcePlays),
         // Cuts.cs (CutsSamePose before RouteEnemySplit: Cuts' writes go through EnemySplit themselves)
