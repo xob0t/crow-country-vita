@@ -302,6 +302,14 @@ namespace CrowCompat
         // after anything; SFB or PSX alone, and the blur after PSX alone, are the game's.
         public static bool RenderImage(Component effect, RenderTexture src, RenderTexture dst, bool sfbOn, bool psxOn, bool blurOn, bool crtOn, bool alpha, bool sourcePoint)
         {
+            LoopProfile.ImageMark(true);  // -crow-loop-profile's image stage (Quality.cs)
+            bool drawn = DrawChain(effect, src, dst, sfbOn, psxOn, blurOn, crtOn, alpha, sourcePoint);
+            if (drawn) LoopProfile.ImageMark(false);
+            return drawn;
+        }
+
+        static bool DrawChain(Component effect, RenderTexture src, RenderTexture dst, bool sfbOn, bool psxOn, bool blurOn, bool crtOn, bool alpha, bool sourcePoint)
+        {
             if (alpha || !sfbOn || !psxOn || !blurOn || !crtOn || src == null) return false;
             int mask = Filters;
             bool vita = VitaMode != "off" && mask != 0;

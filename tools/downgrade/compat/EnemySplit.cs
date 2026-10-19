@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Runtime.CompilerServices;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -110,6 +111,10 @@ namespace CrowCompat
             foreach (Transform t in dead) moved.Remove(t);
             inside.RemoveWhere(t => t == null);
             adopted.RemoveAll(a => a.Part == null || a.Holder == null);
+            foreach (Transform parent in uiByParent.Keys.Where(k => k == null).ToList()) uiByParent.Remove(parent);
+            foreach (Transform up in uiAncestors.Keys.Where(k => k == null).ToList()) uiAncestors.Remove(up);
+            UiParked = 0;
+            foreach (List<Transform> group in uiByParent.Values) UiParked += group.Count;
             var gone = new List<int>();
             foreach (KeyValuePair<int, Transform> pair in holders) if (pair.Value == null) gone.Add(pair.Key);
             foreach (int key in gone) holders.Remove(key);
@@ -229,10 +234,117 @@ namespace CrowCompat
             foreach (Transform t in mine) Restore(t);
         }
 
+        // ------------------------------------------------------------------ parked UI (UiPark.cs)
+        // Switched-off subtrees of the overlay canvases parked below a holder outside any canvas. They go
+        // back as the enemies' parts do (switched on, reparented, a world pose or a parent read on them or
+        // inside them) and also when the game's code looks at their old parent's children or at any
+        // ancestor's (GetChild, childCount, foreach, Find, sibling indices, GetComponent(s)InChildren with
+        // inactive ones): all the parked children of an old parent go back together, in their order.
+        static readonly Dictionary<Transform, List<Transform>> uiByParent = new Dictionary<Transform, List<Transform>>(Same.Comparer);
+        static readonly Dictionary<Transform, List<Transform>> uiAncestors = new Dictionary<Transform, List<Transform>>(Same.Comparer);
+        internal static int UiParked, UiRestores;
+        internal static Action<Transform, string> UiRestored;  // UiPark's log (check mode)
+
+        // Parks the parts of one old parent at once, highest sibling first, so each keeps its old index.
+        internal static int ParkUiGroup(Transform parent, List<Transform> parts, Transform holder)
+        {
+            if (parent == null || parts.Count == 0 || uiByParent.ContainsKey(parent)) return 0;
+            int transforms = 0;
+            var group = new List<Transform>();
+            foreach (Transform part in parts.OrderBy(p => p.GetSiblingIndex()))
+            {
+                if (part.parent != parent || moved.ContainsKey(part)) continue;
+                moved[part] = new Place { Parent = parent, Sibling = part.GetSiblingIndex() };
+                group.Add(part);
+            }
+            if (group.Count == 0) return 0;
+            uiByParent[parent] = group;
+            for (Transform up = parent; up != null; up = up.parent)
+            {
+                List<Transform> below;
+                if (!uiAncestors.TryGetValue(up, out below)) uiAncestors[up] = below = new List<Transform>();
+                below.Add(parent);
+                Mark(up);
+            }
+            for (int i = group.Count - 1; i >= 0; i--)
+            {
+                Transform part = group[i];
+                Mark(part);
+                Transform[] below = part.GetComponentsInChildren<Transform>(true);
+                for (int k = 1; k < below.Length; k++)
+                {
+                    inside.Add(below[k]);
+                    Mark(below[k]);
+                }
+                transforms += below.Length;
+                part.SetParent(holder, false);
+                UiParked++;
+            }
+            return transforms;
+        }
+
+        // An old parent's parked children back, in their order (lowest sibling first).
+        static void RestoreUiGroup(Transform parent, string why)
+        {
+            List<Transform> group;
+            if (!uiByParent.TryGetValue(parent, out group)) return;
+            uiByParent.Remove(parent);
+            for (Transform up = parent; up != null; up = up.parent)
+            {
+                List<Transform> below;
+                if (uiAncestors.TryGetValue(up, out below))
+                {
+                    below.Remove(parent);
+                    if (below.Count == 0) uiAncestors.Remove(up);
+                }
+            }
+            foreach (Transform part in group)
+            {
+                Place place;
+                if (!moved.TryGetValue(part, out place)) continue;
+                moved.Remove(part);
+                if (part == null) continue;
+                Transform[] below = part.GetComponentsInChildren<Transform>(true);
+                for (int i = 1; i < below.Length; i++) inside.Remove(below[i]);
+                filterStale += below.Length;
+                if (parent != null)
+                {
+                    part.SetParent(parent, false);
+                    part.SetSiblingIndex(Math.Min(place.Sibling, parent.childCount - 1));
+                }
+                UiParked--;
+                UiRestores++;
+                if (UiRestored != null) UiRestored(part, why);
+            }
+            if (filterStale > 1024) Rebuild();
+        }
+
+        // Every UI part back (UiPark off, and before an unload destroys what they belonged to).
+        internal static void RestoreAllUi(string why)
+        {
+            foreach (Transform parent in uiByParent.Keys.ToList()) RestoreUiGroup(parent, why);
+        }
+
+        // A call that sees t's children or descendants: the parked parts below t back first.
+        static void TouchAncestor(Transform t, string why)
+        {
+            if (uiAncestors.Count == 0 || ReferenceEquals(t, null)) return;
+            int bit = Bit(t);
+            if ((filter[bit >> 5] & (1u << (bit & 31))) == 0) return;
+            List<Transform> below;
+            if (!uiAncestors.TryGetValue(t, out below)) return;
+            foreach (Transform parent in below.ToList()) RestoreUiGroup(parent, why);
+        }
+
         static void Restore(Transform t)
         {
             Place place;
             if (!moved.TryGetValue(t, out place)) return;
+            if (!ReferenceEquals(place.Parent, null) && uiByParent.ContainsKey(place.Parent))
+            {
+                RestoreUiGroup(place.Parent, "touch");
+                return;
+            }
             moved.Remove(t);
             if (ReferenceEquals(t, null) || t == null) return;
             Transform[] below = t.GetComponentsInChildren<Transform>(true);
@@ -352,6 +464,197 @@ namespace CrowCompat
         {
             Touch(transform, false);
             transform.SetPositionAndRotation(position, rotation);
+        }
+
+        // The rewriter's targets that see children or parents (RouteEnemySplit's second list): parked UI
+        // below the object back first; a parent-side call on a moved part (or inside one) puts it back.
+        public static Transform GetChild(Transform t, int index)
+        {
+            TouchAncestor(t, "GetChild");
+            return t.GetChild(index);
+        }
+
+        public static int GetChildCount(Transform t)
+        {
+            TouchAncestor(t, "childCount");
+            return t.childCount;
+        }
+
+        public static System.Collections.IEnumerator GetEnumerator(Transform t)
+        {
+            TouchAncestor(t, "foreach");
+            return t.GetEnumerator();
+        }
+
+        public static Transform Find(Transform t, string name)
+        {
+            TouchAncestor(t, "Find");
+            return t.Find(name);
+        }
+
+        public static int GetSiblingIndex(Transform t)
+        {
+            Touch(t, false);
+            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "GetSiblingIndex");
+            return t.GetSiblingIndex();
+        }
+
+        public static void SetSiblingIndex(Transform t, int index)
+        {
+            Touch(t, false);
+            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "SetSiblingIndex");
+            t.SetSiblingIndex(index);
+        }
+
+        public static void SetAsFirstSibling(Transform t)
+        {
+            Touch(t, false);
+            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "SetAsFirstSibling");
+            t.SetAsFirstSibling();
+        }
+
+        public static void SetAsLastSibling(Transform t)
+        {
+            Touch(t, false);
+            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "SetAsLastSibling");
+            t.SetAsLastSibling();
+        }
+
+        public static bool IsChildOf(Transform t, Transform parent)
+        {
+            Touch(t, false);
+            return t.IsChildOf(parent);
+        }
+
+        static Transform Of(Component c)
+        {
+            return ReferenceEquals(c, null) ? null : c.transform;
+        }
+
+        static Transform Of(GameObject g)
+        {
+            return ReferenceEquals(g, null) ? null : g.transform;
+        }
+
+        public static Component[] ComponentsInChildren(Component c, Type type, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentsInChildren");
+            return c.GetComponentsInChildren(type, includeInactive);
+        }
+
+        public static Component[] ComponentsInChildren(GameObject g, Type type, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentsInChildren");
+            return g.GetComponentsInChildren(type, includeInactive);
+        }
+
+        public static Component ComponentInChildren(Component c, Type type, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentInChildren");
+            return c.GetComponentInChildren(type, includeInactive);
+        }
+
+        public static Component ComponentInChildren(GameObject g, Type type, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentInChildren");
+            return g.GetComponentInChildren(type, includeInactive);
+        }
+
+        public static T[] ComponentsInChildrenT<T>(Component c, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentsInChildren");
+            return c.GetComponentsInChildren<T>(includeInactive);
+        }
+
+        public static T[] ComponentsInChildrenT<T>(GameObject g, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentsInChildren");
+            return g.GetComponentsInChildren<T>(includeInactive);
+        }
+
+        public static void ComponentsInChildrenList<T>(Component c, bool includeInactive, List<T> result)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentsInChildren");
+            c.GetComponentsInChildren(includeInactive, result);
+        }
+
+        public static void ComponentsInChildrenList<T>(GameObject g, bool includeInactive, List<T> result)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentsInChildren");
+            g.GetComponentsInChildren(includeInactive, result);
+        }
+
+        public static T ComponentInChildrenT<T>(Component c, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentInChildren");
+            return c.GetComponentInChildren<T>(includeInactive);
+        }
+
+        public static T ComponentInChildrenT<T>(GameObject g, bool includeInactive)
+        {
+            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentInChildren");
+            return g.GetComponentInChildren<T>(includeInactive);
+        }
+
+        // The parent side: a moved part (or anything inside it) looking up its parents.
+        public static Component ComponentInParent(Component c, Type type)
+        {
+            Touch(Of(c), false);
+            return c.GetComponentInParent(type);
+        }
+
+        public static Component ComponentInParent(GameObject g, Type type)
+        {
+            Touch(Of(g), false);
+            return g.GetComponentInParent(type);
+        }
+
+        public static T ComponentInParentT<T>(Component c)
+        {
+            Touch(Of(c), false);
+            return c.GetComponentInParent<T>();
+        }
+
+        public static T ComponentInParentT<T>(GameObject g)
+        {
+            Touch(Of(g), false);
+            return g.GetComponentInParent<T>();
+        }
+
+        public static Component[] ComponentsInParent(Component c, Type type, bool includeInactive)
+        {
+            Touch(Of(c), false);
+            return c.GetComponentsInParent(type, includeInactive);
+        }
+
+        public static Component[] ComponentsInParent(GameObject g, Type type, bool includeInactive)
+        {
+            Touch(Of(g), false);
+            return g.GetComponentsInParent(type, includeInactive);
+        }
+
+        public static T[] ComponentsInParentT<T>(Component c, bool includeInactive)
+        {
+            Touch(Of(c), false);
+            return c.GetComponentsInParent<T>(includeInactive);
+        }
+
+        public static T[] ComponentsInParentT<T>(GameObject g, bool includeInactive)
+        {
+            Touch(Of(g), false);
+            return g.GetComponentsInParent<T>(includeInactive);
+        }
+
+        public static T[] ComponentsInParentT0<T>(Component c)
+        {
+            Touch(Of(c), false);
+            return c.GetComponentsInParent<T>();
+        }
+
+        public static T[] ComponentsInParentT0<T>(GameObject g)
+        {
+            Touch(Of(g), false);
+            return g.GetComponentsInParent<T>();
         }
 
         // A summary for Fight's windows: subtrees out, put back (switched on / touched / touched inside),

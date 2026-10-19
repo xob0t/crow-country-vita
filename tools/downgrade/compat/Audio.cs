@@ -727,6 +727,18 @@ namespace CrowCompat
             return CrowThreadsRunning(uids);
         }
 
+        // Quality's workers= and gfxthread= keys: a thread's priority and CPUs now (0 keeps either); the old
+        // ones into was[0] (priority) and was[1] (CPU mask). Below 0 on failure.
+        internal static int SetNow(int uid, int priority, int mask, int[] was)
+        {
+            var info = new int[10];
+            var name = new byte[32];
+            if (CrowThreadQuery(uid, info, name) < 0) return -1;
+            was[0] = info[1];
+            was[1] = info[2];
+            return CrowThreadSet(uid, priority, mask);
+        }
+
         internal static string ThreadName(int uid)
         {
             var info = new int[10];

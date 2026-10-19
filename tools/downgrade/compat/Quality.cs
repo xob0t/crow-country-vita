@@ -28,7 +28,14 @@ using UnityEngine.SceneManagement;
 //   -crow-frame-probe               with it, on the PS Vita, where the frame waits (CROW_FRAME, see
 //                                   FrameProbe): a sampler thread reads the main thread's and the render
 //                                   thread's state every 2 ms, by player loop step and camera stage
-//   -crow-light-report <s>          every s seconds, the forward renderer's light passes as Unity
+//   -crow-sample-dump <stage> wait|run <ms> <s>
+//                                   with it, a crash dump once the main thread has waited (or run) ms
+//                                   in a camera stage (cull, draw, after, image, late) or a loop step
+//                                   (its name), s seconds after the probe started: every thread's stack
+//                                   at that moment (vita.py crashes --pull --thread <name>)
+//   -crow-gfx-workers <p>:<cpus>|game  Unity's job workers' priority and CPUs (PS Vita default 64:1; see
+//                                   GfxThreads); the cycles take workers= and gfxthread=
+//   -crow-light-report <s>        every s seconds, the forward renderer's light passes as Unity
 //                                   assigns them, per light (CROW_LIGHTS, CROW_LIGHT; see LightReport)
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
 //                                   the changes (comma-separated: pixel=<n>,
@@ -83,6 +90,7 @@ namespace CrowCompat
                 if (shadowResolution < 0) shadowResolution = 0;
                 if (shadowDistance < 0) shadowDistance = 12f;
             }
+            GfxThreads.Install(args);
             if (pixelLights < 0 && shadowResolution < 0 && shadowDistance < 0 && shadows == null) return;
             Apply();
             SceneManager.sceneLoaded += (scene, mode) => Apply();
@@ -92,7 +100,7 @@ namespace CrowCompat
         // returns false for the others.
         static readonly Func<string, string, bool>[] modules =
         {
-            Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
+            GfxThreads.Change, Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
             FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change, Pad.Change,
             Clock.Change, TweenProbe.Change
         };
@@ -364,17 +372,20 @@ namespace CrowCompat
         }
 
         // Per camera: cull (onPreCull to onPreRender), draw (to onPostRender) and after (from
-        // onPostRender to the next camera or the frame's end: its image effects, OnRenderImage).
+        // onPostRender to the next camera or the frame's end: its image effects, OnRenderImage, the
+        // overlay canvases, the frame's end). after splits into image (CamEffect.RenderImage, the
+        // camera effect's passes) and late (from the effect's end to the next camera or the frame's
+        // end); the rest of after is before the effect (Unity's own image-effect setup).
         static readonly Dictionary<string, long[]> cameras = new Dictionary<string, long[]>();
         static long[] lastCamera;
-        static long cameraMark;
+        static long cameraMark, imageMark;
 
         static void CameraMark(Camera camera, int stage)
         {
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
             if (stage == 0) CameraEnd(now);
             long[] slot;
-            if (!cameras.TryGetValue(camera.name, out slot)) cameras[camera.name] = slot = new long[4];
+            if (!cameras.TryGetValue(camera.name, out slot)) cameras[camera.name] = slot = new long[6];
             FrameProbe.Stage = stage + 1;
             if (stage == 1) slot[0] += now - cameraMark;
             if (stage == 2)
@@ -382,14 +393,37 @@ namespace CrowCompat
                 slot[1] += now - cameraMark;
                 slot[3]++;
                 lastCamera = slot;
+                imageMark = 0;
             }
             cameraMark = now;
         }
 
+        // CamEffect.RenderImage's start and end (the camera that rendered last is the effect's).
+        internal static void ImageMark(bool start)
+        {
+            if (ticks == null || lastCamera == null) return;
+            long now = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (start)
+            {
+                imageMark = now;
+                FrameProbe.Stage = 4;
+                return;
+            }
+            if (imageMark == 0) return;
+            lastCamera[4] += now - imageMark;
+            imageMark = now;
+            FrameProbe.Stage = 5;
+        }
+
         static void CameraEnd(long now)
         {
-            if (lastCamera != null) lastCamera[2] += now - cameraMark;
+            if (lastCamera != null)
+            {
+                lastCamera[2] += now - cameraMark;
+                if (imageMark != 0 && FrameProbe.Stage == 5) lastCamera[5] += now - imageMark;
+            }
             lastCamera = null;
+            imageMark = 0;
             FrameProbe.Stage = 0;
         }
 
@@ -466,8 +500,11 @@ namespace CrowCompat
             {
                 line.Append(' ').Append(pair.Key.Replace(' ', '_')).Append("[x").Append((pair.Value[3] / (double)frames).ToString("F1"));
                 line.Append(" cull=").Append((pair.Value[0] * ms / frames).ToString("F1")).Append(" draw=").Append((pair.Value[1] * ms / frames).ToString("F1"));
-                line.Append(" after=").Append((pair.Value[2] * ms / frames).ToString("F1")).Append(']');
-                Array.Clear(pair.Value, 0, 4);
+                line.Append(" after=").Append((pair.Value[2] * ms / frames).ToString("F1"));
+                if (pair.Value[4] > 0)
+                    line.Append(" image=").Append((pair.Value[4] * ms / frames).ToString("F1")).Append(" late=").Append((pair.Value[5] * ms / frames).ToString("F1"));
+                line.Append(']');
+                Array.Clear(pair.Value, 0, pair.Value.Length);
             }
             Debug.Log(line.ToString());
             FrameProbe.Report(label, total * ms / frames);
@@ -517,6 +554,7 @@ namespace CrowCompat
             var thread = new System.Threading.Thread(Sample) { IsBackground = true, Name = "CrowFrameProbe" };
             thread.Start();
             Debug.Log("CROW_FRAME probe started, main thread 0x" + mainUid.ToString("X"));
+            DumpInstall(ProbeFiles.Args);
         }
 
         static int Kind(int uid)
@@ -546,8 +584,9 @@ namespace CrowCompat
             while (true)
             {
                 System.Threading.Thread.Sleep(2);
-                int key = Step * 4 + Stage;
+                int key = Step * 8 + Stage;
                 if (Threads.Wait(mainUid, main) < 0) continue;
+                if (dumpStage >= 0) DumpCheck(key, (main[0] & 8) != 0);
                 int workers = 0;
                 if (Threads.Running(running) >= 0)
                     for (int cpu = 0; cpu < 3; cpu++)
@@ -630,7 +669,53 @@ namespace CrowCompat
             return text.ToString();
         }
 
-        static readonly string[] stages = { "", "[cull]", "[draw]", "[after]" };
+        static readonly string[] stages = { "", "[cull]", "[draw]", "[after]", "[image]", "[late]", "", "" };
+
+        // -crow-sample-dump <stage> wait|run <ms> <s>: a crash dump (every thread's registers and stack,
+        // vita.py crashes --pull --thread <name>) taken when the main thread has been waiting (or
+        // running) for ms in a camera stage (cull, draw, after, image, late; or the step's name, as
+        // CROW_FRAME's waits give it), s seconds or more after startup: where it waits and what the
+        // render thread and the job workers do meanwhile, one sample a launch.
+        static int dumpStage = -1, dumpStep = -1;
+        static bool dumpWait;
+        static float dumpMs, dumpAfter;
+        static readonly System.Diagnostics.Stopwatch dumpClock = System.Diagnostics.Stopwatch.StartNew();
+        static long dumpSince;
+
+        internal static void DumpInstall(string[] args)
+        {
+            int index = Array.IndexOf(args, "-crow-sample-dump");
+            if (index < 0 || index + 4 >= args.Length) return;
+            string where = args[index + 1];
+            dumpWait = args[index + 2] != "run";
+            float.TryParse(args[index + 3], NumberStyles.Float, CultureInfo.InvariantCulture, out dumpMs);
+            float.TryParse(args[index + 4], NumberStyles.Float, CultureInfo.InvariantCulture, out dumpAfter);
+            int stage = Array.IndexOf(stages, "[" + where + "]");
+            if (stage > 0) dumpStage = stage;
+            else
+            {
+                dumpStep = LoopProfile.Labels.FindIndex(l => l.EndsWith("." + where, StringComparison.Ordinal));
+                if (dumpStep >= 0) dumpStage = 0;
+            }
+            Debug.Log("CROW_SAMPLE_DUMP " + (dumpStage < 0 ? "unknown stage " + where : where + (dumpWait ? " waiting " : " running ") + dumpMs + " ms, after " + dumpAfter + " s"));
+        }
+
+        static void DumpCheck(int key, bool waits)
+        {
+            int stage = key % 8, step = key / 8;
+            bool match = stage == dumpStage && (dumpStep < 0 || step == dumpStep) && waits == dumpWait && dumpClock.Elapsed.TotalSeconds >= dumpAfter;
+            long now = dumpClock.ElapsedTicks;
+            if (!match)
+            {
+                dumpSince = 0;
+                return;
+            }
+            if (dumpSince == 0) dumpSince = now;
+            if ((now - dumpSince) * 1000.0 / System.Diagnostics.Stopwatch.Frequency < dumpMs) return;
+            // At once: a log line flushed first would give the main thread time to move on (the line is
+            // lost with the crash; the dump's own time says when).
+            System.Runtime.InteropServices.Marshal.WriteInt32(new IntPtr(16), 0);  // unmapped: a data abort
+        }
 
         internal static void Report(string label, double frameMs)
         {
@@ -651,7 +736,7 @@ namespace CrowCompat
                 for (int k = 0; k * 3 + 2 < perKey.Length; k++) if (perKey[k * 3 + 1] > 0) keys.Add(k);
                 foreach (int k in keys.OrderByDescending(k => perKey[k * 3 + 1]).Take(8))
                 {
-                    int step = k / 4, stage = k % 4;
+                    int step = k / 8, stage = k % 8;
                     string name = step < LoopProfile.Labels.Count ? LoopProfile.Labels[step] : "?";
                     name = name.Substring(name.IndexOf('.') + 1);
                     line.Append(' ').Append(name).Append(stages[stage]).Append('=').Append(ms(perKey[k * 3 + 1]))
@@ -673,6 +758,117 @@ namespace CrowCompat
             gpuSum = cpuSum = 0;
             gpuFrames = 0;
             Debug.Log(line.ToString());
+        }
+    }
+
+    // Unity's job workers ("Worker Thread", two): with graphics jobs they record the camera's draws
+    // (ForwardRenderLoopJob, one job) while the main thread goes on, and the main thread waits for that
+    // job, and its cleanup, at the frame's end (GfxDeviceClient::EndAsyncJobFrame; sample dumps,
+    // status.md, Render step). The player starts them at priority 0x9f on CPUs 0-2, below the render
+    // thread (0x40, CPU 1) and FMOD's mixer (0x40, CPU 2), and on CPU 0 below the main thread, so the job
+    // ran late and the main thread waited about 4 ms a frame for it. -crow-gfx-workers <priority>:<cpus>
+    // sets them once they first run (a thread polls which threads run, as Audio.cs finds UnityPreload);
+    // the PS Vita's default is 64:1, the render thread's priority on its CPU (not the mixer's, which
+    // keeps CPU 2 to itself: audio as before); game leaves them. -crow-cycle / -crow-fight-cycle / -crow-ab
+    // take workers=<priority>:<cpus>|game and gfxthread=... (the render thread, UnityGfxDeviceWorker; a
+    // test: on CPU 2 it shares the mixer's). CROW_GFX_THREADS logs each change with what the thread had.
+    static class GfxThreads
+    {
+        static readonly Dictionary<int, int[]> original = new Dictionary<int, int[]>();
+        static readonly Dictionary<int, string> found = new Dictionary<int, string>();
+        static readonly object gate = new object();
+        static string workers, render;
+        static bool finding;
+
+        internal static void Install(string[] args)
+        {
+            string value = CrowFlags.Value(args, "-crow-gfx-workers") ?? (Application.platform == RuntimePlatform.PSP2 ? "64:1" : null);
+            if (value != null && value != "game") Change("workers", value);
+        }
+
+        internal static bool Change(string key, string value)
+        {
+            if (key != "workers" && key != "gfxthread") return false;
+            if (Application.platform != RuntimePlatform.PSP2) return true;
+            lock (gate)
+            {
+                if (key == "workers") workers = value;
+                else render = value;
+            }
+            Apply(key == "workers" ? "Worker Thread" : "GfxDevice", value);
+            if (!finding)
+            {
+                finding = true;
+                new System.Threading.Thread(Find) { IsBackground = true, Name = "CrowGfxThreads" }.Start();
+            }
+            return true;
+        }
+
+        // Until both workers and the render thread are known (at most 2 minutes).
+        static void Find()
+        {
+            var uids = new int[3];
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                while (clock.ElapsedMilliseconds < 120000)
+                {
+                    System.Threading.Thread.Sleep(1);
+                    if (Threads.Running(uids) < 0) continue;
+                    foreach (int uid in uids)
+                    {
+                        if (uid == 0) continue;
+                        lock (gate) if (found.ContainsKey(uid)) continue;
+                        string name = Threads.ThreadName(uid) ?? "";
+                        bool worker = name.Contains("Worker Thread"), gfx = name.Contains("GfxDevice");
+                        lock (gate) found[uid] = worker || gfx ? name : null;
+                        string value;
+                        lock (gate) value = worker ? workers : gfx ? render : null;
+                        if (value != null) Set(uid, name, value);
+                    }
+                    int known;
+                    lock (gate) known = found.Values.Count(n => n != null);
+                    if (known >= 3) return;
+                }
+            }
+            catch (Exception exception)
+            {
+                Debug.Log("CROW_GFX_THREADS finder stopped: " + exception.Message);
+            }
+        }
+
+        static void Apply(string part, string value)
+        {
+            var uids = new List<KeyValuePair<int, string>>();
+            lock (gate)
+                foreach (KeyValuePair<int, string> pair in found)
+                    if (pair.Value != null && pair.Value.Contains(part)) uids.Add(pair);
+            foreach (KeyValuePair<int, string> pair in uids) Set(pair.Key, pair.Value, value);
+        }
+
+        static void Set(int uid, string name, string value)
+        {
+            int priority = 0, mask = 0;
+            if (value == "game")
+            {
+                int[] was;
+                lock (gate) if (!original.TryGetValue(uid, out was)) return;
+                priority = was[0];
+                mask = was[1];
+            }
+            else
+            {
+                string[] parts = value.Split(':');
+                if (parts.Length != 2) return;
+                int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out priority);
+                foreach (char c in parts[1])
+                    if (c >= '0' && c <= '2') mask |= 0x10000 << (c - '0');
+            }
+            var old = new int[2];
+            int result = Threads.SetNow(uid, priority, mask, old);
+            lock (gate) if (result >= 0 && !original.ContainsKey(uid)) original[uid] = old;
+            Debug.Log("CROW_GFX_THREADS " + name + " " + value + " (was priority 0x" + old[0].ToString("x") + " cpus 0x" + old[1].ToString("x") + ")" +
+                      (result < 0 ? " failed 0x" + result.ToString("X8") : ""));
         }
     }
 

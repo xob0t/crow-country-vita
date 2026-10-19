@@ -75,6 +75,7 @@ namespace CrowCompat
             if (menu != null) MenuCull.Set(menu == "on");
             string fog = CrowFlags.Value(args, "-crow-fog-far");
             if (fog != null) FogFar(fog == "on");
+            UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens parked
         }
 
         // -crow-fog-far: the main camera's far plane and background, and what they were.
@@ -207,6 +208,7 @@ namespace CrowCompat
                 FogFar(value == "on");
                 return true;
             }
+            if (RenderCost.Change(key, value) || UiPark.Change(key, value)) return true;
             if (key != "rtcams") return false;
             Set(value);
             return true;
@@ -468,6 +470,297 @@ namespace CrowCompat
                       " cascades=" + QualitySettings.shadowCascades + " lodBias=" + QualitySettings.lodBias.ToString(CultureInfo.InvariantCulture) +
                       " realtimeReflectionProbes=" + (QualitySettings.realtimeReflectionProbes ? 1 : 0) +
                       " softParticles=" + (QualitySettings.softParticles ? 1 : 0));
+        }
+    }
+
+    // Cost tests for the render step (-crow-cycle / -crow-fight-cycle / -crow-ab keys; each changes the
+    // picture, so they measure, they are no defaults): canvases=off|on (every enabled screen-space
+    // overlay canvas switched off), level=hide|half|show (the level's renderers drawn last frame
+    // switched off: all, or every other one; not the player's, which live in DontDestroyOnLoad, nor the
+    // enemies'), unseen=off|on (the level's enabled renderers that were not drawn switched off: what
+    // culling them costs), ulights=off|on (the lights Unity still lights objects with, the directional
+    // ones and VitaLit's key lights (culling mask 0) aside, switched off: the per-object light lists).
+    // Each logs what it switched (CROW_RENDER_COST).
+    static class RenderCost
+    {
+        static readonly Dictionary<string, List<Behaviour>> offBehaviours = new Dictionary<string, List<Behaviour>>();
+        static readonly Dictionary<string, List<Renderer>> offRenderers = new Dictionary<string, List<Renderer>>();
+
+        internal static bool Change(string key, string value)
+        {
+            if (key == "unseen" && value == "report")
+            {
+                UnseenReport();
+                return true;
+            }
+            if (key == "level" && value == "report")
+            {
+                LevelReport();
+                return true;
+            }
+            switch (key)
+            {
+                case "canvases":
+                    Back(key);
+                    foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
+                    {
+                        if (!canvas.enabled || !canvas.isRootCanvas) continue;
+                        if (value == "report") Watch(canvas);
+                        else if (value == "off" && canvas.renderMode == RenderMode.ScreenSpaceOverlay) Off(key, canvas);
+                    }
+                    break;
+                case "uiout":
+                    UiOut(value == "on");
+                    return true;
+                case "ulights":
+                    Back(key);
+                    if (value == "off")
+                        foreach (Light light in UnityEngine.Object.FindObjectsOfType<Light>())
+                            if (light.enabled && light.type != LightType.Directional && light.cullingMask != 0) Off(key, light);
+                    break;
+                case "level":
+                case "unseen":
+                {
+                    Back(key);
+                    if (value != "hide" && value != "half" && value != "off") break;
+                    var list = offRenderers[key] = new List<Renderer>();
+                    int n = 0;
+                    foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
+                    {
+                        if (!renderer.enabled || renderer.gameObject.scene.name == "DontDestroyOnLoad" || Enemy(renderer.transform)) continue;
+                        if (renderer.isVisible != (key == "level")) continue;
+                        if (value == "half" && (n++ & 1) != 0) continue;
+                        renderer.enabled = false;
+                        list.Add(renderer);
+                    }
+                    break;
+                }
+                default:
+                    return false;
+            }
+            List<Behaviour> behaviours;
+            List<Renderer> renderers;
+            int count = offBehaviours.TryGetValue(key, out behaviours) ? behaviours.Count : offRenderers.TryGetValue(key, out renderers) ? renderers.Count : 0;
+            Debug.Log("CROW_RENDER_COST " + key + "=" + value + ": " + count + " off");
+            return true;
+        }
+
+        // unseen=report: the enabled renderers not drawn last frame, by what keeps them from the picture
+        // (CROW_UNSEEN): no mesh or an empty one, no material, a layer the main camera doesn't draw,
+        // zero size, past the far plane, out of the view, or in the view (behind something: the GPU's
+        // depth test isn't culling; in view and not drawn means culled by Unity's own tests), by root.
+        static void UnseenReport()
+        {
+            Camera camera = Camera.main;
+            if (camera == null) return;
+            var planes = GeometryUtility.CalculateFrustumPlanes(camera);
+            var reasons = new Dictionary<string, int>();
+            var roots = new Dictionary<string, int>();
+            int total = 0;
+            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
+            {
+                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy || renderer.isVisible) continue;
+                total++;
+                string reason;
+                var filter = renderer.GetComponent<MeshFilter>();
+                Bounds bounds = renderer.bounds;
+                float far = camera.farClipPlane;
+                if (renderer is MeshRenderer && (filter == null || filter.sharedMesh == null)) reason = "nomesh";
+                else if (renderer is MeshRenderer && filter.sharedMesh.vertexCount == 0) reason = "emptymesh";
+                else if (renderer.sharedMaterials.All(m => m == null)) reason = "nomaterial";
+                else if ((camera.cullingMask & (1 << renderer.gameObject.layer)) == 0) reason = "layer" + renderer.gameObject.layer;
+                else if (bounds.size == Vector3.zero) reason = "zerosize";
+                else if (bounds.SqrDistance(camera.transform.position) > far * far) reason = "pastfar";
+                else if (!GeometryUtility.TestPlanesAABB(planes, bounds)) reason = "outofview";
+                else reason = "inview";
+                reason += renderer is MeshRenderer ? "" : ":" + renderer.GetType().Name;
+                int n;
+                reasons.TryGetValue(reason, out n);
+                reasons[reason] = n + 1;
+                string root = renderer.transform.root.name.Replace(' ', '_') + "/" + reason;
+                roots.TryGetValue(root, out n);
+                roots[root] = n + 1;
+            }
+            Debug.Log("CROW_UNSEEN total=" + total + " " + string.Join(" ", reasons.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
+            Debug.Log("CROW_UNSEEN roots " + string.Join(" ", roots.OrderByDescending(p => p.Value).Take(40).Select(p => p.Key + "=" + p.Value).ToArray()));
+        }
+
+        // level=report: the level's renderers drawn last frame (not the player's or the enemies'), each with
+        // its root, kind, queue, vertices and material (CROW_LEVEL_DRAWN), and by material (CROW_LEVEL_MATS).
+        static void LevelReport()
+        {
+            var byMaterial = new Dictionary<string, int>();
+            int n = 0;
+            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
+            {
+                if (!renderer.enabled || !renderer.isVisible || renderer.gameObject.scene.name == "DontDestroyOnLoad" || Enemy(renderer.transform)) continue;
+                n++;
+                var filter = renderer.GetComponent<MeshFilter>();
+                Material material = renderer.sharedMaterial;
+                string mat = material == null ? "none" : material.name.Replace(' ', '_') + "@" + material.renderQueue;
+                int count;
+                byMaterial.TryGetValue(mat, out count);
+                byMaterial[mat] = count + 1;
+                Bounds b = renderer.bounds;
+                Debug.Log("CROW_LEVEL_DRAWN " + Perf.Path(renderer.transform, 3) + " kind=" + renderer.GetType().Name +
+                          " verts=" + (filter != null && filter.sharedMesh != null ? filter.sharedMesh.vertexCount : -1) +
+                          " subs=" + renderer.sharedMaterials.Length + " mat=" + mat + " size=" + b.size.magnitude.ToString("F1") +
+                          " at=" + b.center.x.ToString("F0") + "," + b.center.y.ToString("F0") + "," + b.center.z.ToString("F0"));
+            }
+            Debug.Log("CROW_LEVEL_MATS drawn=" + n + " materials=" + byMaterial.Count + " " +
+                      string.Join(" ", byMaterial.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
+        }
+
+        // uiout=on|off: the switched-off subtrees inside the enabled root canvases moved below an inactive
+        // root of their own (local poses kept), and back to their places: what a canvas's inactive
+        // RectTransforms cost its per-frame updates.
+        static readonly List<KeyValuePair<Transform, KeyValuePair<Transform, int>>> movedOut = new List<KeyValuePair<Transform, KeyValuePair<Transform, int>>>();
+        static GameObject outHolder;
+
+        static void UiOut(bool on)
+        {
+            for (int i = movedOut.Count - 1; i >= 0; i--)
+            {
+                Transform part = movedOut[i].Key, parent = movedOut[i].Value.Key;
+                if (part == null || parent == null) continue;
+                part.SetParent(parent, false);
+                part.SetSiblingIndex(movedOut[i].Value.Value);
+            }
+            int count = movedOut.Count, transforms = 0;
+            movedOut.Clear();
+            if (on)
+            {
+                if (outHolder == null)
+                {
+                    outHolder = new GameObject("CrowUiOut");
+                    outHolder.SetActive(false);
+                    UnityEngine.Object.DontDestroyOnLoad(outHolder);
+                }
+                var found = new List<Transform>();
+                foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
+                    if (canvas.enabled && canvas.isRootCanvas && canvas.renderMode == RenderMode.ScreenSpaceOverlay) Inactive(canvas.transform, found);
+                foreach (Transform part in found)
+                {
+                    movedOut.Add(new KeyValuePair<Transform, KeyValuePair<Transform, int>>(part, new KeyValuePair<Transform, int>(part.parent, part.GetSiblingIndex())));
+                    transforms += part.GetComponentsInChildren<Transform>(true).Length;
+                }
+                // Parents before children in the list, so putting back in reverse order restores sibling indices.
+                foreach (Transform part in found) part.SetParent(outHolder.transform, false);
+                count = movedOut.Count;
+            }
+            Debug.Log("CROW_RENDER_COST uiout=" + (on ? "on" : "off") + ": " + count + " subtrees" + (on ? ", " + transforms + " transforms" : " back"));
+        }
+
+        static void Inactive(Transform parent, List<Transform> found)
+        {
+            foreach (Transform child in parent)
+            {
+                if (!child.gameObject.activeSelf) found.Add(child);
+                else Inactive(child, found);
+            }
+        }
+
+        // canvases=report: each enabled root canvas, its place, mode and content, and in how many of the
+        // next 30 frames its own transform and any of its graphics' transforms changed (CROW_CANVAS).
+        static readonly List<Canvas> watched = new List<Canvas>();
+        static readonly List<int> movedFrames = new List<int>(), dirtyFrames = new List<int>();
+        static int watchFrames = -1;
+
+        static void Watch(Canvas canvas)
+        {
+            if (watchFrames < 0)
+            {
+                watchFrames = 0;
+                Application.onBeforeRender += WatchTick;
+            }
+            if (watched.Count == 0) watchFrames = 0;
+            canvas.transform.hasChanged = false;
+            foreach (Graphic graphic in canvas.GetComponentsInChildren<Graphic>(false)) graphic.transform.hasChanged = false;
+            watched.Add(canvas);
+            movedFrames.Add(0);
+            dirtyFrames.Add(0);
+        }
+
+        static void WatchTick()
+        {
+            if (watched.Count == 0) return;
+            for (int i = 0; i < watched.Count; i++)
+            {
+                Canvas canvas = watched[i];
+                if (canvas == null) continue;
+                if (canvas.transform.hasChanged) movedFrames[i]++;
+                canvas.transform.hasChanged = false;
+                bool dirty = false;
+                foreach (Graphic graphic in canvas.GetComponentsInChildren<Graphic>(false))
+                {
+                    if (graphic.transform.hasChanged) dirty = true;
+                    graphic.transform.hasChanged = false;
+                }
+                if (dirty) dirtyFrames[i]++;
+            }
+            if (++watchFrames < 30) return;
+            for (int i = 0; i < watched.Count; i++)
+            {
+                Canvas canvas = watched[i];
+                if (canvas == null) continue;
+                Graphic[] graphics = canvas.GetComponentsInChildren<Graphic>(false);
+                Debug.Log("CROW_CANVAS " + Perf.Path(canvas.transform, 8) + " mode=" + canvas.renderMode + " order=" + canvas.sortingOrder +
+                          " transforms=" + canvas.GetComponentsInChildren<RectTransform>(true).Length + " active=" + canvas.GetComponentsInChildren<RectTransform>(false).Length +
+                          " graphics=" + graphics.Length + " drawn=" + graphics.Count(g => g.enabled && g.canvasRenderer != null && !g.canvasRenderer.cull) +
+                          " canvases=" + canvas.GetComponentsInChildren<Canvas>(false).Length + " moved=" + movedFrames[i] + "/30 graphicsMoved=" + dirtyFrames[i] + "/30");
+                var parts = new StringBuilder("CROW_CANVAS_PARTS " + canvas.name.Replace(' ', '_'));
+                var subtrees = new List<KeyValuePair<Transform, int>>();
+                var level = new List<Transform> { canvas.transform };
+                for (int depth = 0; depth < 5; depth++)
+                {
+                    var next = new List<Transform>();
+                    foreach (Transform parent in level)
+                        foreach (Transform child in parent)
+                        {
+                            int size = child.GetComponentsInChildren<Transform>(true).Length;
+                            if (size < 20) continue;
+                            subtrees.Add(new KeyValuePair<Transform, int>(child, size));
+                            next.Add(child);
+                        }
+                    level = next;
+                }
+                foreach (KeyValuePair<Transform, int> pair in subtrees.OrderByDescending(p => p.Value).Take(40))
+                    parts.Append(' ').Append(Perf.Path(pair.Key, 2)).Append('=').Append(pair.Value).Append(pair.Key.gameObject.activeSelf ? "" : "(off)")
+                         .Append('/').Append(pair.Key.GetComponentsInChildren<Transform>(false).Length);
+                Debug.Log(parts.ToString());
+            }
+            watched.Clear();
+            movedFrames.Clear();
+            dirtyFrames.Clear();
+        }
+
+        static bool Enemy(Transform transform)
+        {
+            for (Transform t = transform; t != null; t = t.parent)
+                if (t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.GetComponent<Rigidbody>() != null) return true;
+            return false;
+        }
+
+        static void Off(string key, Behaviour behaviour)
+        {
+            List<Behaviour> list;
+            if (!offBehaviours.TryGetValue(key, out list)) offBehaviours[key] = list = new List<Behaviour>();
+            behaviour.enabled = false;
+            list.Add(behaviour);
+        }
+
+        static void Back(string key)
+        {
+            List<Behaviour> behaviours;
+            if (offBehaviours.TryGetValue(key, out behaviours))
+                foreach (Behaviour behaviour in behaviours)
+                    if (behaviour != null) behaviour.enabled = true;
+            offBehaviours.Remove(key);
+            List<Renderer> renderers;
+            if (offRenderers.TryGetValue(key, out renderers))
+                foreach (Renderer renderer in renderers)
+                    if (renderer != null) renderer.enabled = true;
+            offRenderers.Remove(key);
         }
     }
 

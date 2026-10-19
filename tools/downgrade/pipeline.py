@@ -288,6 +288,7 @@ COMPAT_SOURCES = [
             'EnemySplit',
             'FastPaths',
             'Cameras',
+            'UiPark',
             'Decor',
             'Cuts',
             'Audit',
