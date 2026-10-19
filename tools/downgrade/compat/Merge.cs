@@ -188,6 +188,7 @@ namespace CrowCompat
             int kilobytes = CrowFlags.Int(args, "-crow-merge-max-kb", -1);
             if (kilobytes >= 0) MaxBytes = kilobytes * 1024L;
             InstallPlayer(args);  // PlayerMerge.cs
+            InstallLevel(args);  // LevelAtlas.cs
             if (mode == null) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
@@ -495,13 +496,14 @@ namespace CrowCompat
                     }
                     if (combinerType != null && combinerType.IsInstanceOfType(component))
                     {
-                        Combiner(component, analysis);
+                        if (!LevelSkipsCombiner(component)) Combiner(component, analysis);  // LevelAtlas.cs
                         continue;
                     }
                     if (InertScripts.Contains(name) || (name.StartsWith("PlayMaker") && name != "PlayMakerFSM")) continue;
                     // MeshCombineStudio's bookkeeping on its combined objects (a run-time merge of enemies it
                     // combined already).
                     if (name == "CachedComponents" && analysis.InEnemy(transform)) continue;
+                    if (levelRules && KnownLevel(component, name, analysis)) continue;  // LevelAtlas.cs
                     if (Known(component, name, analysis, bake)) continue;
                     if (playerRules && KnownPlayer(component, name, analysis)) continue;  // PlayerMerge.cs
                     // Any other script: it, and what it references, stay as they are.

@@ -291,7 +291,7 @@ namespace CrowCompat
         // them all; one from a global, "*" (anything). findVariables names the FSMs that find by a variable.
         static readonly List<string> findVariables = new List<string>();
 
-        static HashSet<string> FindNames(IEnumerable<GameObject> roots)
+        static HashSet<string> FindNames(IEnumerable<GameObject> roots, bool sceneWide = false)
         {
             var names = new HashSet<string>(StringComparer.Ordinal);
             foreach (GameObject root in roots)
@@ -339,6 +339,7 @@ namespace CrowCompat
                         {
                             string action = ShortName(actions[a] as string);
                             if (!action.StartsWith("Find", StringComparison.Ordinal) && action.IndexOf("WithTag", StringComparison.Ordinal) < 0) continue;
+                            if (sceneWide && action == "FindChild") continue;  // LevelAtlas.cs: below the FSM's own objects
                             int first = a < starts.Count ? Convert.ToInt32(starts[a]) : types.Count;
                             int last = a + 1 < starts.Count ? Convert.ToInt32(starts[a + 1]) : types.Count;
                             for (int p = first; p < last && p < types.Count; p++)
