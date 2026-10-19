@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using UnityEngine;
+using UnityEngine.Audio;
 using UnityEngine.SceneManagement;
 using Debug = UnityEngine.Debug;
 
@@ -45,6 +46,9 @@ using Debug = UnityEngine.Debug;
 //                             change from one block to the next, blocks that changed by over 0.5%.
 //   -crow-mix-mute, -crow-mix-record <dir>, -crow-audio-census <s>
 //                             the listener volume held at 0, the mix recorded, and what plays (MixProbe below).
+//   -crow-shared-reverb on|off  sources whose reverbs are alike share one (SharedReverb; the PS Vita's default: on).
+//   -crow-reverb-null <dir> [s]  Windows players: the area's mix rendered offline with a reverb per source and
+//                             shared, into WAVs for a null test (ReverbNull).
 //   -crow-thread <name>:<priority>:<cpus>  with -crow-audio, set the priority (0 keeps it; 64 highest ..
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
@@ -113,6 +117,8 @@ namespace CrowCompat
         internal static void InstallDefaults()
         {
             FilterGate.Install(Args);
+            SharedReverb.Install(Args, FilterGate.GatesReverbs);
+            ReverbNull.Install(Args);
             Threads.MoveLoader(Args);
         }
 
@@ -281,11 +287,23 @@ namespace CrowCompat
     // second, a filter that is on counting as 30% nearer (so two alike don't swap back and forth).
     public static class FilterGate
     {
+        // A filter on a source, or a shared reverb (SharedReverb.Group: one reverb for its members' sum, on while
+        // its members are routed to it), which counts as one filter.
         struct Entry
         {
             public Behaviour Filter;
             public AudioSource Source;
+            public SharedReverb.Group Shared;
             public float Tail, OffAt, Score;
+
+            public bool Valid { get { return Shared != null ? Shared.Alive : Filter != null; } }
+            public bool On { get { return Shared != null ? Shared.Routed : Filter.enabled; } }
+
+            public void Set(bool on)
+            {
+                if (Shared != null) Shared.Route(on);
+                else Filter.enabled = on;
+            }
         }
 
         static readonly HashSet<string> types = new HashSet<string>();
@@ -305,6 +323,9 @@ namespace CrowCompat
         // ran under 97% of the wall clock over a window of 1.5 s or more, the cap goes one below the reverbs
         // on (-crow-reverb-adapt off keeps it).
         static int ceiling, onCount;
+
+        // Whether FilterGate switches the reverb filters (SharedReverb then leaves its groups' on and off to it).
+        internal static bool GatesReverbs { get { return active && (types.Contains("reverb") || types.Contains("all")); } }
         static bool adapt = true, resolve;
         static float watchFrom;
         static double windowDsp = -1.0;
@@ -361,6 +382,10 @@ namespace CrowCompat
             if (all || types.Contains("chorus")) list.Add(typeof(AudioChorusFilter));
             if (all || types.Contains("echo")) list.Add(typeof(AudioEchoFilter));
             if (all || types.Contains("distortion")) list.Add(typeof(AudioDistortionFilter));
+            // The reverbs that share one (SharedReverb): an entry for each group, its members' filters left out below.
+            if (list.Contains(typeof(AudioReverbFilter)))
+                foreach (SharedReverb.Group group in SharedReverb.Find())
+                    entries.Add(new Entry { Shared = group, Tail = group.Tail });
             foreach (Type type in list)
                 foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(type))
                 {
@@ -370,6 +395,7 @@ namespace CrowCompat
                     // A filter without a source on its object filters the listener's whole mix: left alone.
                     if (source == null && idleOnly) continue;
                     var reverb = filter as AudioReverbFilter;
+                    if (reverb != null && SharedReverb.Owns(reverb)) continue;  // its group's entry above
                     entries.Add(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f });
                 }
             // The listener Unity hears with: the one enabled (none or two: no listener, so no source counts as silent).
@@ -394,12 +420,16 @@ namespace CrowCompat
             {
                 Entry entry = entries[i];
                 float score = float.MaxValue;
-                if (entry.Filter != null && entry.Source != null)
+                if (entry.Shared != null)
                 {
-                    AudioSource source = entry.Source;
-                    score = source.spatialBlend < 0.5f || listener == null
-                        ? 0f
-                        : Vector3.Distance(source.transform.position, ear) / Mathf.Max(source.maxDistance, 0.01f);
+                    if (entry.Shared.Alive)
+                        foreach (SharedReverb.Member member in entry.Shared.Members)
+                            if (member.Source != null) score = Mathf.Min(score, Audibility(member.Source, ear));
+                    if (entry.Shared.Routed) score *= 0.7f;
+                }
+                else if (entry.Filter != null && entry.Source != null)
+                {
+                    score = Audibility(entry.Source, ear);
                     if (entry.Filter.enabled) score *= 0.7f;
                 }
                 entry.Score = score;
@@ -408,6 +438,18 @@ namespace CrowCompat
             order.Clear();
             for (int i = 0; i < entries.Count; i++) order.Add(i);
             order.Sort((a, b) => entries[a].Score.CompareTo(entries[b].Score));
+        }
+
+        // 2D sources first (0), then by distance from the listener over the source's range.
+        static float Audibility(AudioSource source, Vector3 ear)
+        {
+            return source.spatialBlend < 0.5f || listener == null ? 0f : Vector3.Distance(source.transform.position, ear) / Mathf.Max(source.maxDistance, 0.01f);
+        }
+
+        // Whether a source wants its filter now: playing and heard (or the silent rule off).
+        static bool Wants(AudioSource source, Vector3 ear)
+        {
+            return source != null && source.isActiveAndEnabled && source.isPlaying && !(silentRule && Silent(source, ear));
         }
 
         // Canvas.willRenderCanvases: every frame, before the frame's audio update.
@@ -431,9 +473,25 @@ namespace CrowCompat
             {
                 Entry entry = entries[i];
                 bool want = false;
-                if (idleOnly && entry.Filter != null && entry.Source != null && entry.Source.isActiveAndEnabled)
+                if (idleOnly && entry.Shared != null && entry.Shared.Alive)
                 {
-                    if (entry.Source.isPlaying && !(silentRule && Silent(entry.Source, ear)))
+                    // A shared reverb: while any of its members wants one, or within the tail of the last that did.
+                    foreach (SharedReverb.Member member in entry.Shared.Members)
+                        if (Wants(member.Source, ear))
+                        {
+                            want = true;
+                            break;
+                        }
+                    if (want)
+                    {
+                        entry.OffAt = now + entry.Tail;
+                        entries[i] = entry;
+                    }
+                    else want = now < entry.OffAt;
+                }
+                else if (idleOnly && entry.Filter != null && entry.Source != null && entry.Source.isActiveAndEnabled)
+                {
+                    if (Wants(entry.Source, ear))
                     {
                         want = true;
                         entry.OffAt = now + entry.Tail;
@@ -452,22 +510,22 @@ namespace CrowCompat
                 foreach (int i in order)
                 {
                     Entry entry = entries[i];
-                    if (entry.Filter == null) continue;
+                    if (!entry.Valid) continue;
                     bool keep = wants[i] && kept < max;
                     if (keep) kept++;
-                    bool enabled = entry.Filter.enabled;
+                    bool enabled = entry.On;
                     if (pass == 0)
                     {
                         if (enabled && !keep)
                         {
-                            entry.Filter.enabled = false;
+                            entry.Set(false);
                             switches++;
                         }
                         else if (enabled) on++;
                     }
                     else if (keep && !enabled && on < max)
                     {
-                        entry.Filter.enabled = true;
+                        entry.Set(true);
                         switches++;
                         on++;
                     }
@@ -478,20 +536,23 @@ namespace CrowCompat
         }
 
         // Unity's job workers on CPU 2 as well as CPU 1 (Quality.cs GfxThreads, 64:12) while the mixer has CPU 2 to
-        // spare: no filter on (a reverb costs the mixer 18-20% of CPU 2, the mixer without one 19-28%) for a second,
-        // and the DSP clock never behind in this area. Back on CPU 1 alone (64:1, the PS Vita's default) in the frame a
-        // filter comes on. At the same priority as the mixer a worker's job delays a mix block by a few ms (the tap's
+        // spare: no filter on (a shared reverb counts as one; a reverb costs the mixer 18-20% of CPU 2, a shared one
+        // 28, the mixer without one 19-40%) for a second, and the DSP clock never behind in this area. Back on CPU 1
+        // alone (64:1, the PS Vita's default) in the frame a filter comes on. With one filter allowed (wsharemax=1):
+        // Fairy Forest's steady fight on its shared reverb -0.4 ms a frame, the DSP clock down to 0.989; Corridor D's
+        // 0.980-0.993 for a whole minute, over the cap's 0.97, so nothing took it back. At the same priority as the mixer a worker's job delays a mix block by a few ms (the tap's
         // longest gap 13 -> 18 ms, no late block); with Pool's two reverbs on, sharing put the DSP clock at 99% of real
         // time (adapting caps then take reverbs off) and the render thread there at 96%.
         // -crow-workers-share off (wshare=off) keeps them on CPU 1; an explicit -crow-gfx-workers also turns it off.
         static bool shareAuto, shared, blockedHere;
+        static int shareMaxOn;  // the filters on that still let the workers share (wsharemax=<n>, a test)
         static float quietSince = -1f;
         static readonly HashSet<string> shareBlocked = new HashSet<string>();
 
         static void Share(float now)
         {
             if (!shareAuto) return;
-            bool quiet = onCount == 0 && !blockedHere;
+            bool quiet = onCount <= shareMaxOn && !blockedHere;
             if (!quiet) quietSince = -1f;
             else if (quietSince < 0f) quietSince = now;
             bool want = quiet && now - quietSince >= 1f;
@@ -611,6 +672,14 @@ namespace CrowCompat
                     }
                     Debug.Log("CROW_AUDIO wshare=" + (shareAuto ? "on" : "off"));
                     return true;
+                case "wsharemax":
+                    int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out shareMaxOn);
+                    Debug.Log("CROW_AUDIO wsharemax=" + shareMaxOn);
+                    return true;
+                case "sreverb":
+                    SharedReverb.Set(value != "off");
+                    nextFind = 0f;  // FilterGate's entries again, from the filters or the groups
+                    return true;
                 case "rsilent":
                     silentOn = value != "off";
                     Debug.Log("CROW_AUDIO rsilent=" + (silentOn ? "on" : "off"));
@@ -661,9 +730,554 @@ namespace CrowCompat
         internal static string Stats()
         {
             if (!active) return "";
-            int count = switches;
+            int count = switches, shared = 0, sharedOn = 0;
             switches = 0;
-            return " gated=" + entries.Count + "/" + count + " cap=" + max;
+            foreach (Entry entry in entries)
+                if (entry.Shared != null)
+                {
+                    shared++;
+                    if (entry.Shared.Routed) sharedOn++;
+                }
+            return " gated=" + entries.Count + "/" + count + " cap=" + max + " on=" + onCount + " shared=" + sharedOn + "/" + shared;
+        }
+    }
+
+    // One reverb for sources whose reverbs are alike (on by default on the PS Vita; -crow-shared-reverb on|off,
+    // sreverb=on|off). The corridors' and Fairy Forest's ambient loops each carry an AudioReverbFilter with the same
+    // settings (Corridor S: six loops, User: room 0 dB, no reflections, 1 s), and each filter costs FMOD's mixer
+    // 18-20% of CPU 2 on the PS Vita. A reverb is linear and time-invariant, so one reverb on the sum of the
+    // sounds is the sum of one reverb on each: the members of a group (same 14 settings, same destination mixer
+    // group, reverb the last filter on the source: no filter or OnAudioFilterRead after it, effects not bypassed,
+    // no spatializer) go to a mixer of their own (asset_rules.shared_reverb_mixers: Assets/Resources/
+    // CrowSharedReverb/SharedReverb<n>.mixer, a Master group with an SFX Reverb whose 14 parameters are exposed,
+    // set from the members' filters) whose output is their old group, and their filters are off. Unity applies a
+    // source's volume, rolloff and pan before its filters, so the sum reaches the shared reverb as it reached each:
+    // rendered offline on Windows, per-source and shared differ by float rounding (-137 dB; ReverbNull below), 2D
+    // or 3D, moving or with volume fades. A group counts as one filter for FilterGate's cap, ranking (its most
+    // audible member) and silent rule (on while any member wants its filter, or within the tail of the last that
+    // did); off, its members go to their old group with no reverb, as their filters would be off. Without FilterGate
+    // (other players), every group is on. A group of one stays a filter. A mixer with no input suspends (its
+    // m_EnableSuspend), so the pool's spare mixers cost nothing.
+    public static class SharedReverb
+    {
+        public struct Member
+        {
+            public AudioReverbFilter Filter;
+            public AudioSource Source;
+        }
+
+        public class Group
+        {
+            public readonly List<Member> Members = new List<Member>();
+            public string Key, Name;
+            public AudioMixerGroup Dest;
+            public int Slot = -1;
+            public float Tail;
+            public bool Routed, Alive = true;
+
+            // On: the members into the shared reverb; off: into their old group, with no reverb. Their filters stay off.
+            public void Route(bool on)
+            {
+                if (!Alive) return;
+                Routed = on;
+                foreach (Member member in Members)
+                {
+                    if (member.Filter != null) member.Filter.enabled = false;
+                    if (member.Source != null) member.Source.outputAudioMixerGroup = on ? inputs[Slot] : Dest;
+                }
+            }
+        }
+
+        const string Folder = "CrowSharedReverb/SharedReverb";
+        internal const int Slots = 12;
+        // The SFX Reverb's exposed parameters (p_<name>), in AudioReverbFilter's terms below.
+        static readonly string[] Params = { "DryLevel", "Room", "RoomHF", "DecayTime", "DecayHFRatio", "Reflections", "ReflectDelay", "Reverb", "ReverbDelay", "Diffusion", "Density", "HFReference", "RoomLF", "LFReference" };
+        static AudioMixer[] mixers;
+        static AudioMixerGroup[] inputs;
+        static readonly Group[] slotOwner = new Group[Slots];
+        static readonly float[] slotFreed = new float[Slots];
+        static bool on, gated, broken, held;
+        static float nextFind;
+        static readonly List<Group> groups = new List<Group>();
+        static readonly Dictionary<AudioReverbFilter, Group> owner = new Dictionary<AudioReverbFilter, Group>();
+        static readonly HashSet<string> logged = new HashSet<string>();
+
+        internal static bool Active { get { return on && !broken; } }
+
+        internal static void Install(string[] args, bool gatedByFilterGate)
+        {
+            string mode = CrowFlags.Value(args, "-crow-shared-reverb");
+            on = mode == null ? Application.platform == RuntimePlatform.PSP2 && !args.Contains("-crow-audio-game") : mode != "off";
+            gated = gatedByFilterGate;
+            SceneManager.sceneLoaded += (scene, loadMode) => nextFind = 0f;
+            Canvas.willRenderCanvases += Frame;
+            Debug.Log("CROW_AUDIO shared reverb " + (on ? "on" : "off") + (gated ? " (FilterGate switches the groups)" : ""));
+        }
+
+        internal static bool Owns(AudioReverbFilter filter)
+        {
+            Group group;
+            return filter != null && owner.TryGetValue(filter, out group) && group.Alive;
+        }
+
+        internal static string GroupOf(AudioReverbFilter filter)
+        {
+            Group group;
+            return filter != null && owner.TryGetValue(filter, out group) && group.Alive ? group.Name + (group.Routed ? "" : "(off)") : "-";
+        }
+
+        // sreverb=on|off, and the null test's switch.
+        internal static void Set(bool value)
+        {
+            if (value == on) return;
+            on = value;
+            if (!on) ReleaseAll();
+            nextFind = 0f;
+            Debug.Log("CROW_AUDIO shared reverb " + (on ? "on" : "off"));
+        }
+
+        // The null test holds the groups as they are (no finds of its own between passes).
+        internal static void Hold(bool value)
+        {
+            held = value;
+        }
+
+        // Without FilterGate's reverb switching: every group on, found after each load and every 3 s.
+        static void Frame()
+        {
+            if (gated || held || !Active) return;
+            float now = Time.realtimeSinceStartup;
+            if (now < nextFind) return;
+            nextFind = now + 3f;
+            RouteAll();
+        }
+
+        // Every group found now and on (standalone and the null test).
+        internal static void RouteAll()
+        {
+            foreach (Group group in Find())
+                if (!group.Routed) group.Route(true);
+        }
+
+        static bool Load()
+        {
+            if (mixers != null) return true;
+            mixers = new AudioMixer[Slots];
+            inputs = new AudioMixerGroup[Slots];
+            for (int i = 0; i < Slots; i++)
+            {
+                mixers[i] = Resources.Load<AudioMixer>(Folder + i);
+                AudioMixerGroup[] found = mixers[i] != null ? mixers[i].FindMatchingGroups("Master") : null;
+                if (found == null || found.Length == 0)
+                {
+                    Debug.Log("CROW_AUDIO shared reverb: no mixer " + Folder + i + " in this build (asset_rules.shared_reverb_mixers); off");
+                    broken = true;
+                    return false;
+                }
+                inputs[i] = found[0];
+            }
+            return true;
+        }
+
+        static float[] Values(AudioReverbFilter r)
+        {
+            return new[] { r.dryLevel, r.room, r.roomHF, r.decayTime, r.decayHFRatio, r.reflectionsLevel, r.reflectionsDelay, r.reverbLevel, r.reverbDelay, r.diffusion, r.density, r.hfReference, r.roomLF, r.lfReference };
+        }
+
+        // Whether a filter can share: on a source, the last filter of its chain, effects not bypassed, no spatializer.
+        static bool Eligible(AudioReverbFilter filter, out AudioSource source, out string why)
+        {
+            source = filter.GetComponent<AudioSource>();
+            why = null;
+            if (source == null) why = "no source";
+            else if (source.bypassEffects) why = "effects bypassed";
+            else if (source.spatialize) why = "spatializer";
+            else
+            {
+                bool after = false;
+                foreach (Component c in filter.GetComponents<Component>())
+                {
+                    if (ReferenceEquals(c, filter))
+                    {
+                        after = true;
+                        continue;
+                    }
+                    if (!after || c == null) continue;
+                    if (c is AudioReverbFilter || c is AudioLowPassFilter || c is AudioHighPassFilter || c is AudioEchoFilter || c is AudioChorusFilter || c is AudioDistortionFilter)
+                        why = "a " + c.GetType().Name + " after it";
+                    else if (c is MonoBehaviour && FiltersAudio(c.GetType()))
+                        why = "OnAudioFilterRead after it (" + c.GetType().Name + ")";
+                    if (why != null) break;
+                }
+            }
+            return why == null;
+        }
+
+        static readonly Dictionary<Type, bool> filterTypes = new Dictionary<Type, bool>();
+
+        // Whether a script type has OnAudioFilterRead (then it is a filter in its source's chain).
+        static bool FiltersAudio(Type type)
+        {
+            bool has;
+            if (!filterTypes.TryGetValue(type, out has))
+                filterTypes[type] = has = type.GetMethod("OnAudioFilterRead", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic) != null;
+            return has;
+        }
+
+        static string Key(float[] values, AudioMixerGroup dest)
+        {
+            var text = new StringBuilder(dest != null ? dest.GetInstanceID().ToString(CultureInfo.InvariantCulture) : "none");
+            foreach (float v in values) text.Append('|').Append(v.ToString("R", CultureInfo.InvariantCulture));
+            return text.ToString();
+        }
+
+        // The groups in the loaded scenes, kept, grown, made or released. FilterGate calls it from its find.
+        internal static List<Group> Find()
+        {
+            var alive = new List<Group>();
+            if (!Active || !Load()) return alive;
+            var candidates = new Dictionary<string, List<Member>>();
+            var dests = new Dictionary<string, AudioMixerGroup>();
+            var sample = new Dictionary<string, AudioReverbFilter>();
+            foreach (AudioReverbFilter filter in Resources.FindObjectsOfTypeAll<AudioReverbFilter>())
+            {
+                if (filter == null || !filter.gameObject.scene.IsValid()) continue;
+                Group group;
+                AudioSource source;
+                AudioMixerGroup dest;
+                if (owner.TryGetValue(filter, out group) && group.Alive)
+                {
+                    source = filter.GetComponent<AudioSource>();
+                    dest = group.Dest;
+                    if (source == null) continue;
+                }
+                else
+                {
+                    string why;
+                    if (!Eligible(filter, out source, out why))
+                    {
+                        if (logged.Add(filter.GetInstanceID() + why)) Debug.Log("CROW_AUDIO shared reverb: " + Path(filter.transform) + " keeps its own (" + why + ")");
+                        continue;
+                    }
+                    dest = source.outputAudioMixerGroup;
+                }
+                string key = Key(Values(filter), dest);
+                List<Member> list;
+                if (!candidates.TryGetValue(key, out list))
+                {
+                    candidates[key] = list = new List<Member>();
+                    dests[key] = dest;
+                    sample[key] = filter;
+                }
+                list.Add(new Member { Filter = filter, Source = source });
+            }
+            // Groups whose key has fewer than two members left: released (their filters back), their mixer free.
+            foreach (Group group in groups)
+            {
+                List<Member> list;
+                if (!candidates.TryGetValue(group.Key, out list) || list.Count < 2) Release(group);
+            }
+            groups.RemoveAll(g => !g.Alive);
+            foreach (AudioReverbFilter gone in owner.Keys.Where(k => k == null || !owner[k].Alive).ToList()) owner.Remove(gone);
+            foreach (KeyValuePair<string, List<Member>> pair in candidates)
+            {
+                if (pair.Value.Count < 2) continue;
+                Group group = groups.FirstOrDefault(g => g.Key == pair.Key);
+                if (group == null)
+                {
+                    int slot = FreeSlot();
+                    if (slot < 0)
+                    {
+                        if (logged.Add("full" + pair.Key)) Debug.Log("CROW_AUDIO shared reverb: all " + Slots + " mixers in use; " + pair.Value.Count + " filters keep their own");
+                        continue;
+                    }
+                    group = new Group { Key = pair.Key, Dest = dests[pair.Key], Slot = slot };
+                    if (!Assign(group, sample[pair.Key])) continue;
+                    groups.Add(group);
+                }
+                // New members take the group's state; members gone drop out.
+                group.Members.RemoveAll(m => m.Filter == null || m.Source == null);
+                foreach (Member member in pair.Value)
+                {
+                    if (group.Members.Any(m => ReferenceEquals(m.Filter, member.Filter))) continue;
+                    group.Members.Add(member);
+                    owner[member.Filter] = group;
+                    member.Filter.enabled = false;
+                    member.Source.outputAudioMixerGroup = group.Routed ? inputs[group.Slot] : group.Dest;
+                }
+                alive.Add(group);
+            }
+            return alive;
+        }
+
+        static int FreeSlot()
+        {
+            int best = -1;
+            for (int i = 0; i < Slots; i++)
+                if (slotOwner[i] == null && (best < 0 || slotFreed[i] < slotFreed[best])) best = i;  // the longest free: its tail gone
+            return best;
+        }
+
+        static bool Assign(Group group, AudioReverbFilter from)
+        {
+            AudioMixer mixer = mixers[group.Slot];
+            float[] values = Values(from);
+            for (int i = 0; i < Params.Length; i++)
+                if (!mixer.SetFloat("p_" + Params[i], values[i]))
+                {
+                    Debug.Log("CROW_AUDIO shared reverb: " + mixer.name + " has no exposed p_" + Params[i] + "; off");
+                    broken = true;
+                    return false;
+                }
+            mixer.outputAudioMixerGroup = group.Dest;
+            slotOwner[group.Slot] = group;
+            group.Tail = from.decayTime + 0.3f;
+            group.Name = mixer.name;
+            var settings = new StringBuilder();
+            for (int i = 0; i < Params.Length; i++) settings.Append(' ').Append(Params[i]).Append('=').Append(values[i].ToString("R", CultureInfo.InvariantCulture));
+            Debug.Log("CROW_AUDIO shared reverb " + group.Name + " -> " + (group.Dest != null ? group.Dest.name : "listener") + ":" + settings);
+            return true;
+        }
+
+        static void Release(Group group)
+        {
+            if (!group.Alive) return;
+            foreach (Member member in group.Members)
+            {
+                if (member.Source != null) member.Source.outputAudioMixerGroup = group.Dest;
+                if (member.Filter != null) member.Filter.enabled = true;  // the game's state; FilterGate switches it from here
+                if (!ReferenceEquals(member.Filter, null)) owner.Remove(member.Filter);
+            }
+            group.Alive = group.Routed = false;
+            if (group.Slot >= 0 && ReferenceEquals(slotOwner[group.Slot], group))
+            {
+                slotOwner[group.Slot] = null;
+                slotFreed[group.Slot] = Time.realtimeSinceStartup;
+            }
+        }
+
+        static void ReleaseAll()
+        {
+            foreach (Group group in groups) Release(group);
+            groups.Clear();
+            owner.Clear();
+        }
+
+        internal static string Path(Transform t)
+        {
+            string text = t.name;
+            for (int i = 0; i < 2 && t.parent != null; i++)
+            {
+                t = t.parent;
+                text = t.name + "/" + text;
+            }
+            return text.Replace(' ', '_');
+        }
+    }
+
+    // -crow-reverb-null <dir> [s] (Windows players): SharedReverb's null test. s seconds (default 10) after the first
+    // area loads, the sources playing then are rendered offline (AudioRenderer, which sends the device silence while
+    // it records) with each reverb filter as the game has it (per) and with SharedReverb's groups (shared), passes
+    // per (a first pass: a clip's first play starts a sample apart), per, per, shared, shared, per, per
+    // (-crow-reverb-null-passes; dry: every filter off, a control), into float WAVs <dir>/<scene>-<n>-<mode>.wav.
+    // Each pass: the sources stopped, the mode set, 6 s rendered and dropped (the tails out),
+    // every source played from its start in the same mix block, 12 s rendered in one frame. Streamed clips stay stopped (a stream's start
+    // isn't sample-exact) and the game's clock is held (Time.timeScale 0), so nothing else starts; CROW_RNULL lines.
+    // -crow-mute holds the listener's volume at 0, and the renderer records after it: the volume is 1 only inside
+    // the frame that renders a pass, while the renderer has the device. Compare passes of the same parity (2 with 4,
+    // 3 with 5; per against per: 2 with 6, 3 with 7): the start of a pass alternates between two states a few samples
+    // apart, whatever the mode; past the first seconds (work/scratch/sharedreverb/compare.py).
+    // -crow-reverb-null-quit quits after the test.
+    public static class ReverbNull
+    {
+        static string dir;
+        static float delay, startAt = -1f;
+        static IEnumerator<bool> run;
+        static bool done;
+        static float volume;  // the listener's volume before a pass's frame (0 under -crow-mute)
+
+        internal static void Install(string[] args)
+        {
+            dir = CrowFlags.Optional(args, "-crow-reverb-null");
+            if (dir == null) return;
+            if (Application.platform != RuntimePlatform.WindowsPlayer)
+            {
+                Debug.Log("CROW_RNULL Windows players only");
+                return;
+            }
+            delay = 10f;
+            int index = Array.IndexOf(args, "-crow-reverb-null");
+            float seconds;
+            if (index + 2 < args.Length && float.TryParse(args[index + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds)) delay = seconds;
+            SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                if (startAt < 0f && !done && scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara") startAt = Time.realtimeSinceStartup + delay;
+            };
+            Canvas.willRenderCanvases += Frame;
+            Debug.Log("CROW_RNULL to " + dir + " " + delay + " s after the first area");
+        }
+
+        static void Frame()
+        {
+            if (run == null)
+            {
+                if (startAt < 0f || done || Time.realtimeSinceStartup < startAt) return;
+                done = true;
+                run = Run();
+            }
+            bool more;
+            try
+            {
+                more = run.MoveNext();
+            }
+            catch (Exception e)
+            {
+                Debug.Log("CROW_RNULL failed: " + e);
+                more = false;
+                AudioListener.volume = volume;
+            }
+            if (!more) run = null;
+        }
+
+        static int Channels()
+        {
+            switch (AudioSettings.speakerMode)
+            {
+                case AudioSpeakerMode.Mono: return 1;
+                case AudioSpeakerMode.Quad: return 4;
+                case AudioSpeakerMode.Surround: return 5;
+                case AudioSpeakerMode.Mode5point1: return 6;
+                case AudioSpeakerMode.Mode7point1: return 8;
+                default: return 2;
+            }
+        }
+
+        // frames sample frames rendered (a block of 1024 at a time), into the list or dropped.
+        static void Render(int frames, int channels, List<float> into)
+        {
+            const int block = 1024;
+            var buffer = new Unity.Collections.NativeArray<float>(block * channels, Unity.Collections.Allocator.Temp);
+            try
+            {
+                for (int got = 0; got < frames; got += block)
+                {
+                    AudioRenderer.Render(buffer);
+                    if (into != null)
+                        for (int i = 0; i < buffer.Length; i++) into.Add(buffer[i]);
+                }
+            }
+            finally
+            {
+                buffer.Dispose();
+            }
+        }
+
+        static IEnumerator<bool> Run()
+        {
+            string scene = SceneManager.GetActiveScene().name.Replace(' ', '_');
+            string[] passes = (CrowFlags.Optional(ProbeFiles.Args, "-crow-reverb-null-passes") ?? "per,per,per,shared,shared,per,per").Split(',');
+            float seconds = CrowFlags.Number(ProbeFiles.Args, "-crow-reverb-null-seconds", 12f);
+            int rate = AudioSettings.outputSampleRate, channels = Channels();
+            var sources = new List<AudioSource>();
+            var streams = new List<AudioSource>();
+            foreach (AudioSource source in UnityEngine.Object.FindObjectsOfType<AudioSource>())
+            {
+                if (!source.isPlaying || source.clip == null) continue;
+                if (source.clip.loadType == AudioClipLoadType.Streaming) streams.Add(source);
+                else sources.Add(source);
+            }
+            foreach (AudioSource source in sources)
+            {
+                var reverb = source.GetComponent<AudioReverbFilter>();
+                Debug.Log("CROW_RNULL source " + SharedReverb.Path(source.transform) + " clip=" + source.clip.name.Replace(' ', '_') + " vol=" + source.volume.ToString("F3", CultureInfo.InvariantCulture) +
+                          " blend=" + source.spatialBlend.ToString("F2", CultureInfo.InvariantCulture) + " group=" + (source.outputAudioMixerGroup != null ? source.outputAudioMixerGroup.name.Replace(' ', '_') : "-") +
+                          " reverb=" + (reverb == null ? "-" : SharedReverb.GroupOf(reverb)));
+            }
+            foreach (AudioSource source in streams)
+            {
+                Debug.Log("CROW_RNULL stream left out " + SharedReverb.Path(source.transform) + " clip=" + source.clip.name.Replace(' ', '_'));
+                source.Stop();
+            }
+            if (!AudioRenderer.Start())
+            {
+                Debug.Log("CROW_RNULL AudioRenderer.Start failed");
+                yield break;
+            }
+            float scale = Time.timeScale;
+            bool sharedBefore = SharedReverb.Active;
+            // The sources' reverb filters on as the game has them (per), for the dry passes' switch.
+            var filters = sources.Select(s => s.GetComponent<AudioReverbFilter>()).Where(r => r != null).ToList();
+            Time.timeScale = 0f;
+            SharedReverb.Hold(true);
+            System.IO.Directory.CreateDirectory(dir);
+            var rec = new List<float>((int)(seconds * rate * channels) + 4096);
+            for (int n = 0; n < passes.Length; n++)
+            {
+                string mode = passes[n];
+                foreach (AudioSource source in sources) source.Stop();
+                if (mode == "shared")
+                {
+                    SharedReverb.Set(true);
+                    SharedReverb.Find();  // the groups' mixers given their parameters before the flush
+                }
+                else
+                {
+                    SharedReverb.Set(false);
+                    // dry: no reverb at all, a control (how much of the mix the reverbs are)
+                    foreach (AudioReverbFilter filter in filters) filter.enabled = mode != "dry";
+                }
+                yield return true;
+                Render(rate * 6, channels, null);
+                if (mode == "shared") SharedReverb.RouteAll();
+                foreach (AudioSource source in sources)
+                {
+                    IdleAudio.Wake(source);
+                    source.timeSamples = 0;
+                    source.Play();
+                }
+                yield return true;
+                // Within this frame only: the volume at 1 while the renderer records (the device gets silence).
+                rec.Clear();
+                volume = AudioListener.volume;
+                AudioListener.volume = 1f;
+                Render(1024, channels, null);  // the volume's ramp
+                Render((int)(seconds * rate), channels, rec);
+                AudioListener.volume = volume;
+                int extra = UnityEngine.Object.FindObjectsOfType<AudioSource>().Count(s => s.isPlaying && !sources.Contains(s));
+                string path = System.IO.Path.Combine(dir, scene + "-" + (n + 1) + "-" + mode + ".wav");
+                WriteFloatWav(path, rec, channels, rate);
+                Debug.Log("CROW_RNULL pass " + (n + 1) + " " + mode + " sources=" + sources.Count + " extra=" + extra + " shared=" + (SharedReverb.Active ? "on" : "off") +
+                          " peak=" + rec.Select(v => Math.Abs(v)).DefaultIfEmpty(0f).Max().ToString("F4", CultureInfo.InvariantCulture) + " " + path);
+            }
+            AudioRenderer.Stop();
+            foreach (AudioReverbFilter filter in filters) filter.enabled = true;
+            Time.timeScale = scale;
+            SharedReverb.Set(sharedBefore);
+            SharedReverb.Hold(false);
+            foreach (AudioSource source in sources.Concat(streams)) source.Play();
+            Debug.Log("CROW_RNULL done " + scene);
+            if (ProbeFiles.Args.Contains("-crow-reverb-null-quit")) Application.Quit();
+        }
+
+        static void WriteFloatWav(string path, List<float> samples, int channels, int rate)
+        {
+            using (var w = new System.IO.BinaryWriter(System.IO.File.Create(path)))
+            {
+                int bytes = samples.Count * 4;
+                w.Write(Encoding.ASCII.GetBytes("RIFF"));
+                w.Write(36 + bytes);
+                w.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+                w.Write(16);
+                w.Write((short)3);
+                w.Write((short)channels);
+                w.Write(rate);
+                w.Write(rate * channels * 4);
+                w.Write((short)(channels * 4));
+                w.Write((short)32);
+                w.Write(Encoding.ASCII.GetBytes("data"));
+                w.Write(bytes);
+                foreach (float f in samples) w.Write(f);
+            }
         }
     }
 
@@ -1067,7 +1681,7 @@ namespace CrowCompat
                 AudioSource source = r.GetComponent<AudioSource>();
                 Debug.Log("CROW_ACENSUS reverb scene=" + scene + " " + PathOf(r.transform) + " on=" + (r.enabled ? 1 : 0) + " active=" + (r.gameObject.activeInHierarchy ? 1 : 0) +
                           " playing=" + (source != null && source.isPlaying ? 1 : 0) + " clip=" + (source != null && source.clip != null ? source.clip.name.Replace(' ', '_') : "-") +
-                          " d=" + F(Vector3.Distance(r.transform.position, at), "F1") + " preset=" + r.reverbPreset + " dry=" + F(r.dryLevel, "F0") + " room=" + F(r.room, "F0") +
+                          " d=" + F(Vector3.Distance(r.transform.position, at), "F1") + " shared=" + SharedReverb.GroupOf(r) + " preset=" + r.reverbPreset + " dry=" + F(r.dryLevel, "F0") + " room=" + F(r.room, "F0") +
                           " roomHF=" + F(r.roomHF, "F0") + " roomLF=" + F(r.roomLF, "F0") + " decay=" + F(r.decayTime) + " decayHF=" + F(r.decayHFRatio) +
                           " refl=" + F(r.reflectionsLevel, "F0") + " reflDelay=" + F(r.reflectionsDelay, "F3") + " rev=" + F(r.reverbLevel, "F0") + " revDelay=" + F(r.reverbDelay, "F3") +
                           " hf=" + F(r.hfReference, "F0") + " lf=" + F(r.lfReference, "F0") + " diffusion=" + F(r.diffusion, "F0") + " density=" + F(r.density, "F0"));

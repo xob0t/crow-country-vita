@@ -387,11 +387,128 @@ def audio_seconds(path: Path):
     return None
 
 
+# compat/Audio.cs's SharedReverb: sources whose reverb filters are alike share one reverb, an SFX Reverb on the
+# Master group of a mixer of its own (its 14 parameters exposed as p_<name>, set at run time from the filters;
+# the mixer's output, the members' old group, too). One mixer per group in use, at most SHARED_REVERB_MIXERS at
+# once (Pool has six groups, the player two). Every platform gets them; SharedReverb is on by default on the PS Vita.
+SHARED_REVERB_MIXERS = 12
+SHARED_REVERB_FOLDER = Path('Assets') / 'Resources' / 'CrowSharedReverb'
+# The SFX Reverb's parameters, as the editor names them, and Unity's defaults (Room at -10000: no reverb until set).
+SHARED_REVERB_PARAMETERS = [
+    ('Dry Level', 0), ('Room', -10000), ('Room HF', 0), ('Decay Time', 1), ('Decay HF Ratio', 0.5), ('Reflections', -10000),
+    ('Reflect Delay', 0.02), ('Reverb', 0), ('Reverb Delay', 0.04), ('Diffusion', 100), ('Density', 100),
+    ('HF Reference', 5000), ('Room LF', 0), ('LF Reference', 250),
+]
+
+
+def shared_reverb_mixer(index: int):
+    """The YAML of SharedReverb<index>.mixer, as the 2018.2 editor writes a mixer (AudioMixerController) whose
+    Master group has an SFX Reverb before its Attenuation, with the reverb's parameters exposed."""
+    name = f'SharedReverb{index}'
+
+    def guid(part):
+        return guid_for('shared reverb', f'{name}/{part}')
+
+    params = [(label, default, guid(f'param {label}')) for label, default in SHARED_REVERB_PARAMETERS]
+    head = ['  m_ObjectHideFlags: 0', '  m_CorrespondingSourceObject: {fileID: 0}', '  m_PrefabInternal: {fileID: 0}']
+    effect_head = ['  m_ObjectHideFlags: 3', *head[1:]]
+    lines = [
+        '%YAML 1.1',
+        '%TAG !u! tag:unity3d.com,2011:',
+        '--- !u!241 &24100000',
+        'AudioMixerController:',
+        *head,
+        f'  m_Name: {name}',
+        '  m_OutputGroup: {fileID: 0}',
+        '  m_MasterGroup: {fileID: 24300002}',
+        '  m_Snapshots:',
+        '  - {fileID: 24500008}',
+        '  m_StartSnapshot: {fileID: 24500008}',
+        '  m_SuspendThreshold: -80',
+        '  m_EnableSuspend: 1',
+        '  m_UpdateMode: 0',
+        '  m_ExposedParameters:',
+        *(f'  - guid: {g}\n    name: p_{label.replace(" ", "")}' for label, _, g in params),
+        '  m_AudioMixerGroupViews: []',
+        '  m_CurrentViewIndex: 0',
+        '  m_TargetSnapshot: {fileID: 24500008}',
+        '--- !u!243 &24300002',
+        'AudioMixerGroupController:',
+        *head,
+        '  m_Name: Master',
+        '  m_AudioMixer: {fileID: 24100000}',
+        f'  m_GroupID: {guid("group")}',
+        '  m_Children: []',
+        f'  m_Volume: {guid("volume")}',
+        f'  m_Pitch: {guid("pitch")}',
+        '  m_Effects:',
+        '  - {fileID: 24400004}',
+        '  - {fileID: 24400006}',
+        '  m_UserColorIndex: 0',
+        '  m_Mute: 0',
+        '  m_Solo: 0',
+        '  m_BypassEffects: 0',
+        '--- !u!244 &24400004',
+        'AudioMixerEffectController:',
+        *effect_head,
+        '  m_Name: ',
+        f'  m_EffectID: {guid("reverb")}',
+        '  m_EffectName: SFX Reverb',
+        f'  m_MixLevel: {guid("reverb mix")}',
+        '  m_Parameters:',
+        *(f'  - m_ParameterName: {label}\n    m_GUID: {g}' for label, _, g in params),
+        '  m_SendTarget: {fileID: 0}',
+        '  m_EnableWetMix: 0',
+        '  m_Bypass: 0',
+        '--- !u!244 &24400006',
+        'AudioMixerEffectController:',
+        *effect_head,
+        '  m_Name: ',
+        f'  m_EffectID: {guid("attenuation")}',
+        '  m_EffectName: Attenuation',
+        f'  m_MixLevel: {guid("attenuation mix")}',
+        '  m_Parameters: []',
+        '  m_SendTarget: {fileID: 0}',
+        '  m_EnableWetMix: 0',
+        '  m_Bypass: 0',
+        '--- !u!245 &24500008',
+        'AudioMixerSnapshotController:',
+        *head,
+        '  m_Name: Snapshot',
+        '  m_AudioMixer: {fileID: 24100000}',
+        f'  m_SnapshotID: {guid("snapshot")}',
+        '  m_FloatValues:',
+        *(f'    {g}: {default}' for _, default, g in params),
+        '  m_TransitionOverrides: {}',
+    ]
+    return '\n'.join(lines) + '\n'
+
+
+def shared_reverb_mixers():
+    """{path: content} of SharedReverb's mixers and their folder in the project's Resources."""
+    overlay = folder_meta(SHARED_REVERB_FOLDER)
+    for index in range(SHARED_REVERB_MIXERS):
+        path = SHARED_REVERB_FOLDER / f'SharedReverb{index}.mixer'
+        overlay[path] = shared_reverb_mixer(index).encode()
+        meta = [
+            'fileFormatVersion: 2',
+            f'guid: {guid_for("shared reverb", path.name)}',
+            'NativeFormatImporter:',
+            '  externalObjects: {}',
+            '  mainObjectFileID: 24100000',
+            '  userData: ',
+            '  assetBundleName: ',
+            '  assetBundleVariant: ',
+        ]
+        overlay[meta_of(path)] = ('\n'.join(meta) + '\n').encode()
+    return overlay
+
+
 def audio_overlay(exported: Path, platform: str):
     formats = PLATFORM_AUDIO.get(platform)
     if not formats:
-        return {}
-    overlay, streamed = {}, []
+        return shared_reverb_mixers()
+    overlay, streamed = shared_reverb_mixers(), []
     settings = re.compile(
         r'^(  defaultSettings:\n    loadType: )(\d)(\n(?:    .*\n)*?    compressionFormat: )(\d+)'
         r'(\n    quality: )([\d.]+)',
@@ -415,7 +532,7 @@ def audio_overlay(exported: Path, platform: str):
         text = re.sub(r'^  preloadAudioData: 1$', '  preloadAudioData: 0', text, flags=re.M)
         if text != original:
             overlay[meta.relative_to(exported)] = text.encode('utf-8')
-    log(f'{platform} audio import changed for {len(overlay)} clips; {len(streamed)} long clips stream')
+    log(f'{platform} audio import changed for {len(overlay) - 2 * SHARED_REVERB_MIXERS - 1} clips; {len(streamed)} long clips stream')
     return overlay
 
 
