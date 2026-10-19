@@ -79,6 +79,7 @@ namespace CrowCompat
             Guard("Fight", Fight.Install);  // -crow-fight: the fight benchmark (Fight.cs)
             Guard("EnemyCost", EnemyCost.Install);  // the enemies' costs (PS Vita defaults)
             Guard("FixedStep", FixedStep.Install);  // -crow-fixed-dt: the physics step
+            Guard("PhysCost", PhysCost.Install);  // -crow-phys-census: what a physics step works on (PhysCost.cs)
             Guard("EnemySplit", EnemySplit.Install);  // the enemies' death debris out (EnemySplit.cs, EnemyRebuild.cs)
             Guard("FastPaths", FastPaths.Install);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
             Guard("Decor", Decor.Install);  // decoration off screen, -crow-motion-report (Decor.cs)

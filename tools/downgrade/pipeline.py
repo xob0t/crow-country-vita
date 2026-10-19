@@ -284,6 +284,7 @@ COMPAT_SOURCES = [
             'EnemyCost',
             'ActionProfile',
             'FixedStep',
+            'PhysCost',
             'EnemySplit',
             'FastPaths',
             'Cameras',
