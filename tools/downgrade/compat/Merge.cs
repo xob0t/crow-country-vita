@@ -86,6 +86,8 @@ namespace CrowCompat
     public class MergedRenderer : MonoBehaviour
     {
         public Renderer[] parts;
+        // Each part's pose relative to the merged object as it was merged (PlayerMerge.cs' check).
+        public Matrix4x4[] poses;
     }
 
     // -crow-merge-check: every second, whether each merged renderer still stands for its parts: each
@@ -185,6 +187,7 @@ namespace CrowCompat
             if (CrowFlags.Has(args, "-crow-merge-enemies")) Enemies = true;
             int kilobytes = CrowFlags.Int(args, "-crow-merge-max-kb", -1);
             if (kilobytes >= 0) MaxBytes = kilobytes * 1024L;
+            InstallPlayer(args);  // PlayerMerge.cs
             if (mode == null) return;
             SceneManager.sceneLoaded += (scene, loadMode) =>
             {
@@ -433,10 +436,16 @@ namespace CrowCompat
 
         static Analysis Analyze(Scene scene, Dictionary<string, int> scripts, bool bake)
         {
+            return Analyze(Roots(scene), scripts, bake);
+        }
+
+        // The same over any set of roots (PlayerMerge.cs: the player's with the area's).
+        static Analysis Analyze(List<GameObject> roots, Dictionary<string, int> scripts, bool bake)
+        {
             var analysis = new Analysis();
             Type combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
             if (Enemies)
-                foreach (GameObject root in Roots(scene))
+                foreach (GameObject root in roots)
                     foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
                         if (body.name.StartsWith("Enemy ", StringComparison.Ordinal)) analysis.enemies.Add(body.transform);
             // PlatformSpecificAnimation (PatchPlatformAnimation): the PS Vita takes the Switch's choice
@@ -444,7 +453,7 @@ namespace CrowCompat
             if (bake || Application.platform == RuntimePlatform.PSP2)
             {
                 var stateDriven = new HashSet<object>();
-                foreach (GameObject root in Roots(scene))
+                foreach (GameObject root in roots)
                     foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
                     {
                         if (behaviour == null) continue;
@@ -455,7 +464,7 @@ namespace CrowCompat
                         if (type == "RandomDeactivateBehaviour" && Field(behaviour, "target") != null) stateDriven.Add(Field(behaviour, "target"));
                         if (type == "EnableBehaviourAfter" && Field(behaviour, "behaviour") != null) stateDriven.Add(Field(behaviour, "behaviour"));
                     }
-                foreach (GameObject root in Roots(scene))
+                foreach (GameObject root in roots)
                     foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
                     {
                         if (behaviour == null || behaviour.GetType().Name != "PlatformSpecificAnimation" || (bool)(Field(behaviour, "onNS") ?? true)) continue;
@@ -468,7 +477,7 @@ namespace CrowCompat
                         }
                     }
             }
-            foreach (GameObject root in Roots(scene))
+            foreach (GameObject root in roots)
                 foreach (Component component in root.GetComponentsInChildren<Component>(true))
                 {
                     if (component == null || component is Transform) continue;
@@ -494,6 +503,7 @@ namespace CrowCompat
                     // combined already).
                     if (name == "CachedComponents" && analysis.InEnemy(transform)) continue;
                     if (Known(component, name, analysis, bake)) continue;
+                    if (playerRules && KnownPlayer(component, name, analysis)) continue;  // PlayerMerge.cs
                     // Any other script: it, and what it references, stay as they are.
                     analysis.Add(transform, Mark.Exclude, name);
                     foreach (UnityEngine.Object reference in References(component))
@@ -889,6 +899,10 @@ namespace CrowCompat
                         }
                         else if (copies)
                         {
+                            // The player's analysis: a global's object copied into a variable may be acted on through
+                            // it, so what the global holds keeps all as it is.
+                            if (playerRules && (bool)(Field(source, "useVariable") ?? false) && !own.Contains(Field(source, "name") as string ?? ""))
+                                analysis.globalUses.Add(new KeyValuePair<string, KeyValuePair<Mark, string>>((string)Field(source, "name"), new KeyValuePair<Mark, string>(Mark.Exclude, "SetGameObject copy")));
                             List<object> copied = Values(source, locals).ToList();
                             values.AddRange(copied);
                             if (!own.Contains(name)) analysis.GlobalValue(name, copied);
@@ -925,7 +939,16 @@ namespace CrowCompat
                     }
                     continue;
                 }
-                if (mark == Mark.None) continue;
+                if (mark == Mark.None)
+                {
+                    // The player's analysis (PlayerMerge.cs): an action the lists don't know keeps what it acts on
+                    // as it is, unless it only reads.
+                    if (!playerRules) continue;
+                    mark = PlayerUnknownMark(action);
+                    if (mark == Mark.None) continue;
+                    action = "unknown:" + action;
+                    analysis.Unknown(action);
+                }
                 foreach (KeyValuePair<string, object> parameter in entry.Value)
                 {
                     object value = parameter.Value;
@@ -1767,6 +1790,7 @@ namespace CrowCompat
             var materialOrder = group.Select(s => s.material).Distinct().ToList();
             var subIndices = materialOrder.Select(m => new List<int>()).ToList();
             var parts = new List<Renderer>();
+            var poses = new Dictionary<Renderer, Matrix4x4>();
             string channels = Channels(first.mesh);
             bool hasN = channels.Contains("n"), hasT = channels.Contains("t"), hasC = channels.Contains("c"), has0 = channels.Contains("0"), has1 = channels.Contains("1");
             Action flush = () =>
@@ -1794,7 +1818,9 @@ namespace CrowCompat
                 renderer.receiveShadows = first.renderer.receiveShadows;
                 renderer.lightProbeUsage = first.renderer.lightProbeUsage;
                 renderer.reflectionProbeUsage = first.renderer.reflectionProbeUsage;
-                go.AddComponent<MergedRenderer>().parts = parts.Distinct().ToArray();
+                var record = go.AddComponent<MergedRenderer>();
+                record.parts = parts.Distinct().ToArray();
+                if (recordPoses) record.poses = record.parts.Select(r => poses[r]).ToArray();
                 created.Add(go);
                 vertexSum += positions.Count;
                 byteSum += positions.Count * (12L + (hasN ? 12 : 0) + (hasT ? 16 : 0) + (hasC ? 4 : 0) + (has0 ? 8 : 0) + (has1 ? 8 : 0)) + subIndices.Sum(l => l.Count) * 2L;
@@ -1853,6 +1879,7 @@ namespace CrowCompat
                     }
                 }
                 parts.Add(slot.renderer);
+                poses[slot.renderer] = matrix;
             }
             flush();
             vertexTotal = vertexSum;

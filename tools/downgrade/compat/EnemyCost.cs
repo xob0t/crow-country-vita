@@ -255,6 +255,7 @@ namespace CrowCompat
         {
             if (EnemyRebuild.Change(key, value)) return true;  // eatlas=, eflatten=, edebrisout= (EnemyRebuild.cs)
             if (PhysCost.Change(key, value)) return true;  // pcensus=, psolid=, pnone=, pstatic=, ptrigstatic= (PhysCost.cs)
+            if (Merge.ChangePlayer(key, value)) return true;  // pmerge=, pmergetest= (PlayerMerge.cs)
             switch (key)
             {
                 case "eaudio":

@@ -293,6 +293,7 @@ COMPAT_SOURCES = [
             'Cuts',
             'Audit',
             'EnemyRebuild',
+            'PlayerMerge',
             'FsmTrim',
             'FsmCompile',
             'Pad',
