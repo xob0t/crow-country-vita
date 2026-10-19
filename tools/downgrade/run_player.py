@@ -1,7 +1,8 @@
 """Run a Windows player on a desktop of its own, so it never takes the screen, the keyboard or the
 mouse from whoever uses the PC: Unity's players bring their window to the front whatever the
 launcher asks, but a window on another desktop (CreateDesktop) cannot come in front of this one.
-The player runs windowed at 960x544 (-crow-windowed) and muted (-crow-mute). The project keeps
+The player runs windowed at 960x544 (-crow-windowed) and muted: -crow-mute, and Windows' per-app
+mute of its audio sessions for the whole run (mute_players.ps1). The project keeps
 runInBackground on. The player's log goes to <log> (through cmd's redirection,
 since a process on another desktop gets its standard handles from its command line).
 
@@ -123,6 +124,26 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
     ):
         raise OSError(ctypes.get_last_error(), 'CreateProcess failed')
     stop = None
+    # -crow-mute only holds the listener's volume, from CrowCompat's start on: Windows' per-app mute
+    # covers everything the player outputs, for as long as this run (mute_players.ps1).
+    muter = subprocess.Popen(
+        [
+            'powershell',
+            '-NoProfile',
+            '-ExecutionPolicy',
+            'Bypass',
+            '-File',
+            str(Path(__file__).with_name('mute_players.ps1')),
+            '-Watch',
+            '-Name',
+            exe.stem,
+            '-Until',
+            str(os.getpid()),
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=CREATE_NO_WINDOW,
+    )
     try:
         if on_start is not None:
             player_pid = child_process(info.dwProcessId, exe.name)
@@ -138,6 +159,7 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
     finally:
         if stop is not None:
             stop()
+        muter.kill()
         kernel32.CloseHandle(info.hThread)
         kernel32.CloseHandle(info.hProcess)
 
