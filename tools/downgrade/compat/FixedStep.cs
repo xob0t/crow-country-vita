@@ -14,7 +14,10 @@ using UnityEngine.SceneManagement;
 //     calls here, AddForce).
 //   - Each rigidbody's drag and angular drag are set so a velocity decays as fast per second as with the
 //     game's drag at 0.02 (PhysX damps by 1 - drag * step each step), at each scene load, for the player,
-//     and every second for bodies not seen before (Adjust).
+//     every second for bodies not seen before, and at a new body's first AddForce (Adjust). A clone of an
+//     adjusted body (Instantiate copies its drags: the handgun's bullets and spent chambers, cloned from
+//     templates in Mara's prefab; Fight's stress copies of enemies) is known by its drags, a pair FixedStep
+//     set (madeFrom; no game or prefab body has such a pair), and gets its original's, not Drag() twice.
 //   - The bullets (handgun, shotgun, magnum, flame bullets: 18 m/s, 0.6 m a step at 1/30) detect
 //     collisions continuously, so they don't pass through an enemy's small colliders
 //     (-crow-bullet-ccd off leaves them discrete).
@@ -30,6 +33,11 @@ using UnityEngine.SceneManagement;
 // -crow-ground-cache <steps>|off (groundcache=; Cuts.cs sets the PS Vita's 4): the ground friction under a body
 // that Gain looks up with a raycast at every AddForce (84 us a call on the PS Vita, ~1 ms a frame in Station
 // Square's fight) is kept per body for that many physics steps (off: looked up at every call, as before).
+// -crow-fixed-check: bodies scanned every frame; CROW_FIXED_CLONE for each clone of an adjusted body (its game
+// drags, the copied ones, and what Drag() twice would have made), CROW_FIXED_AMBIGUOUS for a prefab's drags
+// that look like a pair FixedStep set, and every 10 s CROW_FIXED_CHECK: the bodies whose drags aren't Drag()
+// of their game drags, and how far bodies that appear in play (clones, debris switched on; not kinematic) moved
+// 1 and 2 s of game time after they appeared and their peak speed (CROW_FIXED_MOVED; also at the game's step).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -40,6 +48,9 @@ namespace CrowCompat
         static bool on, compensate = true, bulletCcd = true;
         // Per body: the game's drag and angular drag, before Adjust.
         static readonly Dictionary<Rigidbody, Vector2> gameDrag = new Dictionary<Rigidbody, Vector2>();
+        // The drags (drag, angular drag; their bits) FixedStep has set, at every step used, with the game's they
+        // were made from: a new body with such a pair is a clone of an adjusted body.
+        static readonly Dictionary<long, Vector2> madeFrom = new Dictionary<long, Vector2>();
         static float nextScan = -1f;
         static bool fullScan;
         // -crow-physics-cap: steps a frame at most (0: off), and the project's maximumDeltaTime.
@@ -95,11 +106,14 @@ namespace CrowCompat
         {
             string value = CrowFlags.Value(args, "-crow-fixed-dt");
             bulletCcd = CrowFlags.Value(args, "-crow-bullet-ccd") != "off";
+            Check.On = CrowFlags.Has(args, "-crow-fixed-check");
+            Check.Old = CrowFlags.Optional(args, "-crow-fixed-check") == "old";
             string capValue = CrowFlags.Value(args, "-crow-physics-cap") ?? (Application.platform == RuntimePlatform.PSP2 ? "2" : null);
             if (capValue != null) Cap(capValue);
             // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
             if (value == null && Application.platform == RuntimePlatform.PSP2) value = "30";
             float number;
+            if (Check.On) Hook();  // also at the game's step, for its numbers
             if (value == null || value == "game" || !float.TryParse(value, System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out number) || number <= 0f) return;
             Hook();
@@ -126,6 +140,7 @@ namespace CrowCompat
                 Vector2 game = gameDrag[body];
                 body.drag = on ? Drag(game.x) : game.x;
                 body.angularDrag = on ? Drag(game.y) : game.y;
+                if (on) madeFrom[Key(body.drag, body.angularDrag)] = game;
             }
             if (on && Time.timeSinceLevelLoad > 1f) fullScan = true;
             Debug.Log("CROW_FIXED step " + step.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) + " s" + (on ? " (game kept as at 0.02)" : compensate ? "" : " (uncompensated)"));
@@ -158,11 +173,13 @@ namespace CrowCompat
         {
             if (Time.fixedDeltaTime != step) Time.fixedDeltaTime = step;  // a game script setting it back
             float now = Time.realtimeSinceStartup;
-            if ((now < nextScan && !fullScan) || !on) return;
+            if (!on && Check.On) Check.Watch();
+            if ((now < nextScan && !fullScan && !Check.On) || !on) return;
             nextScan = now + 1f;
             if (fullScan)
             {
                 fullScan = false;
+                Check.Scanning = true;
                 // After a load: every body, inactive ones too (templates the game clones later).
                 int count = 0;
                 for (int i = 0; i < SceneManager.sceneCount; i++)
@@ -176,21 +193,199 @@ namespace CrowCompat
                 if (player != null)
                     foreach (GameObject root in player.scene.GetRootGameObjects())
                         foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true)) count += Adjust(body);
+                Check.Scanning = false;
                 Debug.Log("CROW_FIXED adjusted " + count + " bodies");
+                if (Check.On) Check.Prefabs();
             }
             foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>()) Adjust(body);
+            if (Check.On) Check.Frame();
         }
 
-        // A body's drags for the step (once per body); bullets continuous. 1 when it was new.
+        static long Key(float drag, float angularDrag)
+        {
+            return (long)(((ulong)new Bits { Float = drag }.Int << 32) | new Bits { Float = angularDrag }.Int);
+        }
+
+        [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+        struct Bits
+        {
+            [System.Runtime.InteropServices.FieldOffset(0)] public float Float;
+            [System.Runtime.InteropServices.FieldOffset(0)] public uint Int;
+        }
+
+        // A body's drags for the step (once per body; a clone of an adjusted body its original's game drags);
+        // bullets continuous. 1 when it was new.
         internal static int Adjust(Rigidbody body)
         {
             if (!on || body == null || gameDrag.ContainsKey(body)) return 0;
-            gameDrag[body] = new Vector2(body.drag, body.angularDrag);
-            body.drag = Drag(body.drag);
-            body.angularDrag = Drag(body.angularDrag);
+            float drag = body.drag, angularDrag = body.angularDrag;
+            Vector2 game;
+            bool copied = madeFrom.TryGetValue(Key(drag, angularDrag), out game);
+            if (!copied || Check.Old) game = new Vector2(drag, angularDrag);
+            gameDrag[body] = game;
+            float made = Drag(game.x), madeAngular = Drag(game.y);
+            if (made != drag) body.drag = made;
+            if (madeAngular != angularDrag) body.angularDrag = madeAngular;
+            madeFrom[Key(body.drag, body.angularDrag)] = game;
+            if (Check.On) Check.Seen(body, game, copied, drag, angularDrag);
             if (bulletCcd && step > GameStep && body.name.EndsWith("bullet", StringComparison.OrdinalIgnoreCase) && !body.isKinematic)
                 body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             return 1;
+        }
+
+        // -crow-fixed-check (old: clones get Drag() of their copied drags, as before 19 Oct, for A/B).
+        static class Check
+        {
+            internal static bool On, Old, Scanning;
+            static readonly Dictionary<string, int> clones = new Dictionary<string, int>();
+            static readonly HashSet<string> ambiguous = new HashSet<string>();
+            class Track
+            {
+                public Rigidbody Body;
+                public string Name;
+                public Vector3 Start;
+                public float Since, Peak, At1;
+            }
+            static readonly List<Track> tracks = new List<Track>();
+            static readonly Dictionary<string, float[]> moved = new Dictionary<string, float[]>();  // n, at 1 s, at 2 s, peak
+            static float nextReport;
+            static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+            static string F(float value)
+            {
+                return value.ToString("0.####", Inv);
+            }
+
+            // Per second, what a velocity keeps under the drag at this step.
+            static float Keep(float drag, float seconds)
+            {
+                return Mathf.Pow(Mathf.Max(0f, 1f - drag * seconds), 1f / seconds);
+            }
+
+            internal static void Seen(Rigidbody body, Vector2 game, bool copied, float drag, float angularDrag)
+            {
+                Transform root = body.transform.root;
+                string name = (root == body.transform ? body.name : root.name + "/" + body.name).Replace(' ', '_');
+                float twice = Drag(drag), twiceAngular = Drag(angularDrag);
+                string key = null;
+                if (copied && (twice != drag || twiceAngular != angularDrag))
+                    key = "CROW_FIXED_CLONE " + name + " game=" + F(game.x) + "," + F(game.y) + " copied=" + F(drag) + "," + F(angularDrag) +
+                          " twice=" + F(twice) + "," + F(twiceAngular) + " keep/s game=" + Keep(game.x, GameStep).ToString("0.00000", Inv) +
+                          " twice=" + Keep(twice, step).ToString("0.00000", Inv) + (Old ? " (old: twice)" : "");
+                else if (!Scanning && Time.timeSinceLevelLoad > 2f)
+                    key = "CROW_FIXED_NEW " + name + " drags=" + F(drag) + "," + F(angularDrag) + (copied ? " (copied, unchanged by Drag)" : "");
+                else if (Scanning && !body.gameObject.activeInHierarchy && !copied)
+                    key = "CROW_FIXED_INACTIVE " + name + " drags=" + F(drag) + "," + F(angularDrag);  // templates the game may clone
+                if (key == null) return;
+                int count;
+                if (!clones.TryGetValue(key, out count)) Debug.Log(key);
+                clones[key] = count + 1;
+            }
+
+            // At the game's step (nothing adjusted): the new bodies, and the report.
+            static readonly HashSet<Rigidbody> watched = new HashSet<Rigidbody>();
+
+            internal static void Watch()
+            {
+                foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                    if (watched.Add(body)) Seen(body, new Vector2(body.drag, body.angularDrag), false, body.drag, body.angularDrag);
+                if (watched.Count > 4096) watched.RemoveWhere(body => body == null);
+                Frame();
+            }
+
+            // Prefabs in memory (not in a scene) whose drags are a pair FixedStep set for other game drags: their
+            // clones would be taken for an adjusted body's.
+            internal static void Prefabs()
+            {
+                int count = 0;
+                var pairs = new HashSet<string>();
+                foreach (Rigidbody body in Resources.FindObjectsOfTypeAll<Rigidbody>())
+                {
+                    if (body == null) continue;
+                    Vector2 game = new Vector2(body.drag, body.angularDrag);
+                    if (!body.gameObject.scene.IsValid())
+                    {
+                        count++;
+                        pairs.Add(F(game.x) + "," + F(game.y));
+                        Vector2 made;
+                        if (madeFrom.TryGetValue(Key(game.x, game.y), out made) && made != game && ambiguous.Add(body.name))
+                            Debug.Log("CROW_FIXED_AMBIGUOUS prefab " + body.name.Replace(' ', '_') + " drags " + F(game.x) + "," + F(game.y) +
+                                      " = FixedStep's for " + F(made.x) + "," + F(made.y));
+                    }
+                }
+                foreach (Vector2 game in gameDrag.Values) pairs.Add(F(game.x) + "," + F(game.y));
+                Debug.Log("CROW_FIXED_PAIRS prefab bodies=" + count + " ambiguous=" + ambiguous.Count + " game drags: " + string.Join(" ", new List<string>(pairs).ToArray()));
+            }
+
+            static readonly HashSet<Rigidbody> active = new HashSet<Rigidbody>();
+
+            // Every frame: the bodies that appear active (clones, debris switched on) followed; every 10 s the report.
+            internal static void Frame()
+            {
+                float now = Time.time;
+                bool settled = Time.timeSinceLevelLoad > 2f;
+                foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                {
+                    if (!active.Add(body) || !settled || body.isKinematic) continue;
+                    Transform root = body.transform.root;
+                    string name = (root == body.transform ? body.name : root.name + "/" + body.name).Replace(' ', '_');
+                    int cut = name.LastIndexOf("_(", StringComparison.Ordinal);  // GrinnerBlobShard_(10): one kind
+                    int number;
+                    if (cut > 0 && name.EndsWith(")", StringComparison.Ordinal) && int.TryParse(name.Substring(cut + 2, name.Length - cut - 3), out number))
+                        name = name.Substring(0, cut);
+                    tracks.Add(new Track { Body = body, Name = name, Start = body.position, Since = now, At1 = -1f });
+                }
+                if (active.Count > 4096) active.RemoveWhere(body => body == null);
+                for (int i = tracks.Count - 1; i >= 0; i--)
+                {
+                    Track track = tracks[i];
+                    if (track.Body == null)
+                    {
+                        tracks.RemoveAt(i);
+                        continue;
+                    }
+                    track.Peak = Mathf.Max(track.Peak, track.Body.velocity.magnitude);
+                    float distance = Vector3.Distance(track.Body.position, track.Start);
+                    if (track.At1 < 0f && now - track.Since >= 1f) track.At1 = distance;
+                    if (now - track.Since < 2f) continue;
+                    float[] sums;
+                    if (!moved.TryGetValue(track.Name, out sums)) moved[track.Name] = sums = new float[4];
+                    sums[0]++;
+                    sums[1] += track.At1;
+                    sums[2] += distance;
+                    sums[3] += track.Peak;
+                    tracks.RemoveAt(i);
+                }
+                float real = Time.realtimeSinceStartup;
+                if (real < nextReport) return;
+                nextReport = real + 10f;
+                int wrong = 0;
+                var names = new List<string>();
+                foreach (KeyValuePair<Rigidbody, Vector2> pair in gameDrag)
+                {
+                    Rigidbody body = pair.Key;
+                    if (body == null || (body.drag == Drag(pair.Value.x) && body.angularDrag == Drag(pair.Value.y))) continue;
+                    wrong++;
+                    if (names.Count < 5)
+                        names.Add(body.name.Replace(' ', '_') + "=" + F(body.drag) + "," + F(body.angularDrag) + "(game " + F(pair.Value.x) + "," + F(pair.Value.y) + ")");
+                }
+                int clonesSeen = 0, kinds = 0, inactive = 0;
+                foreach (KeyValuePair<string, int> pair in clones)
+                    if (pair.Key.StartsWith("CROW_FIXED_CLONE", StringComparison.Ordinal))
+                    {
+                        clonesSeen += pair.Value;
+                        kinds++;
+                    }
+                    else if (pair.Key.StartsWith("CROW_FIXED_INACTIVE", StringComparison.Ordinal)) inactive++;
+                Debug.Log("CROW_FIXED_CHECK t=" + now.ToString("0.0", Inv) + " bodies=" + gameDrag.Count + " wrong=" + wrong + (names.Count > 0 ? " " + string.Join(" ", names.ToArray()) : "") +
+                          " clones=" + clonesSeen + " kinds=" + kinds + " new=" + (clones.Count - kinds - inactive) + " ambiguous=" + ambiguous.Count + (Old ? " old" : ""));
+                foreach (KeyValuePair<string, float[]> pair in moved)
+                {
+                    float n = pair.Value[0];
+                    Debug.Log("CROW_FIXED_MOVED " + pair.Key.Replace(' ', '_') + " n=" + n + " at1s=" + (pair.Value[1] / n).ToString("0.000", Inv) +
+                              " at2s=" + (pair.Value[2] / n).ToString("0.000", Inv) + " peak=" + (pair.Value[3] / n).ToString("0.000", Inv));
+                }
+            }
         }
 
         // The drag that damps as much per second at this step as the game's at 0.02: each step multiplies
@@ -212,7 +407,12 @@ namespace CrowCompat
         static float Gain(Rigidbody body, Vector3 force, ForceMode mode)
         {
             Vector2 game;
-            float drag = gameDrag.TryGetValue(body, out game) ? game.x : body.drag;
+            if (!gameDrag.TryGetValue(body, out game))
+            {
+                Adjust(body);  // a body new since the last scan
+                if (!gameDrag.TryGetValue(body, out game)) game = new Vector2(body.drag, body.angularDrag);
+            }
+            float drag = game.x;
             float keep = 1f - drag * GameStep;
             if (drag <= 0f || keep <= 0f || keep >= 1f) return step / GameStep;
             float now = Mathf.Pow(keep, step / GameStep);
