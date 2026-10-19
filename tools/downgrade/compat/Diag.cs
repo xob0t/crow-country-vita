@@ -79,6 +79,7 @@ namespace CrowCompat
             FastPaths.Install(ProbeFiles.Args);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
             Decor.Install(ProbeFiles.Args);  // decoration off screen, -crow-motion-report (Decor.cs)
             Cuts.Install(ProbeFiles.Args);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
+            Pad.Install(ProbeFiles.Args);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
             Audit.Install(ProbeFiles.Args);  // -crow-audit, -crow-renderdoc: the fight frame audit (Audit.cs)
             args = ProbeFiles.Args;
             if (!args.Any(a => a.StartsWith("-crow-"))) return;
@@ -693,6 +694,12 @@ namespace CrowCompat
                 }
             }
             Changed(ref lastElements, "rewired elements", elements.ToString());
+            string served = Pad.Active();  // the pad reader's actions while it serves (Rewired's are stale then)
+            if (served != null)
+            {
+                Changed(ref lastActions, "player0 actions (pad reader)", served);
+                return;
+            }
 
             object players = GetStatic(reInput, "players");
             object player = null;

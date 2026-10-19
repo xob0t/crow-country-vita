@@ -122,7 +122,8 @@ namespace CrowCompat
                 else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1]) && !FixedStep.Change(pair[0], pair[1]) &&
                          !FastPaths.Change(pair[0], pair[1]) && !Decor.Change(pair[0], pair[1]) && !SharedClosures.Change(pair[0], pair[1]) &&
                          !FilterGate.Change(pair[0], pair[1]) && !Cuts.Change(pair[0], pair[1]) && !Audit.Change(pair[0], pair[1]) &&
-                         !CamEffect.Change(pair[0], pair[1]))
+                         !CamEffect.Change(pair[0], pair[1]) &&
+                         !Pad.Change(pair[0], pair[1]))
                     Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();

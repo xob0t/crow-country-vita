@@ -147,6 +147,10 @@ partial class DowngradeAssemblies
         new Pass("cuts", Scope.All, CutsRendererEnabled),
         new Pass("cuts", Scope.All, CutsRewired),
         new Pass("rewiredsites", Scope.All, CutsRewiredSites),  // probing builds only: CROW_REWIRED_SITES=1
+        // Pad.cs (PadUpdate after CutsRewired: its skip goes ahead of RewiredProbe.Begin)
+        new Pass("pad", Scope.Game, PadQueries),
+        new Pass("pad", Scope.Game, PadMaps),
+        new Pass("pad", Scope.All, PadUpdate),
         // PlayMakerData.cs
         new Pass("playmakerdata", Scope.All, SerializeActionDataAsArrays),
         new Pass("playmakerdata", Scope.All, FastActionFields),
