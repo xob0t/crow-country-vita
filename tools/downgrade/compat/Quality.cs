@@ -33,7 +33,10 @@ using UnityEngine.SceneManagement;
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
 //                                   the changes (comma-separated: lights=vita, pixel=<n>,
 //                                   shadows=off|hard|all, distance=<m>, resolution=<0-3>, and
-//                                   Perf.cs's) and save <path>-b.png of the same moment
+//                                   Perf.cs's) and save <path>-b.png of the same moment; several sets
+//                                   split by '/' are applied in turn, -c.png, -d.png... after them
+//   -crow-ab-hold <s>               with it, each picture stays s seconds (CROW_AB_SHOW names it as it
+//                                   shows), for a system screenshot (vita.py shot) of each
 //   -crow-census <s>                every s seconds, the enabled behaviours in loaded scenes by type
 //                                   (CROW_CENSUS), the most numerous first
 //   -crow-disable <Type,...>        every second, disable every behaviour of these types (by class
@@ -63,7 +66,7 @@ namespace CrowCompat
             Perf.Install(args);
             VitaLit.Install(args);
             int ab =Array.IndexOf(args, "-crow-ab");
-            if (ab >= 0 && ab + 3 < args.Length) AB.Install(Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3]);
+            if (ab >= 0 && ab + 3 < args.Length) AB.Install(Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3], Number(args, "-crow-ab-hold", 0f));
             float census = Number(args, "-crow-census", -1);
             int disable = Array.IndexOf(args, "-crow-disable");
             int disableIn = Array.IndexOf(args, "-crow-disable-in");
@@ -110,6 +113,7 @@ namespace CrowCompat
                 if (pair[0] == "lights" && pair[1] == "vita") LightRules.Enable();
                 else if (pair[0] == "lit") VitaLit.Set(pair[1]);
                 else if (pair[0] == "litkeys" || pair[0] == "litrange") VitaLit.SetLimits(pair[0], number);
+                else if (pair[0] == "litsoa") VitaLit.SetLimits(pair[0], pair[1] == "off" ? 0f : 1f);
                 else if (pair[0] == "pixel") pixelLights = (int)number;
                 else if (pair[0] == "shadows") shadows = pair[1];
                 else if (pair[0] == "distance") shadowDistance = number;
@@ -117,7 +121,8 @@ namespace CrowCompat
                 else if (pair[0] == "casters") Draws.Casters(pair[1]);
                 else if (!Perf.Change(pair[0], pair[1]) && !EnemyCost.Change(pair[0], pair[1]) && !FixedStep.Change(pair[0], pair[1]) &&
                          !FastPaths.Change(pair[0], pair[1]) && !Decor.Change(pair[0], pair[1]) && !SharedClosures.Change(pair[0], pair[1]) &&
-                         !FilterGate.Change(pair[0], pair[1]) && !Cuts.Change(pair[0], pair[1]) && !Audit.Change(pair[0], pair[1]))
+                         !FilterGate.Change(pair[0], pair[1]) && !Cuts.Change(pair[0], pair[1]) && !Audit.Change(pair[0], pair[1]) &&
+                         !CamEffect.Change(pair[0], pair[1]))
                     Debug.Log("CROW_QUALITY unknown change " + change);
             }
             Apply();
@@ -297,44 +302,63 @@ namespace CrowCompat
     // shadows of the second shot are the changed ones. The post-processing grain still moves.
     static class AB
     {
-        static float after, loaded;
-        static string path, changes;
+        static float after, loaded, hold, shown;
+        static string path;
+        static string[] sets;
         static int step = -1, frame;
 
-        public static void Install(float seconds, string prefix, string list)
+        public static void Install(float seconds, string prefix, string list, float holdSeconds)
         {
             after = seconds;
             path = prefix;
-            changes = list;
+            sets = list.Split('/');
+            hold = holdSeconds;
             SceneManager.sceneLoaded += (scene, mode) =>
             {
-                if (step >= 0 && step < 4) return;
+                if (step > 0 && step <= 2 * sets.Length + 1) return;  // waiting: s seconds after the last load
                 loaded = Time.realtimeSinceStartup;
                 step = 0;
             };
             Application.onBeforeRender += Tick;
         }
 
+        // Steps: 0 waits for the moment; then for each picture an odd step that saves it (after 10
+        // frames and, with -crow-ab-hold, the hold) and an even one that applies the next set.
         static void Tick()
         {
-            if (step < 0 || step >= 4) return;
+            if (step < 0 || step > 2 * sets.Length + 1) return;
             if (step == 0)
             {
                 if (Time.realtimeSinceStartup - loaded < after) return;
                 Time.timeScale = 0f;
                 step = 1;
                 frame = Time.frameCount;
+                shown = -1f;
                 return;
             }
             if (Time.frameCount - frame < 10) return;
-            frame = Time.frameCount;
-            if (step == 1) ScreenCapture.CaptureScreenshot(path + "-a.png");
-            else if (step == 2) Quality.Change(changes);
-            else
+            int picture = (step - 1) / 2;
+            string name = path + "-" + (char)('a' + picture) + ".png";
+            string set = picture == 0 ? "before" : sets[picture - 1];
+            if (step % 2 == 1)
             {
-                ScreenCapture.CaptureScreenshot(path + "-b.png");
-                Debug.Log("CROW_AB saved " + path + "-a.png and -b.png (" + changes + ")");
+                if (hold > 0f)
+                {
+                    if (shown < 0f)
+                    {
+                        shown = Time.realtimeSinceStartup;
+                        Debug.Log("CROW_AB_SHOW " + (char)('a' + picture) + " " + set);
+                        return;
+                    }
+                    if (Time.realtimeSinceStartup - shown < hold) return;
+                }
+                ScreenCapture.CaptureScreenshot(name);
+                Debug.Log("CROW_AB saved " + name + " (" + set + ")");
+                if (picture == sets.Length) Debug.Log("CROW_AB done");
             }
+            else Quality.Change(sets[picture]);
+            shown = -1f;
+            frame = Time.frameCount;
             step++;
         }
     }

@@ -21,6 +21,22 @@ using UnityEngine.SceneManagement;
 //   -crow-vsync <n>       vSyncCount after the game's (1 is the game's; Vita default 2)
 //   -crow-camera 624|550|416  with half, the camera's own picture (624x351, 550x351 or 416x234; the
 //                         PS Vita's default is 550, other players' 624)
+// The chain itself (CrowCountryCamEffect.OnRenderImage asks RenderImage first, rewriter Patches.cs
+// PatchCamEffect): the game's, unless one of these changes it:
+//   -crow-post-filters all|none|<names>  the filters drawn: sfb, psx, blur, crt, joined by '+' (psx+crt),
+//                         or no<name> for all but one (nocrt); a filter left out is skipped and the
+//                         next reads the picture before it; whatever is last goes to the screen
+//                         nearest-neighbour, so none shows the camera's own 550x351 picture as it is.
+//                         all (every player's default) draws them as the game does.
+//   -crow-post-vita on|off|exact  at half size, the chain in three passes of vita_shaders/CrowPost.shader
+//                         instead of the game's four (the PS Vita's default; off elsewhere): SFB and
+//                         PSX in one pass at 550x400, the blur straight from it (no 624x351 PSX
+//                         texture), the CRT pass with its noise from a random texture; exact keeps the
+//                         game's noise hash (for pixel comparisons). With filters left out it draws
+//                         those of its passes that still apply (sfb+psx: pass 0 only).
+//   -crow-post-bundle <path>  CrowVita/Post from an asset bundle (for a build without it)
+// -crow-cycle, -crow-fight-cycle and -crow-ab take postfilters=<value> and postvita=<value>
+// (postdiscard=on|off: the Vita chain's targets' DiscardContents before each pass, on by default).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -129,16 +145,16 @@ namespace CrowCompat
         public static void AfterAwake(Component effect)
         {
             if (Application.isPlaying && VSync >= 0) QualitySettings.vSyncCount = VSync;
-            if (!Half) return;
-            Type type = effect.GetType();
-            FieldInfo size = type.GetField("camTargetSize", Fields);
-            // CamTargetSize.S1248x702 = 0, S624x351 = 1.
-            if (Convert.ToInt32(size.GetValue(effect)) == 0) size.SetValue(effect, Enum.ToObject(size.FieldType, 1));
             if (!hooked)
             {
                 hooked = true;
                 SceneManager.sceneUnloaded += scene => ForgetDestroyed();
             }
+            if (!Half) return;
+            Type type = effect.GetType();
+            FieldInfo size = type.GetField("camTargetSize", Fields);
+            // CamTargetSize.S1248x702 = 0, S624x351 = 1.
+            if (Convert.ToInt32(size.GetValue(effect)) == 0) size.SetValue(effect, Enum.ToObject(size.FieldType, 1));
             effects.Add(effect);
             CameraTarget(effect, type);
             Replace(effect, type, "texB1248x702", new RenderTexture(624, 351, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
@@ -175,7 +191,289 @@ namespace CrowCompat
                 }
             }
             effects.RemoveAll(e => e == null);
+            // RenderImage's chains hold the textures too.
+            chains.Clear();
+            lastEffect = null;
+            lastChain = null;
         }
+
+        // ------------------------------------------------------------------ the chain
+
+        const int Sfb = 1, Psx = 2, Blur = 4, Crt = 8, All = 15;
+        static readonly string[] FilterNames = { "sfb", "psx", "blur", "crt" };
+        static int filters = -1;
+        static string vitaMode;
+        static bool discard = true;
+
+        static int Filters
+        {
+            get
+            {
+                if (filters < 0) filters = ParseFilters(Perf.Value(ProbeFiles.Args, "-crow-post-filters") ?? "all");
+                return filters;
+            }
+        }
+
+        static string VitaMode
+        {
+            get
+            {
+                if (vitaMode == null)
+                    vitaMode = Perf.Value(ProbeFiles.Args, "-crow-post-vita") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
+                return vitaMode;
+            }
+        }
+
+        static int ParseFilters(string value)
+        {
+            if (value == "all" || value == "on") return All;
+            if (value == "none" || value == "off") return 0;
+            if (value.StartsWith("no", StringComparison.Ordinal))
+            {
+                int one = Array.IndexOf(FilterNames, value.Substring(2));
+                if (one >= 0) return All & ~(1 << one);
+            }
+            int mask = 0;
+            foreach (string name in value.Split('+'))
+            {
+                int index = Array.IndexOf(FilterNames, name);
+                if (index >= 0) mask |= 1 << index;
+                else Debug.Log("CROW_POST unknown filter " + name);
+            }
+            return mask;
+        }
+
+        static string FiltersText(int mask)
+        {
+            if (mask == All) return "all";
+            if (mask == 0) return "none";
+            var names = new System.Collections.Generic.List<string>();
+            for (int i = 0; i < FilterNames.Length; i++) if ((mask & (1 << i)) != 0) names.Add(FilterNames[i]);
+            return string.Join("+", names.ToArray());
+        }
+
+        // -crow-cycle's, -crow-fight-cycle's and -crow-ab's postfilters=, postvita=, postdiscard=.
+        internal static bool Change(string key, string value)
+        {
+            if (key == "postfilters") filters = ParseFilters(value);
+            else if (key == "postvita") vitaMode = value;
+            else if (key == "postdiscard") discard = value != "off";
+            else return false;
+            logged = false;
+            return true;
+        }
+
+        // The textures and materials of one camera effect (found once; AfterAwake replaces some of them
+        // before the first frame).
+        class Chain
+        {
+            public Material sfb, psx, blur, crt;
+            public RenderTexture a, b, c, d;
+        }
+
+        static readonly System.Collections.Generic.Dictionary<int, Chain> chains = new System.Collections.Generic.Dictionary<int, Chain>();
+        static Component lastEffect;
+        static Chain lastChain;
+        static bool logged;
+
+        static Chain ChainOf(Component effect)
+        {
+            if (ReferenceEquals(effect, lastEffect) && lastChain != null && lastChain.a != null && lastChain.d != null) return lastChain;
+            Chain known;
+            if (chains.TryGetValue(effect.GetInstanceID(), out known) && known.a != null && known.d != null)
+            {
+                lastEffect = effect;
+                return lastChain = known;
+            }
+            Type type = effect.GetType();
+            Func<string, object> get = name =>
+            {
+                FieldInfo field = type.GetField(name, Fields);
+                return field == null ? null : field.GetValue(effect);
+            };
+            var chain = new Chain
+            {
+                sfb = get("sfbFilter") as Material,
+                psx = get("psxPostProcessingMat") as Material,
+                blur = get("crtBlurMaterial") as Material,
+                crt = get("crtPostProMaterial") as Material,
+                a = get("texA550x400") as RenderTexture,
+                b = get("texB1248x702") as RenderTexture,
+                c = get("texC1248x702") as RenderTexture,
+                d = get("texD416x234") as RenderTexture,
+            };
+            if (chain.sfb == null || chain.psx == null || chain.blur == null || chain.crt == null || chain.a == null || chain.b == null || chain.c == null || chain.d == null)
+                return null;
+            chains[effect.GetInstanceID()] = chain;
+            lastEffect = effect;
+            lastChain = chain;
+            return chain;
+        }
+
+        // Called first in CrowCountryCamEffect.OnRenderImage with the effect's switches (rewriter
+        // PatchCamEffect); true when it drew the frame, false to leave it to the game's own chain: its
+        // alpha form, a filter the game (or the audit's post= experiment) switched off, or the game's
+        // filters and no Vita chain asked for. With the Vita chain on, the filters drawn take its passes
+        // where they can: SFB and PSX together (pass 0), the blur after them (pass 1), the CRT pass
+        // after anything; SFB or PSX alone, and the blur after PSX alone, are the game's.
+        public static bool RenderImage(Component effect, RenderTexture src, RenderTexture dst, bool sfbOn, bool psxOn, bool blurOn, bool crtOn, bool alpha, bool sourcePoint)
+        {
+            if (alpha || !sfbOn || !psxOn || !blurOn || !crtOn || src == null) return false;
+            int mask = Filters;
+            bool vita = VitaMode != "off" && mask != 0;
+            if (mask == All && !vita) return false;
+            Chain chain = ChainOf(effect);
+            if (chain == null) return false;
+            if (vita && !VitaReady(chain))
+            {
+                if (mask == All) return false;
+                vita = false;
+            }
+            if (!logged)
+            {
+                logged = true;
+                Debug.Log("CROW_POST filters=" + FiltersText(mask) + (vita ? " vita=" + VitaMode : " game shaders") +
+                          " camera=" + src.width + "x" + src.height + (vita && !discard ? " nodiscard" : ""));
+            }
+            if (sourcePoint) src.filterMode = FilterMode.Point;
+            if (vita)
+            {
+                post.SetTexture(GrainId, chain.sfb.GetTexture(GrainId));
+                post.SetTexture(CrtId, chain.sfb.GetTexture(CrtId));
+                post.SetMatrix(ColorMatId, chain.crt.GetMatrix(ColorMatId));
+            }
+            Texture current = src;
+            bool psxPicture = false;  // current is pass 0's 550x400 PSX picture
+            if (vita && (mask & (Sfb | Psx)) == (Sfb | Psx))
+            {
+                Draw(src, chain.a, post, 0);
+                current = chain.a;
+                psxPicture = true;
+            }
+            else
+            {
+                if ((mask & Sfb) != 0)
+                {
+                    Graphics.Blit(current, chain.a, chain.sfb);
+                    current = chain.a;
+                }
+                if ((mask & Psx) != 0)
+                {
+                    Graphics.Blit(current, chain.b, chain.psx);
+                    current = chain.b;
+                }
+            }
+            if ((mask & Blur) != 0)
+            {
+                if (psxPicture) Draw(current, chain.c, post, 1);
+                else Graphics.Blit(current, chain.c, chain.blur);
+                current = chain.c;
+            }
+            if ((mask & Crt) != 0)
+            {
+                if (vita) Draw(current, chain.d, post, VitaMode == "exact" ? 3 : 2);
+                else
+                {
+                    // The CRT pass reads the blur's texture as _BlurTex too.
+                    chain.crt.SetTexture(BlurTexId, current);
+                    Graphics.Blit(current, chain.d, chain.crt);
+                    chain.crt.SetTexture(BlurTexId, chain.c);
+                }
+                current = chain.d;
+            }
+            // The last picture to the screen nearest-neighbour, as the game's 416x234 one goes.
+            FilterMode mode = current.filterMode;
+            if (mode != FilterMode.Point) current.filterMode = FilterMode.Point;
+            Graphics.Blit(current, dst);
+            if (mode != FilterMode.Point) current.filterMode = mode;
+            return true;
+        }
+
+        // A Vita pass into a target it covers whole: its old contents need not be loaded first.
+        static void Draw(Texture source, RenderTexture target, Material material, int pass)
+        {
+            if (discard) target.DiscardContents();
+            Graphics.Blit(source, target, material, pass);
+        }
+
+        static readonly int BlurTexId = Shader.PropertyToID("_BlurTex");
+        static Material post;
+        static Texture2D dither, noise;
+        static string unavailable;
+
+        // CrowVita/Post, the noise and dither textures; the chain's sizes as the half-size chain makes
+        // them and the game's _switch on (the passes are its Switch forms).
+        static bool VitaReady(Chain chain)
+        {
+            string reason = null;
+            if (post == null && unavailable == null) unavailable = LoadPost();
+            if (unavailable != null) reason = unavailable;
+            else if (!Half || chain.a.width != 550 || chain.a.height != 400 || chain.c.width != 624 || chain.c.height != 351 || chain.d.width != 416 || chain.d.height != 234)
+                reason = "the chain is not the half-size one (" + chain.a.width + "x" + chain.a.height + ", " + chain.c.width + "x" + chain.c.height + ", " + chain.d.width + "x" + chain.d.height + ")";
+            else if (Shader.GetGlobalFloat("_switch") < 0.5f) reason = "_switch is off";
+            if (reason == null) return true;
+            if (!logged)
+            {
+                logged = true;
+                Debug.Log("CROW_POST vita unavailable: " + reason + "; the game's shaders");
+            }
+            return false;
+        }
+
+        static string LoadPost()
+        {
+            Shader shader = null;
+            string bundle = Perf.Value(ProbeFiles.Args, "-crow-post-bundle");
+            if (bundle != null)
+            {
+                AssetBundle loaded = AssetBundle.LoadFromFile(bundle);
+                if (loaded != null) shader = loaded.LoadAllAssets<Shader>().FirstOrDefault(s => s.name == "CrowVita/Post");
+                Debug.Log("CROW_POST bundle " + bundle + ": " + (loaded == null ? "failed" : shader == null ? "no CrowVita/Post" : "loaded"));
+            }
+            if (shader == null) shader = Shader.Find("CrowVita/Post");
+            if (shader == null) return "CrowVita/Post is not in the build";
+            if (!shader.isSupported) return "CrowVita/Post is not supported";
+            var material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };
+            if (!material.HasProperty("_CrowPostV1")) return "CrowVita/Post is an older version";
+            // The game's 4x4 dither table is the Bayer matrix: offset 0.00282353 - rank * 0.00117647, the
+            // rank at (column, row) as rank / 15 (exact in 8 bits).
+            int[] bayer = { 0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5 };
+            dither = new Texture2D(4, 4, TextureFormat.RGBA32, false, true)
+            {
+                filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Repeat, hideFlags = HideFlags.HideAndDontSave
+            };
+            var cells = new Color32[16];
+            for (int row = 0; row < 4; row++)
+                for (int column = 0; column < 4; column++)
+                {
+                    byte value = (byte)(bayer[row * 4 + column] * 17);
+                    cells[row * 4 + column] = new Color32(value, value, value, 255);
+                }
+            dither.SetPixels32(cells);
+            dither.Apply(false, true);
+            // Uniform random noise, one value per texel and channel, a new offset whenever the game's time moves.
+            const int size = 128;
+            noise = new Texture2D(size, size, TextureFormat.RGBA32, false, true)
+            {
+                filterMode = FilterMode.Point, wrapMode = TextureWrapMode.Repeat, hideFlags = HideFlags.HideAndDontSave
+            };
+            var random = new System.Random(20241018);
+            var texels = new Color32[size * size];
+            for (int i = 0; i < texels.Length; i++)
+                texels[i] = new Color32((byte)random.Next(256), (byte)random.Next(256), (byte)random.Next(256), 255);
+            noise.SetPixels32(texels);
+            noise.Apply(false, true);
+            material.SetTexture("_CrowDither", dither);
+            material.SetTexture("_CrowNoise", noise);
+            material.SetVector("_CrowDitherScale", new Vector4(550f / 4f, 400f / 4f, 0f, 0f));
+            material.SetVector("_CrowStep", new Vector4(1f / 624f, 1f / 351f, 0f, 0f));
+            material.SetVector("_CrowNoiseScale", new Vector4(416f / size, 234f / size, size, size));
+            post = material;
+            Debug.Log("CROW_POST CrowVita/Post ready");
+            return null;
+        }
+
+        static readonly int GrainId = Shader.PropertyToID("_GrainTex"), CrtId = Shader.PropertyToID("_CRTTex"), ColorMatId = Shader.PropertyToID("colorMat");
 
         static RenderTexture Replace(Component effect, Type type, string name, RenderTexture texture)
         {

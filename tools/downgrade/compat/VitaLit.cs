@@ -14,7 +14,7 @@ using UnityEngine.SceneManagement;
 // light nothing else, and its decompiled shadow read is the PC's screen-space one, so it drew nearly
 // black; and Legacy Shaders/Diffuse's, see LegacyDiffuse) draw with CrowVita/Lit (vita_shaders/CrowLit.shader: Standard's
 // simple form, no ForwardAdd pass), which draws the main directional light, the harmonics and the 4
-// point lights Unity gives each object per vertex, and up to 8 key lights set here as globals per
+// point lights Unity gives each object per vertex, and up to 4 key lights set here as globals per
 // pixel, Lambert only: the spot and point lights that reach the camera's view (spots first), on the
 // layers most of those renderers are on, and one fill directional light. Key lights get culling mask
 // 0 and no shadows, so Unity doesn't light anything with them again; the others stay Unity's, at 0
@@ -25,18 +25,22 @@ using UnityEngine.SceneManagement;
 // PS Vita in Roadside: 61-62 -> 38 ms a frame, the main thread 34-35 -> 24 ms.
 //   -crow-lit game|vita    game keeps Standard and the game's lights (the default on other players);
 //                          vita as above (the PS Vita's default)
-//   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 8)
+//   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 4; 8 slots cost Mansion
+//                          8 ms for nothing seen)
+//   -crow-lit-soa on|off   on (the default): the shader works out the key lights side by side, a light
+//                          in each lane of its vectors (CROW_KEYS_2/4); off: one after another, the
+//                          4-slot form it had before (CROW_KEYS_LOOP), for comparisons
 //   -crow-lit-min-range <m>  point lights with a shorter range stay Unity's, per vertex (default 0)
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
 //   -crow-lit-debug <n>    a value for the shader's _CrowDebug (for a debugging build of it)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n> and litrange=<m>.
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m> and litsoa=on|off.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
     static class VitaLit
     {
-        const int Keys = 8;
+        const int Keys = 4;
         static bool on, hooked, log;
         static Shader lit, standard;
         // The swapped materials' original shaders, by instance ID: a static that holds an asset can keep
@@ -55,12 +59,14 @@ namespace CrowCompat
         static int swapPasses;
         static string lastLog, bundle;
         static int maxKeys = 4;
+        static bool soa = true;
         static float minRange = 0f;
 
         // -crow-cycle's litkeys= and litrange=.
         internal static void SetLimits(string key, float value)
         {
             if (key == "litkeys") maxKeys = Mathf.Clamp((int)value, 0, Keys);
+            else if (key == "litsoa") soa = value != 0f;
             else minRange = value;
             nextSelect = 0f;
         }
@@ -72,6 +78,7 @@ namespace CrowCompat
             bundle = Perf.Value(args, "-crow-lit-bundle");
             maxKeys = Mathf.Clamp((int)Quality.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
             minRange = Quality.Number(args, "-crow-lit-min-range", minRange);
+            soa = Perf.Value(args, "-crow-lit-soa") != "off";
             Shader.SetGlobalFloat("_CrowDebug", Quality.Number(args, "-crow-lit-debug", 0f));
             string value = Perf.Value(args, "-crow-lit") ?? (Application.platform == RuntimePlatform.PSP2 ? "vita" : null);
             if (value != null) Set(value);
@@ -493,11 +500,18 @@ namespace CrowCompat
             light.shadows = saved.Value;
         }
 
-        static readonly string[] keywords = { "CROW_KEYS_2", "CROW_KEYS_4", "CROW_KEYS_8" };
+        static readonly string[] keywords = { "CROW_KEYS_2", "CROW_KEYS_4", "CROW_KEYS_LOOP" };
+        static readonly int[] laneIds =
+        {
+            Shader.PropertyToID("_CrowKeyX"), Shader.PropertyToID("_CrowKeyY"), Shader.PropertyToID("_CrowKeyZ"), Shader.PropertyToID("_CrowKeyW"),
+            Shader.PropertyToID("_CrowKeyDX"), Shader.PropertyToID("_CrowKeyDY"), Shader.PropertyToID("_CrowKeyDZ"), Shader.PropertyToID("_CrowKeyDW"),
+        };
+        static readonly Vector4[] lanes = new Vector4[8];
         static string keyword;
 
         // The key lights in the shader's slots, the ones that are on first; the rest far away and
-        // black. CROW_KEYS_2/4/8: how many slots the shader reads (unrolled).
+        // black. CROW_KEYS_2/4: how many slots the shader reads, side by side (_CrowKeyX...: slot k in
+        // lane k); CROW_KEYS_LOOP: 4 slots one after another (-crow-lit-soa off).
         static void Upload()
         {
             bool linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
@@ -541,9 +555,21 @@ namespace CrowCompat
             Shader.SetGlobalVectorArray("_CrowKeyPos", positions);
             Shader.SetGlobalVectorArray("_CrowKeyDir", directions);
             Shader.SetGlobalVectorArray("_CrowKeyColor", colors);
+            for (int k = 0; k < Keys; k++)
+            {
+                lanes[0][k] = positions[k].x;
+                lanes[1][k] = positions[k].y;
+                lanes[2][k] = positions[k].z;
+                lanes[3][k] = positions[k].w;
+                lanes[4][k] = directions[k].x;
+                lanes[5][k] = directions[k].y;
+                lanes[6][k] = directions[k].z;
+                lanes[7][k] = directions[k].w;
+            }
+            for (int i = 0; i < lanes.Length; i++) Shader.SetGlobalVector(laneIds[i], lanes[i]);
             Shader.SetGlobalVector("_CrowFill", fill);
             Shader.SetGlobalVector("_CrowFillColor", fillColor);
-            string wanted = used == 0 ? null : used <= 2 ? keywords[0] : used <= 4 ? keywords[1] : keywords[2];
+            string wanted = used == 0 ? null : !soa ? keywords[2] : used <= 2 ? keywords[0] : keywords[1];
             if (wanted == keyword) return;
             foreach (string name in keywords)
                 if (name == wanted) Shader.EnableKeyword(name);

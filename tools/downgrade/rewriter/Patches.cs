@@ -7,14 +7,34 @@ using Mono.Cecil.Cil;
 partial class DowngradeAssemblies
 {
     // CrowCountryCamEffect.Awake makes the chain's textures and materials; CrowCompat CamEffect resizes
-    // them on the PS Vita at its end.
+    // them on the PS Vita at its end. OnRenderImage asks CamEffect.RenderImage first, with the effect's
+    // switches (its four filters, alpha, sourcePoint), and returns if it drew the frame (the filters
+    // left out, the PS Vita's own chain).
     static int PatchCamEffect(ModuleDefinition module)
     {
         TypeDefinition type = GameType(module, "com.sfbgames.crowcountry.CrowCountryCamEffect");
         if (type == null) return 0;
         MethodDefinition awake = type.Methods.Single(m => m.Name == "Awake" && m.Parameters.Count == 0);
         MethodReference after = CompatMethod(module, "CamEffect", "AfterAwake");
-        return BeforeRets(awake, () => new[] { Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Call, after) });
+        int count = BeforeRets(awake, () => new[] { Instruction.Create(OpCodes.Ldarg_0), Instruction.Create(OpCodes.Call, after) });
+        MethodDefinition render = type.Methods.Single(m => m.Name == "OnRenderImage" && m.Parameters.Count == 2);
+        Instruction first = render.Body.Instructions[0];
+        var code = new System.Collections.Generic.List<Instruction>
+        {
+            Instruction.Create(OpCodes.Ldarg_0),
+            Instruction.Create(OpCodes.Ldarg_1),
+            Instruction.Create(OpCodes.Ldarg_2),
+        };
+        foreach (string name in new[] { "enableSFBFilter", "enablePSXFilter", "enableCRTBlurFilter", "enableCRTPostFilter", "alpha", "sourcePoint" })
+        {
+            code.Add(Instruction.Create(OpCodes.Ldarg_0));
+            code.Add(Instruction.Create(OpCodes.Ldfld, type.Fields.Single(f => f.Name == name)));
+        }
+        code.Add(Instruction.Create(OpCodes.Call, CompatMethod(module, "CamEffect", "RenderImage")));
+        code.Add(Instruction.Create(OpCodes.Brfalse, first));
+        code.Add(Instruction.Create(OpCodes.Ret));
+        Prepend(render, code.ToArray());
+        return count + 1;
     }
 
     // Rewired's InputManager (compiled into the game's firstpass assembly) sets its platform from

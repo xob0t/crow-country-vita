@@ -6,9 +6,14 @@
 // second fill of its pixels. This shader has no ForwardAdd pass. Its base pass draws the main
 // directional light with Standard's simple BRDF, the harmonics and the four point lights Unity
 // gives each object per vertex (as Standard does), and adds per pixel, Lambert only:
-// - up to eight "key" lights CrowCompat sets as globals (compat/VitaLit.cs): spot lights (with
+// - up to four "key" lights CrowCompat sets as globals (compat/VitaLit.cs): spot lights (with
 //   their cone) and point lights that reach the camera's view, which Unity no longer sees (their
-//   culling mask is 0 while they are key lights); CROW_KEYS_2/4/8 say how many, unrolled;
+//   culling mask is 0 while they are key lights); CROW_KEYS_2/4 say how many. The lights are
+//   worked out side by side, one in each lane of float4s (_CrowKeyX/Y/Z: positions; _CrowKeyW:
+//   1/range^2; _CrowKeyDX/DY/DZ/DW: the cone), the SGX's vector instructions doing four at once:
+//   4 key lights cost 50 cycles a pixel instead of 87 one after another, 2 lights 34 instead of 43
+//   (psp2shaderperf), with the same sums; CROW_KEYS_LOOP is the one-after-another form of 4 lights
+//   (_CrowKeyPos/Dir, for comparisons: -crow-lit-soa off);
 // - one fill directional light (_CrowFill).
 // Distance falloff and the spot cone follow Unity's lookup textures (1/(1+25 d^2/r^2), faded to 0
 // from 80% of the range; the default spot cookie's soft edge as a linear ramp in the cone's cosine).
@@ -85,7 +90,7 @@ Shader "CrowVita/Lit"
             // Fog as Standard has it.
             #pragma multi_compile_fog
 
-            #pragma multi_compile __ CROW_KEYS_2 CROW_KEYS_4 CROW_KEYS_8
+            #pragma multi_compile __ CROW_KEYS_2 CROW_KEYS_4 CROW_KEYS_LOOP
 
             #pragma vertex vertCrow
             #pragma fragment fragCrow
@@ -93,8 +98,8 @@ Shader "CrowVita/Lit"
             #define UNITY_STANDARD_SIMPLE 1
             #include "UnityStandardCoreForwardSimple.cginc"
 
-            #if defined(CROW_KEYS_8)
-                #define CROW_KEYS 8
+            #if defined(CROW_KEYS_LOOP)
+                #define CROW_KEYS 4
             #elif defined(CROW_KEYS_4)
                 #define CROW_KEYS 4
             #elif defined(CROW_KEYS_2)
@@ -103,9 +108,11 @@ Shader "CrowVita/Lit"
                 #define CROW_KEYS 0
             #endif
 
-            float4 _CrowKeyPos[8];    // xyz position, w 1/range^2 (unused slots: far away)
-            half4 _CrowKeyDir[8];     // xyz the spot's forward over the cone's ramp width, w the ramp's offset (points: 0, 1)
-            half4 _CrowKeyColor[8];   // colour times intensity
+            float4 _CrowKeyPos[4];    // xyz position, w 1/range^2 (unused slots: far away)
+            half4 _CrowKeyDir[4];     // xyz the spot's forward over the cone's ramp width, w the ramp's offset (points: 0, 1)
+            half4 _CrowKeyColor[4];   // colour times intensity
+            float4 _CrowKeyX, _CrowKeyY, _CrowKeyZ, _CrowKeyW;   // the same, a light in each lane
+            half4 _CrowKeyDX, _CrowKeyDY, _CrowKeyDZ, _CrowKeyDW;
             half4 _CrowFill;          // a fill directional light: xyz the direction to it
             half4 _CrowFillColor;
 
@@ -175,7 +182,24 @@ Shader "CrowVita/Lit"
                 // The fill and key lights, Lambert only; metals (specular colour, no diffuse) take them
                 // as broad highlights.
                 half3 diffuse = _CrowFillColor.rgb * saturate(dot(s.normalWorld, _CrowFill.xyz));
-                #if CROW_KEYS > 0
+                #if CROW_KEYS > 0 && !defined(CROW_KEYS_LOOP)
+                    // Each lane a light: the same sums as the loop below.
+                    float3 p = i.posWorld;
+                    half3 nw = s.normalWorld;
+                    float4 tx = _CrowKeyX - p.x;
+                    float4 ty = _CrowKeyY - p.y;
+                    float4 tz = _CrowKeyZ - p.z;
+                    float4 d2 = tx * tx + ty * ty + tz * tz;
+                    half4 r = rsqrt(max(d2, 0.000001));
+                    half4 ndl = (tx * nw.x + ty * nw.y + tz * nw.z) * r;
+                    half4 cone = _CrowKeyDW - (tx * _CrowKeyDX + ty * _CrowKeyDY + tz * _CrowKeyDZ) * r;
+                    half4 x = d2 * _CrowKeyW;
+                    half4 w = saturate((1.0 - x) * 2.7778) / (1.0 + 25.0 * x) * saturate(cone) * saturate(ndl);
+                    diffuse += _CrowKeyColor[0].rgb * w.x + _CrowKeyColor[1].rgb * w.y;
+                    #if CROW_KEYS > 2
+                        diffuse += _CrowKeyColor[2].rgb * w.z + _CrowKeyColor[3].rgb * w.w;
+                    #endif
+                #elif CROW_KEYS > 0
                     float3 posWorld = i.posWorld;
                     UNITY_UNROLL
                     for (int k = 0; k < CROW_KEYS; k++)

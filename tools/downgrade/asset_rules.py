@@ -1595,6 +1595,10 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     name = 'CrowVita/CrowLit.shader'
     result[meta_of(VITA_LIT_FOLDER / shader.name)] = stable_meta('asset', name, 'ShaderImporter').encode()
     guid = guid_for('asset', name)
+    # CrowVita/Post, the camera effect's filters in three passes (compat/CamEffect.cs; Shader.Find finds it).
+    post = VITA_SHADERS / 'CrowPost.shader'
+    result[VITA_LIT_FOLDER / post.name] = post.read_bytes()
+    result[meta_of(VITA_LIT_FOLDER / post.name)] = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter').encode()
     for index, keywords in enumerate(sorted(sets)):
         name = f'CrowLitVariant{index}'
         relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'
