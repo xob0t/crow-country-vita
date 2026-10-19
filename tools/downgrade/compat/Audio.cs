@@ -43,6 +43,8 @@ using Debug = UnityEngine.Debug;
 //                             IdleAudio does), and a still control at pitch 1.01; with the physics steps
 //                             each frame ran. Per tone: blocks, mean/min/max pitch, the mean and largest
 //                             change from one block to the next, blocks that changed by over 0.5%.
+//   -crow-mix-mute, -crow-mix-record <dir>, -crow-audio-census <s>
+//                             the listener volume held at 0, the mix recorded, and what plays (MixProbe below).
 //   -crow-thread <name>:<priority>:<cpus>  with -crow-audio, set the priority (0 keeps it; 64 highest ..
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
@@ -126,6 +128,7 @@ namespace CrowCompat
             }
             outputRate = AudioSettings.outputSampleRate;
             Doppler.Install(args);
+            MixProbe.Install(args);
             Threads.Install(args, every > 0f);
             tap = WantsTap && probe != null && probe.GetComponent<AudioSource>() != null;
             if (tap)
@@ -309,6 +312,11 @@ namespace CrowCompat
         static readonly Stopwatch watch = Stopwatch.StartNew();
         static readonly Dictionary<string, int> learned = new Dictionary<string, int>();
         static string behindScene;
+        // A playing source that can't be heard at the listener (Silent below) wants no filter: its reverb would
+        // process silence. Pool's three reverbs on at its entry were all on such sources (pool moans 10 m away,
+        // linear rolloff to 6 m): the mixer at 78% of CPU 2 and the DSP clock at 92% of real time, 26% with none.
+        // -crow-reverb-silent off (rsilent=off) gives them their filter as before. Recomputed each frame (silentOn).
+        static bool silentOn = true, silentRule;
 
         internal static void Install(string[] args)
         {
@@ -325,6 +333,9 @@ namespace CrowCompat
             max = CrowFlags.Int(args, "-crow-reverb-max", 3);
             if (!idleOnly) max = 0;
             adapt = CrowFlags.Value(args, "-crow-reverb-adapt") != "off";
+            silentOn = CrowFlags.Value(args, "-crow-reverb-silent") != "off";
+            shareAuto = Application.platform == RuntimePlatform.PSP2 && CrowFlags.Value(args, "-crow-gfx-workers") == null &&
+                        CrowFlags.Value(args, "-crow-workers-share") != "off";
             ceiling = max;
             active = true;
             SceneManager.sceneLoaded += (scene, mode) =>
@@ -361,8 +372,16 @@ namespace CrowCompat
                     var reverb = filter as AudioReverbFilter;
                     entries.Add(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f });
                 }
-            AudioListener ear = UnityEngine.Object.FindObjectOfType<AudioListener>();
-            listener = ear != null ? ear.transform : null;
+            // The listener Unity hears with: the one enabled (none or two: no listener, so no source counts as silent).
+            listener = null;
+            int enabled = 0;
+            foreach (AudioListener ear in UnityEngine.Object.FindObjectsOfType<AudioListener>())
+                if (ear.isActiveAndEnabled)
+                {
+                    enabled++;
+                    listener = ear.transform;
+                }
+            if (enabled != 1) listener = null;
             nextFind = Time.realtimeSinceStartup + 3f;
             nextRank = 0f;
         }
@@ -397,21 +416,24 @@ namespace CrowCompat
             if (!active) return;
             float now = Time.realtimeSinceStartup;
             if (now >= nextFind) Find();
+            silentRule = silentOn && idleOnly;
             if (adapt) Watch(now);
             if (now >= nextRank || order.Count != entries.Count)
             {
                 Rank();
                 nextRank = now + 0.5f;
             }
-            // Which filters are wanted: their source plays, or did within its tail.
+            // Which filters are wanted: their source plays and can be heard, or did within its tail.
             wants.Clear();
+            Vector3 ear = listener != null ? listener.position : Vector3.zero;
+            if (listener == null) silentRule = false;
             for (int i = 0; i < entries.Count; i++)
             {
                 Entry entry = entries[i];
                 bool want = false;
                 if (idleOnly && entry.Filter != null && entry.Source != null && entry.Source.isActiveAndEnabled)
                 {
-                    if (entry.Source.isPlaying)
+                    if (entry.Source.isPlaying && !(silentRule && Silent(entry.Source, ear)))
                     {
                         want = true;
                         entry.OffAt = now + entry.Tail;
@@ -452,6 +474,71 @@ namespace CrowCompat
                 }
             }
             onCount = on;
+            Share(now);
+        }
+
+        // Unity's job workers on CPU 2 as well as CPU 1 (Quality.cs GfxThreads, 64:12) while the mixer has CPU 2 to
+        // spare: no filter on (a reverb costs the mixer 18-20% of CPU 2, the mixer without one 19-28%) for a second,
+        // and the DSP clock never behind in this area. Back on CPU 1 alone (64:1, the PS Vita's default) in the frame a
+        // filter comes on. At the same priority as the mixer a worker's job delays a mix block by a few ms (the tap's
+        // longest gap 13 -> 18 ms, no late block); with Pool's two reverbs on, sharing put the DSP clock at 99% of real
+        // time (adapting caps then take reverbs off) and the render thread there at 96%.
+        // -crow-workers-share off (wshare=off) keeps them on CPU 1; an explicit -crow-gfx-workers also turns it off.
+        static bool shareAuto, shared, blockedHere;
+        static float quietSince = -1f;
+        static readonly HashSet<string> shareBlocked = new HashSet<string>();
+
+        static void Share(float now)
+        {
+            if (!shareAuto) return;
+            bool quiet = onCount == 0 && !blockedHere;
+            if (!quiet) quietSince = -1f;
+            else if (quietSince < 0f) quietSince = now;
+            bool want = quiet && now - quietSince >= 1f;
+            if (want == shared) return;
+            shared = want;
+            GfxThreads.Change("workers", want ? "64:12" : "64:1");
+        }
+
+        // Whether a source's sound reaches the listener at all: wholly 3D (spatialBlend 1, no custom blend curve
+        // that falls below 1) and, by its volume rolloff, at zero volume at its distance less a margin (0.5 m, more
+        // than anything moves in a frame) and beyond; or at volume 0. A logarithmic rolloff never reaches zero.
+        // Its filters then get silence at their input and give silence (their tails kept: OffAt), so a reverb
+        // switched off there changes nothing heard, and is back on in the frame the sound can reach the listener.
+        static readonly Dictionary<AudioSource, AnimationCurve[]> curves = new Dictionary<AudioSource, AnimationCurve[]>();
+
+        internal static bool Silent(AudioSource source, Vector3 ear)
+        {
+            if (source.volume <= 0f) return true;
+            if (source.spatialBlend < 0.999f) return false;
+            AnimationCurve[] pair;
+            if (!curves.TryGetValue(source, out pair))
+            {
+                if (curves.Count > 2000) curves.Clear();
+                curves[source] = pair = new[] { source.GetCustomCurve(AudioSourceCurveType.SpatialBlend), source.GetCustomCurve(AudioSourceCurveType.CustomRolloff) };
+            }
+            AnimationCurve blend = pair[0];
+            if (blend != null)
+                foreach (Keyframe key in blend.keys)
+                    if (key.value < 0.999f) return false;
+            float distance = Vector3.Distance(source.transform.position, ear) - 0.5f;
+            float max = source.maxDistance;
+            if (max <= 0f) return false;
+            switch (source.rolloffMode)
+            {
+                case AudioRolloffMode.Linear:
+                    return distance >= max && max > source.minDistance;
+                case AudioRolloffMode.Custom:
+                    AnimationCurve rolloff = pair[1];
+                    if (rolloff == null || rolloff.length == 0) return false;
+                    float from = Mathf.Clamp01(distance / max);
+                    for (int i = 0; i <= 8; i++)
+                        if (rolloff.Evaluate(Mathf.Lerp(from, 1f, i / 8f)) > 0f) return false;
+                    foreach (Keyframe key in rolloff.keys)
+                        if (key.time >= from && key.value > 0f) return false;
+                    return true;
+            }
+            return false;
         }
 
         // The adaptive cap (see ceiling above).
@@ -463,6 +550,7 @@ namespace CrowCompat
                 resolve = false;
                 int cap;
                 max = learned.TryGetValue(SceneManager.GetActiveScene().name, out cap) ? cap : ceiling;
+                blockedHere = shareBlocked.Contains(SceneManager.GetActiveScene().name);
             }
             double dsp = AudioSettings.dspTime;
             long ticks = watch.ElapsedTicks;
@@ -481,6 +569,8 @@ namespace CrowCompat
             // the mixer keeps up.
             if (wall > 5.0 || ratio < 0.05 || ratio >= 0.97) return;
             string scene = SceneManager.GetActiveScene().name;
+            shareBlocked.Add(scene);
+            blockedHere = true;
             if (onCount == 0)
             {
                 // Nothing left to take off (logged once an area).
@@ -503,6 +593,7 @@ namespace CrowCompat
 
         internal static bool Change(string key, string value)
         {
+            if (MixProbe.Change(key, value)) return true;
             switch (key)
             {
                 case "rmax":
@@ -510,6 +601,19 @@ namespace CrowCompat
                     ceiling = max;
                     learned.Clear();
                     Debug.Log("CROW_AUDIO rmax=" + max);
+                    return true;
+                case "wshare":
+                    shareAuto = value != "off";
+                    if (!shareAuto && shared)
+                    {
+                        shared = false;
+                        GfxThreads.Change("workers", "64:1");
+                    }
+                    Debug.Log("CROW_AUDIO wshare=" + (shareAuto ? "on" : "off"));
+                    return true;
+                case "rsilent":
+                    silentOn = value != "off";
+                    Debug.Log("CROW_AUDIO rsilent=" + (silentOn ? "on" : "off"));
                     return true;
                 case "rzone":
                     Switch(typeof(AudioReverbZone), value == "on");
@@ -519,6 +623,11 @@ namespace CrowCompat
                     return true;
             }
             return false;
+        }
+
+        internal static void SwitchType(Type type, bool on)
+        {
+            Switch(type, on);
         }
 
         static void Switch(Type type, bool on)
@@ -540,7 +649,7 @@ namespace CrowCompat
                 foreach (UnityEngine.Object found in UnityEngine.Object.FindObjectsOfType(type))
                 {
                     var behaviour = found as Behaviour;
-                    if (behaviour == null || !behaviour.enabled) continue;
+                    if (behaviour == null || !behaviour.enabled || MixProbe.Mine(behaviour)) continue;
                     behaviour.enabled = false;
                     list.Add(behaviour);
                     count++;
@@ -555,6 +664,418 @@ namespace CrowCompat
             int count = switches;
             switches = 0;
             return " gated=" + entries.Count + "/" + count + " cap=" + max;
+        }
+    }
+
+    // What FMOD's mixer spends its time on, for measurements (no default changes anything):
+    //   -crow-mix-mute            the listener volume held at 0, as -crow-mute does: on the PS Vita it costs the mixer
+    //                             the same (Pool, lvol=0 against 1: mixer 78.7 and 78.0% of CPU 2, the DSP clock alike),
+    //                             so FMOD makes no voice virtual for it and measurements stand. (An echo filter at
+    //                             -80 dB on the listener, tried first, silences nothing there: see -crow-mix-record.)
+    //   -crow-mix-record <dir>    the listener's mix recorded when a cycle's mixrec=<s> asks, into
+    //                             <dir>/mix-<n>-<scene>.wav (16-bit PCM), and silenced after the recording point.
+    //                             A managed filter on the mixer thread, which then stops with every garbage
+    //                             collection: for recording launches only. On the PS Vita the listener's filters
+    //                             get silence (its recordings are all zeros: the sources' channels are mixed after
+    //                             them, in the NGS output), so this works on Windows players only.
+    //   -crow-audio-census <s>    s seconds after each area load (and at acensus=1), CROW_ACENSUS lines: every
+    //                             playing source (clip, rate, load type, volume, 3D settings, distance, its gain
+    //                             at the listener by its rolloff, mixer group, its filters), the totals, every
+    //                             reverb filter's settings, the reverb zones and the listener's filters.
+    // Quality.Change's keys (-crow-fight-cycle, -crow-ab), through FilterGate.Change: mixrec=<s>, acensus=1,
+    // aidle=off|on (every enabled source not playing off, and back: what idle sources cost the mixer),
+    // highpass= / echo= / chorus= / distortion= off|on (that filter type off, and back), apause=on|off
+    // (AudioListener.pause: the mixer with nothing playing), lvol=<v>|game (the listener volume held at v; PS Vita
+    // only and never with -crow-mute, so a PC player can't be unmuted),
+    // athread=<name>:<priority>:<cpus>|<name>:game (a known thread's priority and CPUs; needs -crow-audio).
+    public static class MixProbe
+    {
+        static bool mute;
+        static string recordDir;
+        static float censusAfter = -1f, censusAt = -1f, nextCheck;
+        static AudioListener ear;
+        static Diag recorder;
+        static float forcedVolume = -1f, gameVolume = -1f;
+        // The recording: filled on the mixer thread, written on a thread of its own.
+        static short[] rec;
+        static volatile int recAt;
+        static volatile bool recDone;
+        static int recChannels = 2, recCount;
+        static string recName;
+        static readonly List<AudioSource> idleOff = new List<AudioSource>();
+
+        internal static void Install(string[] args)
+        {
+            mute = args.Contains("-crow-mix-mute");
+            recordDir = CrowFlags.Optional(args, "-crow-mix-record");
+            censusAfter = CrowFlags.Number(args, "-crow-audio-census", -1f);
+            if (!mute && recordDir == null && censusAfter < 0f) return;
+            SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                nextCheck = 0f;
+                if (censusAfter >= 0f) censusAt = Time.realtimeSinceStartup + censusAfter;
+            };
+            Debug.Log("CROW_MIX probe:" + (mute ? " listener volume held at 0" : "") + (recordDir != null ? " recordings to " + recordDir : "") +
+                      (censusAfter >= 0f ? " census " + censusAfter + " s after each load" : ""));
+            Canvas.willRenderCanvases += Frame;
+        }
+
+        internal static bool Mine(Behaviour behaviour)
+        {
+            return behaviour != null && ReferenceEquals(behaviour, recorder);
+        }
+
+        internal static bool Owns(Diag diag)
+        {
+            return !ReferenceEquals(recorder, null) && ReferenceEquals(diag, recorder);
+        }
+
+        // On the mixer thread, the listener's whole mix (Diag.OnAudioFilterRead via Doppler.Filter).
+        internal static bool Filter(Diag diag, float[] data, int channels)
+        {
+            if (!Owns(diag)) return false;
+            short[] buffer = rec;
+            if (buffer != null && !recDone)
+            {
+                recChannels = channels;
+                int at = recAt, n = Math.Min(data.Length, buffer.Length - at);
+                for (int i = 0; i < n; i++)
+                {
+                    float v = data[i] * 32767f;
+                    buffer[at + i] = (short)(v > 32767f ? 32767f : v < -32768f ? -32768f : v);
+                }
+                recAt = at + n;
+                if (recAt >= buffer.Length) recDone = true;
+            }
+            Array.Clear(data, 0, data.Length);
+            return true;
+        }
+
+        static void Frame()
+        {
+            float now = Time.realtimeSinceStartup;
+            if (forcedVolume >= 0f) AudioListener.volume = forcedVolume;
+            if (mute) AudioListener.volume = 0f;
+            if (now >= nextCheck || (ear == null && recordDir != null))
+            {
+                nextCheck = now + 2f;  // and every frame while no listener has the recorder (a new one is silenced at once)
+                Attach();
+            }
+            if (censusAt > 0f && now >= censusAt)
+            {
+                censusAt = -1f;
+                Census("load");
+            }
+            if (recDone && rec != null)
+            {
+                short[] buffer = rec;
+                rec = null;
+                string path = recName;
+                int channels = recChannels, rate = AudioSettings.outputSampleRate;
+                Debug.Log("CROW_MIXREC done " + path + " (" + (buffer.Length / (double)(channels * rate)).ToString("F1", CultureInfo.InvariantCulture) + " s)");
+                new Thread(() => WriteWav(path, buffer, channels, rate)) { IsBackground = true, Name = "CrowMixWrite" }.Start();
+            }
+        }
+
+        // The recorder on the listener in use (the player's moves with its scene).
+        static void Attach()
+        {
+            if (recordDir == null) return;
+            if (ear == null || !ear.isActiveAndEnabled)
+            {
+                AudioListener found = null;
+                foreach (AudioListener listener in UnityEngine.Object.FindObjectsOfType<AudioListener>())
+                    if (listener.isActiveAndEnabled) found = listener;
+                if (found == null) return;
+                ear = found;
+            }
+            GameObject go = ear.gameObject;
+            if (recorder == null || recorder.gameObject != go)
+            {
+                recorder = go.AddComponent<Diag>();
+                Debug.Log("CROW_MIX recorder on " + go.name);
+            }
+        }
+
+        static void WriteWav(string path, short[] samples, int channels, int rate)
+        {
+            try
+            {
+                System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path));
+                using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Create))
+                using (var writer = new System.IO.BinaryWriter(stream))
+                {
+                    int bytes = samples.Length * 2;
+                    writer.Write(Encoding.ASCII.GetBytes("RIFF"));
+                    writer.Write(36 + bytes);
+                    writer.Write(Encoding.ASCII.GetBytes("WAVEfmt "));
+                    writer.Write(16);
+                    writer.Write((short)1);
+                    writer.Write((short)channels);
+                    writer.Write(rate);
+                    writer.Write(rate * channels * 2);
+                    writer.Write((short)(channels * 2));
+                    writer.Write((short)16);
+                    writer.Write(Encoding.ASCII.GetBytes("data"));
+                    writer.Write(bytes);
+                    var chunk = new byte[65536];
+                    for (int i = 0; i < samples.Length;)
+                    {
+                        int n = Math.Min(chunk.Length / 2, samples.Length - i);
+                        Buffer.BlockCopy(samples, i * 2, chunk, 0, n * 2);
+                        writer.Write(chunk, 0, n * 2);
+                        i += n;
+                    }
+                }
+                Debug.Log("CROW_MIXREC written " + path);
+            }
+            catch (Exception e)
+            {
+                Debug.Log("CROW_MIXREC failed " + path + ": " + e.Message);
+            }
+        }
+
+        internal static bool Change(string key, string value)
+        {
+            switch (key)
+            {
+                case "mixrec":
+                    float seconds;
+                    float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out seconds);
+                    if (recordDir == null || recorder == null || seconds <= 0f)
+                    {
+                        Debug.Log("CROW_MIXREC needs -crow-mix-record <dir> and a listener");
+                        return true;
+                    }
+                    if (rec != null) return true;  // one at a time
+                    recCount++;
+                    recName = System.IO.Path.Combine(recordDir, "mix-" + recCount + "-" + SceneManager.GetActiveScene().name.Replace(' ', '_') + ".wav");
+                    recAt = 0;
+                    recDone = false;
+                    rec = new short[(int)(seconds * AudioSettings.outputSampleRate) * 2];
+                    Debug.Log("CROW_MIXREC start " + recCount + " " + recName + " " + seconds + " s at t=" + Time.realtimeSinceStartup.ToString("F2", CultureInfo.InvariantCulture));
+                    return true;
+                case "acensus":
+                    Census("key");
+                    return true;
+                case "aidle":
+                    // A test: every enabled source not playing switched off (off), and back (on) without playing.
+                    int count = 0;
+                    if (value == "off")
+                        foreach (AudioSource source in UnityEngine.Object.FindObjectsOfType<AudioSource>())
+                        {
+                            if (!source.enabled || source.isPlaying || source.GetComponent<Diag>() != null) continue;
+                            source.enabled = false;
+                            idleOff.Add(source);
+                            count++;
+                        }
+                    else
+                    {
+                        foreach (AudioSource source in idleOff)
+                        {
+                            if (source == null) continue;
+                            bool awake = source.playOnAwake;
+                            source.playOnAwake = false;
+                            source.enabled = true;
+                            source.playOnAwake = awake;
+                            count++;
+                        }
+                        idleOff.Clear();
+                    }
+                    Debug.Log("CROW_AUDIO idle sources " + value + ": " + count);
+                    return true;
+                case "apause":
+                    AudioListener.pause = value == "on";
+                    Debug.Log("CROW_AUDIO listener pause " + AudioListener.pause);
+                    return true;
+                case "lvol":
+                    // Never on a PC player: it would undo -crow-mute (listener volume 0) and play through the speakers.
+                    if (Application.platform != RuntimePlatform.PSP2 || ProbeFiles.Args.Contains("-crow-mute"))
+                    {
+                        Debug.Log("CROW_AUDIO lvol ignored (PS Vita only, and never with -crow-mute)");
+                        return true;
+                    }
+                    if (value == "game")
+                    {
+                        forcedVolume = -1f;
+                        if (gameVolume >= 0f) AudioListener.volume = gameVolume;
+                    }
+                    else
+                    {
+                        if (forcedVolume < 0f) gameVolume = AudioListener.volume;
+                        float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out forcedVolume);
+                        AudioListener.volume = forcedVolume;
+                    }
+                    Debug.Log("CROW_AUDIO listener volume " + AudioListener.volume.ToString("F2", CultureInfo.InvariantCulture) + " (game " + gameVolume.ToString("F2", CultureInfo.InvariantCulture) + ")");
+                    return true;
+                case "athread":
+                    string[] parts = value.Split(':');
+                    if (parts.Length == 2 && parts[1] == "game")
+                        Debug.Log("CROW_THREADS athread " + Threads.SetByName(parts[0], 0, 0, true));
+                    else if (parts.Length == 3)
+                    {
+                        int priority, mask = 0;
+                        int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out priority);
+                        foreach (char c in parts[2])
+                            if (c >= '0' && c <= '2') mask |= 0x10000 << (c - '0');
+                        Debug.Log("CROW_THREADS athread " + Threads.SetByName(parts[0], priority, mask, false));
+                    }
+                    return true;
+                case "highpass":
+                    FilterGate.SwitchType(typeof(AudioHighPassFilter), value == "on");
+                    return true;
+                case "echo":
+                    FilterGate.SwitchType(typeof(AudioEchoFilter), value == "on");
+                    return true;
+                case "chorus":
+                    FilterGate.SwitchType(typeof(AudioChorusFilter), value == "on");
+                    return true;
+                case "distortion":
+                    FilterGate.SwitchType(typeof(AudioDistortionFilter), value == "on");
+                    return true;
+            }
+            return false;
+        }
+
+        static string PathOf(Transform t)
+        {
+            string text = t.name;
+            for (int i = 0; i < 2 && t.parent != null; i++)
+            {
+                t = t.parent;
+                text = t.name + "/" + text;
+            }
+            return text.Replace(' ', '_');
+        }
+
+        static string F(float v, string format = "F2")
+        {
+            return v.ToString(format, CultureInfo.InvariantCulture);
+        }
+
+        // The source's gain at the listener: its volume and its rolloff by distance, blended by spatialBlend
+        // (the mixer groups and the listener's volume left out).
+        static float Gain(AudioSource source, float distance)
+        {
+            float min = Mathf.Max(source.minDistance, 0.0001f), max = Mathf.Max(source.maxDistance, min);
+            float g;
+            switch (source.rolloffMode)
+            {
+                case AudioRolloffMode.Linear:
+                    g = distance <= min ? 1f : Mathf.Clamp01(1f - (distance - min) / Mathf.Max(max - min, 0.0001f));
+                    break;
+                case AudioRolloffMode.Custom:
+                    AnimationCurve curve = source.GetCustomCurve(AudioSourceCurveType.CustomRolloff);
+                    g = curve != null ? Mathf.Max(0f, curve.Evaluate(distance / max)) : 1f;
+                    break;
+                default:
+                    g = distance <= min ? 1f : min / Mathf.Min(distance, max);
+                    break;
+            }
+            return source.volume * Mathf.Lerp(1f, g, source.spatialBlend);
+        }
+
+        static string Filters(GameObject go, bool detail)
+        {
+            var text = new StringBuilder();
+            foreach (Behaviour b in go.GetComponents<Behaviour>())
+            {
+                string name = null;
+                if (b is AudioReverbFilter) name = "reverb" + (detail ? "(" + F(((AudioReverbFilter)b).decayTime) + "s)" : "");
+                else if (b is AudioLowPassFilter) name = "lowpass(" + F(((AudioLowPassFilter)b).cutoffFrequency, "F0") + ")";
+                else if (b is AudioHighPassFilter) name = "highpass(" + F(((AudioHighPassFilter)b).cutoffFrequency, "F0") + ")";
+                else if (b is AudioEchoFilter) name = "echo(" + F(((AudioEchoFilter)b).delay, "F0") + ")";
+                else if (b is AudioChorusFilter) name = "chorus";
+                else if (b is AudioDistortionFilter) name = "distortion";
+                else if (b is Diag) name = Mine(b) ? "crowrec" : "diag";
+                if (name == null) continue;
+                if (text.Length > 0) text.Append('+');
+                text.Append(name).Append(b.enabled ? "" : "(off)");
+            }
+            return text.Length > 0 ? text.ToString() : "-";
+        }
+
+        internal static void Census(string why)
+        {
+            AudioListener listener = UnityEngine.Object.FindObjectOfType<AudioListener>();
+            Vector3 at = listener != null ? listener.transform.position : Vector3.zero;
+            string scene = SceneManager.GetActiveScene().name.Replace(' ', '_');
+            AudioSource[] sources = UnityEngine.Object.FindObjectsOfType<AudioSource>();
+            int playing = 0, loud = 0, quiet = 0, silent = 0, filtered = 0, streamed = 0, compressedMem = 0;
+            var byGroup = new Dictionary<string, int>();
+            var filterCounts = new Dictionary<string, int>();
+            var rates = new Dictionary<int, int>();
+            foreach (AudioSource source in sources)
+            {
+                if (!source.isPlaying) continue;
+                playing++;
+                float distance = Vector3.Distance(source.transform.position, at);
+                float gain = Gain(source, distance);
+                float db = gain > 0f ? 20f * Mathf.Log10(gain) : -999f;
+                if (source.mute || gain <= 0f) silent++;
+                else if (db < -40f) quiet++;
+                else loud++;
+                AudioClip clip = source.clip;
+                string group = source.outputAudioMixerGroup != null ? source.outputAudioMixerGroup.name : "-";
+                int count;
+                byGroup.TryGetValue(group, out count);
+                byGroup[group] = count + 1;
+                string filters = Filters(source.gameObject, true);
+                if (filters != "-") filtered++;
+                foreach (Behaviour b in source.GetComponents<Behaviour>())
+                {
+                    if (!b.enabled) continue;
+                    string type = b is AudioReverbFilter ? "reverb" : b is AudioLowPassFilter ? "lowpass" : b is AudioHighPassFilter ? "highpass" :
+                                  b is AudioEchoFilter ? "echo" : b is AudioChorusFilter ? "chorus" : b is AudioDistortionFilter ? "distortion" : null;
+                    if (type == null) continue;
+                    filterCounts.TryGetValue(type, out count);
+                    filterCounts[type] = count + 1;
+                }
+                if (clip != null)
+                {
+                    if (clip.loadType == AudioClipLoadType.Streaming) streamed++;
+                    else if (clip.loadType == AudioClipLoadType.CompressedInMemory) compressedMem++;
+                    rates.TryGetValue(clip.frequency, out count);
+                    rates[clip.frequency] = count + 1;
+                }
+                Debug.Log("CROW_ACENSUS src scene=" + scene + " " + PathOf(source.transform) +
+                          " clip=" + (clip != null ? clip.name.Replace(' ', '_') + "/" + F(clip.length, "F1") + "s/" + clip.frequency + "Hz/" + clip.channels + "ch/" + clip.loadType : "none") +
+                          " vol=" + F(source.volume) + " pitch=" + F(source.pitch) + " blend=" + F(source.spatialBlend) + " d=" + F(distance, "F1") +
+                          " pos=" + F(source.transform.position.x, "F1") + "," + F(source.transform.position.y, "F1") + "," + F(source.transform.position.z, "F1") +
+                          " min=" + F(source.minDistance, "F1") + " max=" + F(source.maxDistance, "F0") + " roll=" + source.rolloffMode +
+                          " gain=" + F(db, "F0") + "dB loop=" + (source.loop ? 1 : 0) + " prio=" + source.priority + " doppler=" + F(source.dopplerLevel) +
+                          " spread=" + F(source.spread, "F0") + " group=" + group.Replace(' ', '_') + " zonemix=" + F(source.reverbZoneMix) +
+                          (source.bypassReverbZones ? " nozones" : "") + (source.bypassEffects ? " bypassfx" : "") + (source.mute ? " muted" : "") +
+                          " vmode=" + source.velocityUpdateMode + " filters=" + filters);
+            }
+            var line = new StringBuilder("CROW_ACENSUS sum scene=" + scene + " why=" + why + " sources=" + sources.Length + " playing=" + playing +
+                                         " loud=" + loud + " quiet=" + quiet + " silent=" + silent + " filtered=" + filtered + " streamed=" + streamed +
+                                         " compressedInMemory=" + compressedMem);
+            line.Append(" groups=").Append(string.Join(",", byGroup.Select(p => p.Key.Replace(' ', '_') + ":" + p.Value).ToArray()));
+            line.Append(" filtersOn=").Append(string.Join(",", filterCounts.Select(p => p.Key + ":" + p.Value).ToArray()));
+            line.Append(" rates=").Append(string.Join(",", rates.Select(p => p.Key + ":" + p.Value).ToArray()));
+            AudioConfiguration config = AudioSettings.GetConfiguration();
+            line.Append(" realVoices=").Append(config.numRealVoices).Append(" virtualVoices=").Append(config.numVirtualVoices).Append(" buffer=").Append(config.dspBufferSize);
+            line.Append(" ear=").Append(F(at.x, "F1")).Append(',').Append(F(at.y, "F1")).Append(',').Append(F(at.z, "F1"));
+            line.Append(" listenerVolume=").Append(F(AudioListener.volume)).Append(" listener=").Append(listener != null ? PathOf(listener.transform) + ":" + Filters(listener.gameObject, true) : "none");
+            Debug.Log(line.ToString());
+            // Every reverb filter in the loaded scenes, on or off, with its settings (are the presets shared?).
+            foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(typeof(AudioReverbFilter)))
+            {
+                var r = found as AudioReverbFilter;
+                if (r == null || !r.gameObject.scene.IsValid()) continue;
+                AudioSource source = r.GetComponent<AudioSource>();
+                Debug.Log("CROW_ACENSUS reverb scene=" + scene + " " + PathOf(r.transform) + " on=" + (r.enabled ? 1 : 0) + " active=" + (r.gameObject.activeInHierarchy ? 1 : 0) +
+                          " playing=" + (source != null && source.isPlaying ? 1 : 0) + " clip=" + (source != null && source.clip != null ? source.clip.name.Replace(' ', '_') : "-") +
+                          " d=" + F(Vector3.Distance(r.transform.position, at), "F1") + " preset=" + r.reverbPreset + " dry=" + F(r.dryLevel, "F0") + " room=" + F(r.room, "F0") +
+                          " roomHF=" + F(r.roomHF, "F0") + " roomLF=" + F(r.roomLF, "F0") + " decay=" + F(r.decayTime) + " decayHF=" + F(r.decayHFRatio) +
+                          " refl=" + F(r.reflectionsLevel, "F0") + " reflDelay=" + F(r.reflectionsDelay, "F3") + " rev=" + F(r.reverbLevel, "F0") + " revDelay=" + F(r.reverbDelay, "F3") +
+                          " hf=" + F(r.hfReference, "F0") + " lf=" + F(r.lfReference, "F0") + " diffusion=" + F(r.diffusion, "F0") + " density=" + F(r.density, "F0"));
+            }
+            foreach (AudioReverbZone zone in UnityEngine.Object.FindObjectsOfType<AudioReverbZone>())
+                Debug.Log("CROW_ACENSUS zone scene=" + scene + " " + PathOf(zone.transform) + " on=" + (zone.enabled ? 1 : 0) + " preset=" + zone.reverbPreset +
+                          " min=" + F(zone.minDistance, "F1") + " max=" + F(zone.maxDistance, "F1") + " d=" + F(Vector3.Distance(zone.transform.position, at), "F1") +
+                          " room=" + F(zone.room, "F0") + " decay=" + F(zone.decayTime));
         }
     }
 
@@ -737,6 +1258,36 @@ namespace CrowCompat
             was[0] = info[1];
             was[1] = info[2];
             return CrowThreadSet(uid, priority, mask);
+        }
+
+        // MixProbe's athread= key: every known thread whose name has <name> set to a priority and CPU mask now
+        // (0 keeps either; game puts back what it had before the first change). The names set, or why none.
+        static readonly Dictionary<int, int[]> before = new Dictionary<int, int[]>();
+
+        internal static string SetByName(string name, int priority, int mask, bool restore)
+        {
+            if (!available) return "no thread sampler (-crow-audio)";
+            KeyValuePair<int, Known>[] entries;
+            lock (gate) entries = known.ToArray();
+            var info = new int[10];
+            var buffer = new byte[32];
+            var done = new List<string>();
+            foreach (KeyValuePair<int, Known> pair in entries)
+            {
+                if (CrowThreadQuery(pair.Key, info, buffer) < 0) continue;
+                string kernelName = Encoding.ASCII.GetString(buffer);
+                int end = kernelName.IndexOf('\0');
+                if (end >= 0) kernelName = kernelName.Substring(0, end);
+                if (kernelName.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    Short(kernelName).IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                int[] was;
+                if (!before.TryGetValue(pair.Key, out was)) before[pair.Key] = was = new[] { info[1], info[2] };
+                int result = restore ? CrowThreadSet(pair.Key, was[0], was[1]) : CrowThreadSet(pair.Key, priority, mask);
+                done.Add(Short(kernelName) + "[p" + info[1].ToString("x") + " c" + Cpus(info[2]) + "->" +
+                         (restore ? "p" + was[0].ToString("x") + " c" + Cpus(was[1]) : (priority > 0 ? "p" + priority.ToString("x") : "p=") + " c" + (mask > 0 ? Cpus(mask) : "=")) +
+                         (result < 0 ? " failed 0x" + result.ToString("X8") : "") + "]");
+            }
+            return done.Count > 0 ? string.Join(" ", done.ToArray()) : "no thread named " + name;
         }
 
         internal static string ThreadName(int uid)
@@ -946,6 +1497,7 @@ namespace CrowCompat
 
         internal static bool Owns(Diag diag)
         {
+            if (MixProbe.Owns(diag)) return true;
             if (clip == null) return false;
             lock (owners) return owners.ContainsKey(diag);
         }
@@ -953,6 +1505,7 @@ namespace CrowCompat
         // On the mixer thread: false for Diag's own probe (the mixer tap's source).
         internal static bool Filter(Diag diag, float[] data, int channels)
         {
+            if (MixProbe.Filter(diag, data, channels)) return true;
             if (clip == null) return false;
             DopplerTap tap;
             lock (owners)
