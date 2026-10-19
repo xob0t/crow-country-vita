@@ -56,20 +56,6 @@ using UnityEngine.SceneManagement;
 //            activation too; ActivateChildren and DestroyChildren on the part's own parent). The enemies' RandomVariant picks (the Guest's hairstyles) stay the game's,
 //            made at run time: the holder's Start (after every Awake) takes their unpicked variants out
 //            the same way, and a later pick switches its variant on in place.
-//   skin     CROW_ENEMY_SKIN=on|ab|off (off). After the rest, each enemy's rigid parts (its merged renderers
-//            and the merge's candidates it left alone, the parts in groups of one) become one
-//            SkinnedMeshRenderer (a CrowSkin object below their common ancestor, or above it where that
-//            can't take a child) per layer, renderer settings and vertex channels, with a submesh per
-//            material, one bone weight per vertex (Bone1) and fixed bounds (the mesh's, half its largest
-//            extent bigger on every side). A part's bone is its anchor, unless the game switches the anchor
-//            or anything between it and the skin (any reason but a move): then the merged renderer's own
-//            object, or a new CrowSkinBone below the anchor, with EnemySkinBone, which collapses it (scale 0)
-//            while it is off; built at scale 0, so a bone that never wakes stays hidden. Left as they are:
-//            parts that are off, below a body or joint of their own, below anything that reparents,
-//            destroys or pushes them (SetParent, DestroyObject, AddForce...), and tangents where no
-//            material needs them (CrowVita/Lit). on builds remove the merged renderers (their objects stay
-//            where they are bones) and switch the candidates' renderers off; ab keeps both, the parts off,
-//            so -crow-enemy-skin off switches back at run time (EnemySkin).
 // Run time (every player; they act only on what such a build wrote):
 //   -crow-enemy-atlas on|off       off: the atlased renderers' old meshes and materials (ab builds)
 //   -crow-enemy-flatten on|off     off: the enemies' pivots back (ab builds)
@@ -79,12 +65,7 @@ using UnityEngine.SceneManagement;
 //   -crow-enemy-rebuild-log        CROW_ENEMY_REBUILD after each load: holders, parts, records
 //   -crow-enemy-shots <s> <dir>, -crow-enemy-death-shots <dir>   close-ups for look checks (EnemyShots below)
 //   -crow-enemy-flatten-check      what moves a child the build moved up from a pivot (FlattenCheck below)
-//   -crow-enemy-skin on|off|<types>  off: the skinned parts' own renderers (ab builds); Grinner+Blob: only
-//                                  those types' skins
-//   -crow-enemy-skin-check         each skinned part shown exactly while its object is on, and inside the
-//                                  skin's bounds (SkinCheck below)
-// -crow-cycle / -crow-fight-cycle / -crow-ab keys: eatlas=on|off, eflatten=on|off, edebrisout=on|off,
-// eskin=on|off|<types>.
+// -crow-cycle / -crow-fight-cycle / -crow-ab keys: eatlas=on|off, eflatten=on|off, edebrisout=on|off.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -123,43 +104,6 @@ namespace CrowCompat
             filter.sharedMesh = atlas ? atlasMesh : originalMesh;
             renderer.sharedMaterials = atlas ? atlasMaterials : originalMaterials;
             return true;
-        }
-    }
-
-    // A skin's parts: the renderers it stands for (ab builds; null in on builds, which removed the merged
-    // ones), and for -crow-enemy-skin-check each part's object whose activity it follows, its bone, and each
-    // bone's part extent (centre and radius in the bone's space).
-    public class EnemySkin : MonoBehaviour
-    {
-        public string type;
-        public Renderer[] parts;
-        public Transform[] shown;
-        public int[] shownBone;
-        public Vector3[] boneCentres;
-        public float[] boneRadii;
-
-        internal bool Set(bool on)
-        {
-            var skin = GetComponent<SkinnedMeshRenderer>();
-            if (skin == null || parts == null) return false;
-            skin.enabled = on;
-            foreach (Renderer part in parts) if (part != null) part.enabled = !on;
-            return true;
-        }
-    }
-
-    // A bone of a part the game switches (or that is below something it switches): collapsed while its
-    // object is off, as the part's own renderer was hidden.
-    public class EnemySkinBone : MonoBehaviour
-    {
-        void OnEnable()
-        {
-            transform.localScale = Vector3.one;
-        }
-
-        void OnDisable()
-        {
-            transform.localScale = Vector3.zero;
         }
     }
 
@@ -237,7 +181,6 @@ namespace CrowCompat
     public static class EnemyRebuild
     {
         static bool atlasOn = true, flattenOn = true, debrisOut = true, log;
-        static string skinRule = "on";  // on, off, or the types on (Grinner+Blob)
         internal static bool CheckDebris;
         static int adoptedParts, adoptedTransforms, holdersSeen;  // since the last area's line
 
@@ -250,18 +193,16 @@ namespace CrowCompat
             debrisOut = debris != "in";
             CheckDebris = debris == "check";
             log = args.Contains("-crow-enemy-rebuild-log");
-            skinRule = CrowFlags.Value(args, "-crow-enemy-skin") ?? "on";
             EnemyShots.Install(args);
             SceneManager.sceneLoaded += (scene, mode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
                 string atlas = atlasOn ? "" : SetAtlas(false, scene);
                 string flatten = flattenOn ? "" : SetFlatten(false, scene);
-                string skin = skinRule == "on" ? "" : SetSkin(skinRule, scene);
-                if (log || !atlasOn || !flattenOn || skinRule != "on")
+                if (log || !atlasOn || !flattenOn)
                     Debug.Log("CROW_ENEMY_REBUILD " + scene.name.Replace(' ', '_') + ": holders=" + holdersSeen + " parts=" + adoptedParts + " transforms=" + adoptedTransforms +
                               " debris=" + (debrisOut ? "out" : "in") + " atlasRecords=" + Records<EnemyAtlasRecord>(scene).Count +
-                              " flattenRecords=" + Records<EnemyFlattenRecord>(scene).Count + " skins=" + Records<EnemySkin>(scene).Count + " " + atlas + " " + flatten + " " + skin);
+                              " flattenRecords=" + Records<EnemyFlattenRecord>(scene).Count + " " + atlas + " " + flatten);
                 holdersSeen = adoptedParts = adoptedTransforms = 0;
             };
         }
@@ -337,24 +278,6 @@ namespace CrowCompat
             return "atlas=" + (on ? "on" : "off") + ":" + count;
         }
 
-        // rule: on, off, or the types whose skins are on (Grinner+Blob; the others' parts draw). ab builds only.
-        static string SetSkin(string rule, Scene scene)
-        {
-            int on = 0, off = 0;
-            string[] types = rule.Split('+');
-            foreach (EnemySkin record in Records<EnemySkin>(scene))
-            {
-                bool want = rule == "on" || (rule != "off" && types.Contains(record.type));
-                if (record.Set(want))
-                {
-                    if (want) on++;
-                    else off++;
-                }
-            }
-            SkinCheck.Reset();
-            return "skin=" + rule + ":" + on + "/" + off;
-        }
-
         static string SetFlatten(bool on, Scene scene)
         {
             int count = 0;
@@ -396,10 +319,6 @@ namespace CrowCompat
                     debrisOut = on;
                     done = EnemySplit.SetAdopted(on);
                     break;
-                case "eskin":
-                    skinRule = value == "game" ? "off" : value;
-                    done = string.Join(" ", Loaded().Select(s => SetSkin(skinRule, s)).ToArray());
-                    break;
                 default:
                     return false;
             }
@@ -438,8 +357,7 @@ namespace CrowCompat
             }
             deathDir = CrowFlags.Value(args, "-crow-enemy-death-shots");
             FlattenCheck.On = args.Contains("-crow-enemy-flatten-check");
-            SkinCheck.On = args.Contains("-crow-enemy-skin-check");
-            if (dir == null && deathDir == null && !FlattenCheck.On && !SkinCheck.On) return;
+            if (dir == null && deathDir == null && !FlattenCheck.On) return;
             var holder = new GameObject("CrowEnemyShots");
             DontDestroyOnLoad(holder);
             holder.AddComponent<EnemyShots>();
@@ -449,7 +367,6 @@ namespace CrowCompat
         void LateUpdate()
         {
             if (FlattenCheck.On) FlattenCheck.Tick();
-            if (SkinCheck.On) SkinCheck.Tick();
             float start = Fight.StartedAt;
             if (start < 0f) return;
             float now = Time.realtimeSinceStartup;
@@ -535,48 +452,11 @@ namespace CrowCompat
             foreach (Renderer renderer in root.GetComponentsInChildren<Renderer>(false))
             {
                 if (!renderer.enabled || renderer is ParticleSystemRenderer) continue;
-                Bounds own = renderer.bounds;
-                var skin = renderer as SkinnedMeshRenderer;
-                if (skin != null && skin.sharedMesh != null)
-                {
-                    // Its mesh's bind-pose bounds, not the skin's padded ones.
-                    Bounds local = skin.sharedMesh.bounds;
-                    Transform at = skin.rootBone != null ? skin.rootBone : skin.transform;
-                    own = new Bounds(at.TransformPoint(local.center), Vector3.zero);
-                    for (int corner = 0; corner < 8; corner++)
-                        own.Encapsulate(at.TransformPoint(local.center + Vector3.Scale(local.extents,
-                            new Vector3((corner & 1) == 0 ? -1f : 1f, (corner & 2) == 0 ? -1f : 1f, (corner & 4) == 0 ? -1f : 1f))));
-                }
-                if (any) bounds.Encapsulate(own);
-                else bounds = own;
+                if (any) bounds.Encapsulate(renderer.bounds);
+                else bounds = renderer.bounds;
                 any = true;
             }
             return bounds;
-        }
-
-        // Two renders of the current view, before and after a change (undone after), saved and compared.
-        void Compare(string name, string what, string before, string after, Action change, Action undo)
-        {
-            Texture2D a = Render();
-            change();
-            Texture2D b = Render();
-            undo();
-            Save(a, dir, name + "-" + before + ".png");
-            Save(b, dir, name + "-" + after + ".png");
-            Color32[] x = a.GetPixels32(), y = b.GetPixels32();
-            int differ = 0, big = 0;
-            long sum = 0;
-            for (int i = 0; i < x.Length; i++)
-            {
-                int d = Math.Max(Math.Abs(x[i].r - y[i].r), Math.Max(Math.Abs(x[i].g - y[i].g), Math.Abs(x[i].b - y[i].b)));
-                if (d > 2) differ++;
-                if (d > 24) big++;
-                sum += d;
-            }
-            Debug.Log("CROW_ENEMY_SHOT " + name + " " + what + " differ=" + differ + " big=" + big + " of " + x.Length +
-                      " mean=" + (sum / (double)x.Length).ToString("F2", CultureInfo.InvariantCulture));
-            UnityEngine.Object.Destroy(a);
-            UnityEngine.Object.Destroy(b);
         }
 
         // From the game camera's own place (its view is clear), zoomed to the radius.
@@ -643,17 +523,6 @@ namespace CrowCompat
                     UnityEngine.Object.Destroy(atlas);
                     UnityEngine.Object.Destroy(original);
                 }
-                // The skins, the same way: the parts' own renderers for one render (ab builds).
-                EnemySkin[] skins = type.Value.GetComponentsInChildren<EnemySkin>(true).Where(k => k.parts != null).ToArray();
-                if (skins.Length > 0)
-                    foreach (float turn in new[] { 0f, 120f, -120f })
-                    {
-                        if (turn == 0f) Zoom(bounds.center, Mathf.Max(0.3f, bounds.extents.magnitude), from);
-                        else Aim(bounds.center, Mathf.Max(0.3f, bounds.extents.magnitude), from, turn);
-                        string side = turn == 0f ? "front" : turn > 0f ? "left" : "right";
-                        Compare(name + "-" + side, "skins=" + skins.Length, "skin", "parts", () => { foreach (EnemySkin k in skins) k.Set(false); },
-                            () => { foreach (EnemySkin k in skins) k.Set(true); });
-                    }
                 // The flattening, the same way: the pivots back for one render (ab builds).
                 EnemyFlattenRecord flat = type.Value.GetComponent<EnemyFlattenRecord>();
                 if (flat == null) continue;
@@ -769,69 +638,6 @@ namespace CrowCompat
         }
     }
 
-    // -crow-enemy-skin-check: every half second, each skin that draws: every part shown exactly while its own
-    // object is active (CROW_SKIN_SHOWN: the part's object on and its bone collapsed, or off and its bone
-    // not), and each shown part's extent inside the skin's bounds (CROW_SKIN_BOUNDS: culling would cut it);
-    // once per part, CROW_SKIN_CHECK every 10 s.
-    static class SkinCheck
-    {
-        internal static bool On;
-        static float next, report;
-        static int checks, shownMisses, boundsMisses;
-        static readonly HashSet<Transform> logged = new HashSet<Transform>();
-
-        internal static void Reset()
-        {
-            logged.Clear();
-        }
-
-        internal static void Tick()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (now < next) return;
-            next = now + 0.5f;
-            foreach (EnemySkin record in Resources.FindObjectsOfTypeAll<EnemySkin>())
-            {
-                if (record == null || !record.gameObject.scene.IsValid() || record.shown == null) continue;
-                var skin = record.GetComponent<SkinnedMeshRenderer>();
-                if (skin == null || !skin.enabled || !skin.gameObject.activeInHierarchy) continue;
-                Transform[] bones = skin.bones;
-                Bounds bounds = skin.bounds;
-                for (int i = 0; i < record.shown.Length; i++)
-                {
-                    Transform part = record.shown[i];
-                    int b = record.shownBone[i];
-                    if (part == null || b >= bones.Length) continue;
-                    Transform bone = bones[b];
-                    checks++;
-                    bool collapsed = bone == null || bone.localScale.sqrMagnitude < 1e-12f;
-                    bool active = part.gameObject.activeInHierarchy;
-                    if (active == collapsed && logged.Add(part))
-                    {
-                        shownMisses++;
-                        Debug.Log("CROW_SKIN_SHOWN " + record.type + " " + Perf.Path(part, 5) + " active=" + active + " bone=" + (bone == null ? "-" : Perf.Path(bone, 3)) +
-                                  " collapsed=" + collapsed);
-                    }
-                    if (!active || collapsed) continue;
-                    Vector3 centre = bone.TransformPoint(record.boneCentres[b]);
-                    Vector3 scale = bone.lossyScale;
-                    float radius = record.boneRadii[b] * Mathf.Max(Mathf.Abs(scale.x), Mathf.Max(Mathf.Abs(scale.y), Mathf.Abs(scale.z)));
-                    Vector3 reach = Vector3.one * radius;
-                    if (bounds.Contains(centre - reach) && bounds.Contains(centre + reach)) continue;
-                    if (!logged.Add(part)) continue;
-                    boundsMisses++;
-                    Debug.Log("CROW_SKIN_BOUNDS " + record.type + " " + Perf.Path(part, 5) + " centre=" + centre + " radius=" + radius.ToString("F2", CultureInfo.InvariantCulture) +
-                              " bounds=" + bounds.center + "+-" + bounds.extents);
-                }
-            }
-            if (now >= report)
-            {
-                report = now + 10f;
-                Debug.Log("CROW_SKIN_CHECK checks=" + checks + " shownMisses=" + shownMisses + " boundsMisses=" + boundsMisses);
-            }
-        }
-    }
-
     // The build's side (Process calls Rebuild after the enemy merge, with its analysis).
     public static partial class Merge
     {
@@ -863,11 +669,10 @@ namespace CrowCompat
         }
 
         // The rebuild of a scene's enemies; returns its CROW_ENEMY_REBUILD lines.
-        static string Rebuild(Scene scene, Analysis analysis, List<GameObject> created, List<KeyValuePair<MeshRenderer, Transform>> left)
+        static string Rebuild(Scene scene, Analysis analysis, List<GameObject> created)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
             string atlasMode = Env("CROW_ENEMY_ATLAS", "on"), flattenMode = Env("CROW_ENEMY_FLATTEN", "on"), debrisMode = Env("CROW_ENEMY_DEBRIS", "out");
-            string skinMode = Env("CROW_ENEMY_SKIN", "off");
             var report = new StringBuilder();
             string sceneName = scene.name.Replace(' ', '_');
             if (analysis.enemies.Count == 0) return "CROW_ENEMY_REBUILD scene=" + sceneName + " enemies=0";
@@ -926,22 +731,10 @@ namespace CrowCompat
             var debrisKept = new Dictionary<string, int>();
             int subtrees = 0, debrisTransforms = 0, variantScripts = 0;
             if (debrisMode != "off") Debris(scene, analysis, debrisKept, ref subtrees, ref debrisTransforms, ref variantScripts);
-            if (skinMode != "off")
-                foreach (KeyValuePair<string, List<Transform>> type in byType)
-                {
-                    try
-                    {
-                        report.Append(Skin(sceneName, type.Key, type.Value, analysis, created, left, skinMode == "ab")).Append('\n');
-                    }
-                    catch (Exception exception)
-                    {
-                        report.Append("CROW_ENEMY_SKIN scene=").Append(sceneName).Append(" type=").Append(type.Key).Append(" failed: ").Append(exception.ToString().Replace('\n', ' ')).Append('\n');
-                    }
-                }
             int after = analysis.enemies.Where(e => e != null).Sum(e => e.GetComponentsInChildren<Transform>(true).Length);
             report.Append("CROW_ENEMY_REBUILD scene=").Append(sceneName).Append(" enemies=").Append(analysis.enemies.Count)
                 .Append(" types=").Append(string.Join(",", byType.Select(p => p.Key + ":" + p.Value.Count).ToArray()))
-                .Append(" atlas=").Append(atlasMode).Append(" flatten=").Append(flattenMode).Append(" debris=").Append(debrisMode).Append(" skin=").Append(skinMode)
+                .Append(" atlas=").Append(atlasMode).Append(" flatten=").Append(flattenMode).Append(" debris=").Append(debrisMode)
                 .Append(" transforms=").Append(before).Append("->").Append(flattened).Append("->").Append(after)
                 .Append(" pivots=").Append(pivots).Append(" leaves=").Append(leaves)
                 .Append(" debrisParts=").Append(subtrees).Append(" debrisTransforms=").Append(debrisTransforms).Append(" variantScripts=").Append(variantScripts)
@@ -1790,408 +1583,6 @@ namespace CrowCompat
                    " clamped=" + clamped +
                    " tiles: " + string.Join(" ", atlasTiles.Select(t => Describe(t.Material) + "=" + t.Width + "x" + t.Height).ToArray()) +
                    " kept: " + string.Join(" ", tiles.Values.Where(t => t.Atlas == null).Select(t => Describe(t.Material) + "(" + (t.Why ?? "?").Replace(' ', '_') + ")").ToArray());
-        }
-
-        // ---------------------------------------------------------------- skin
-
-        // Reasons that only move what they mark: no switch, no leaving the enemy.
-        static readonly HashSet<string> MotionReasons = new HashSet<string>
-        {
-            "SetPosition", "SetRotation", "SetScale", "Rotate", "LookAt", "SmoothLookAt", "SmoothLookAt2d", "SmoothLookAtDirection", "SmoothLookAtWithLimit",
-            "MoveTowards", "SetRandomRotation", "RandomRotation", "RandomScale", "RandomRotationState", "RandomPosition", "RandomFlip", "TransformLock",
-            "SpinGameObject", "SetRotationEveryFrame", "RotateAroundAxis", "MCSDynamicObject", "RotationAnimationScript", "ScaleAnimationScript",
-            "PositionAnimationScript", "SetPMGlobalGameObject",
-        };
-        static readonly HashSet<string> MotionProperties = new HashSet<string>
-        {
-            "position", "localPosition", "rotation", "localRotation", "eulerAngles", "localEulerAngles", "localScale",
-        };
-        // Reasons that keep a part out of the skin: it may leave the enemy, has a body of its own, or is destroyed
-        // (its bone would be gone).
-        static readonly HashSet<string> SkinBlockers = new HashSet<string>
-        {
-            "Rigidbody", "SetParent", "SetOnGround", "DestroyObject", "DestroySelf", "RandomDestroyObject", "DOTweenRigidbodyMove", "AddForce",
-            "AddExplosionForce", "SetVelocity", "SetAngularVelocity", "SetIsKinematic", "UseGravity", "PMActivateMara", "RandomForce",
-            "RandomExplosiveForce", "RandomAngularVelocity", "BlobTrailPiece",
-        };
-        const int SkinMaxVertices = 65000;
-
-        static IEnumerable<string> AllReasons(Analysis analysis, Transform t)
-        {
-            HashSet<string> all;
-            return analysis.allWhy.TryGetValue(t, out all) ? (IEnumerable<string>)all : new string[0];
-        }
-
-        static bool MotionReason(string reason)
-        {
-            if (MotionReasons.Contains(reason) || reason.StartsWith("DOTweenTransform", StringComparison.Ordinal)) return true;
-            return reason.StartsWith("SetProperty:", StringComparison.Ordinal) && MotionProperties.Contains(reason.Substring(12));
-        }
-
-        sealed class SkinPart
-        {
-            public MeshRenderer Renderer;
-            public Mesh Mesh;
-            public Material[] Materials;
-            public Transform Anchor, Bone;
-            public bool Merged;
-            public string Key;
-        }
-
-        // Whether a skin can go directly under t: nothing counts, searches or switches its children, and it is on.
-        static bool SkinPlace(Transform t, Transform enemy, Analysis analysis)
-        {
-            Mark mark;
-            if (analysis.marks.TryGetValue(t, out mark) && (mark & (Mark.NoChild | Mark.Exclude)) != 0) return false;
-            if (AllReasons(analysis, t).Any(r => r == "ActivateChildren" || r == "DestroyChildren")) return false;
-            return t == enemy || ActiveBelow(t, enemy);
-        }
-
-        // What keeps a part's bone from staying with the skin: a body or joint, a reparent, destroy or push
-        // between its anchor and the skin's place (that one at or above the place moves or goes with the skin).
-        static string Blocked(Transform anchor, Transform place, Analysis analysis)
-        {
-            for (Transform t = anchor; t != null && t != place; t = t.parent)
-            {
-                if (t.GetComponent<Rigidbody>() != null || t.GetComponents<Component>().Any(c => c != null && c.GetType().Name.EndsWith("Joint"))) return "body";
-                string blocker = AllReasons(analysis, t).FirstOrDefault(r => SkinBlockers.Contains(r));
-                if (blocker != null) return blocker + "@" + t.name;
-                if (t.parent != null && t.parent != place && AllReasons(analysis, t.parent).Contains("DestroyChildren")) return "DestroyChildren@" + t.parent.name;
-            }
-            return null;
-        }
-
-        static bool KeepsTangents(Material m)
-        {
-            string shader = m.shader == null ? "" : m.shader.name;
-            if (shader == "CrowVita/Lit") return false;
-            return shader != "Standard" || m.IsKeywordEnabled("_NORMALMAP") || m.IsKeywordEnabled("_PARALLAXMAP");
-        }
-
-        // One type's enemies: each enemy's rigid parts (the merged renderers and the merge's candidates it left
-        // alone) drawn by one SkinnedMeshRenderer per layer, renderer settings and vertex channels, each part's
-        // anchor (or an object of ours below it) its bone; returns the CROW_ENEMY_SKIN line.
-        static string Skin(string sceneName, string type, List<Transform> enemies, Analysis analysis, List<GameObject> created,
-            List<KeyValuePair<MeshRenderer, Transform>> left, bool ab)
-        {
-            var kept = new Dictionary<string, int>();
-            var keys = new Dictionary<string, int>();
-            int skins = 0, partsIn = 0, mergedIn = 0, bones = 0, watched = 0, newBones = 0, submeshesBefore = 0, submeshesAfter = 0, vertices = 0;
-            long bytes = 0;
-            foreach (Transform enemy in enemies)
-            {
-                if (enemy == null) continue;
-                var parts = new List<SkinPart>();
-                foreach (GameObject go in created)
-                {
-                    if (go == null || !go.transform.IsChildOf(enemy) || go.transform.parent == null) continue;
-                    var renderer = go.GetComponent<MeshRenderer>();
-                    var filter = go.GetComponent<MeshFilter>();
-                    if (renderer == null || !renderer.enabled || filter == null || filter.sharedMesh == null) continue;
-                    parts.Add(new SkinPart { Renderer = renderer, Mesh = filter.sharedMesh, Materials = renderer.sharedMaterials, Anchor = go.transform.parent, Merged = true });
-                }
-                foreach (KeyValuePair<MeshRenderer, Transform> single in left)
-                {
-                    MeshRenderer renderer = single.Key;
-                    if (renderer == null || !renderer.enabled || single.Value == null || !renderer.transform.IsChildOf(enemy)) continue;
-                    var filter = renderer.GetComponent<MeshFilter>();
-                    if (filter == null || filter.sharedMesh == null) continue;
-                    parts.Add(new SkinPart { Renderer = renderer, Mesh = filter.sharedMesh, Materials = renderer.sharedMaterials, Anchor = single.Value });
-                }
-                // The enemy's other renderers that draw, by what kept them out of the merge (the report's "out:").
-                foreach (MeshRenderer renderer in enemy.GetComponentsInChildren<MeshRenderer>(true))
-                {
-                    if (!renderer.enabled || !ActiveBelow(renderer.transform, enemy) || parts.Any(p => p.Renderer == renderer)) continue;
-                    Transform anchor;
-                    string why = Blocker(renderer, analysis, out anchor);
-                    if (why == null)
-                        why = renderer.sharedMaterials.Any(m => m == null || m.renderQueue > 2500) ? "queue" : "material or mesh";
-                    Count(kept, "out:" + (why.Length > 40 ? why.Substring(0, 40) : why));
-                }
-                // What keeps a part as it is.
-                var usable = new List<SkinPart>();
-                foreach (SkinPart part in parts)
-                {
-                    string why = null;
-                    if (!ActiveBelow(part.Renderer.transform, enemy)) why = "inactive";
-                    else if (part.Materials.Length != part.Mesh.subMeshCount || part.Materials.Any(m => m == null)) why = "materials";
-                    else if (part.Mesh.vertexCount > SkinMaxVertices) why = "big";
-                    if (why != null)
-                    {
-                        Count(kept, why);
-                        continue;
-                    }
-                    // The other channels are the group's union (missing ones get defaults: tangents only where a
-                    // material needs them).
-                    part.Key = part.Renderer.gameObject.layer + "|" + (int)part.Renderer.shadowCastingMode + "|" + part.Renderer.receiveShadows + "|" +
-                               (int)part.Renderer.lightProbeUsage + "|" + (int)part.Renderer.reflectionProbeUsage + "|" + (part.Mesh.normals.Length > 0 ? "n" : "-");
-                    usable.Add(part);
-                }
-                var watchedBones = new List<Transform>();
-                var skinned = new List<SkinPart>();
-                foreach (IGrouping<string, SkinPart> group in usable.GroupBy(p => p.Key))
-                {
-                    List<SkinPart> list = group.ToList();
-                    Count(keys, group.Key);
-                    // The skin's place: the parts' common ancestor, or above it where that can't take a child. What
-                    // is destroyed, reparented or has a body there or above takes the skin with it; a part with
-                    // such a thing below the place stays out, and the place is found again for the rest.
-                    Transform place = null;
-                    while (list.Count >= 2)
-                    {
-                        place = list[0].Anchor;
-                        foreach (SkinPart part in list)
-                            while (place != null && !part.Anchor.IsChildOf(place)) place = place.parent;
-                        while (place != null && !SkinPlace(place, enemy, analysis)) place = place == enemy ? null : place.parent;
-                        if (place == null) break;
-                        var blocked = new List<SkinPart>();
-                        foreach (SkinPart part in list)
-                        {
-                            string why = Blocked(part.Anchor, place, analysis);
-                            if (why == null) continue;
-                            Count(kept, why);
-                            blocked.Add(part);
-                        }
-                        if (blocked.Count == 0) break;
-                        list.RemoveAll(blocked.Contains);
-                    }
-                    if (list.Count < 2)
-                    {
-                        foreach (SkinPart part in list) Count(kept, "alone");
-                        continue;
-                    }
-                    if (place == null)
-                    {
-                        foreach (SkinPart part in list) Count(kept, "no place");
-                        continue;
-                    }
-                    // Each anchor's bone: the anchor itself, unless something switches it (or anything between it
-                    // and the skin's place): then an object of ours below it, whose scale EnemySkinBone keeps at 0
-                    // while it is off (the merged renderer's own object, or a new one).
-                    var boneOf = new Dictionary<Transform, Transform>();
-                    foreach (SkinPart part in list)
-                    {
-                        Transform bone;
-                        if (!boneOf.TryGetValue(part.Anchor, out bone))
-                        {
-                            bool switched = false;
-                            for (Transform t = part.Anchor; t != null && t != place && !switched; t = t.parent)
-                                switched = AllReasons(analysis, t).Any(r => !MotionReason(r)) ||
-                                           (t.parent != null && t.parent != place && AllReasons(analysis, t.parent).Contains("ActivateChildren"));
-                            if (!switched) bone = part.Anchor;
-                            else
-                            {
-                                SkinPart own = list.FirstOrDefault(p => p.Merged && p.Anchor == part.Anchor);
-                                if (own != null) bone = own.Renderer.transform;
-                                else
-                                {
-                                    var made = new GameObject("CrowSkinBone");
-                                    made.layer = part.Anchor.gameObject.layer;
-                                    made.transform.SetParent(part.Anchor, false);
-                                    bone = made.transform;
-                                    newBones++;
-                                }
-                                if (bone.GetComponent<EnemySkinBone>() == null) bone.gameObject.AddComponent<EnemySkinBone>();
-                                watchedBones.Add(bone);
-                            }
-                            boneOf[part.Anchor] = bone;
-                        }
-                        part.Bone = bone;
-                    }
-                    // The meshes, at most SkinMaxVertices each.
-                    var batch = new List<SkinPart>();
-                    int batchVertices = 0;
-                    foreach (SkinPart part in list.Concat(new SkinPart[] { null }))
-                    {
-                        if (part != null && batchVertices + part.Mesh.vertexCount <= SkinMaxVertices)
-                        {
-                            batch.Add(part);
-                            batchVertices += part.Mesh.vertexCount;
-                            continue;
-                        }
-                        if (batch.Count >= 2)
-                        {
-                            int madeSubmeshes;
-                            long madeBytes;
-                            BuildSkin(type, enemy, place, batch, usable, ab, out madeSubmeshes, out madeBytes);
-                            skins++;
-                            partsIn += batch.Count;
-                            mergedIn += batch.Count(p => p.Merged);
-                            bones += batch.Select(p => p.Bone).Distinct().Count();
-                            submeshesBefore += batch.Sum(p => p.Materials.Length);
-                            submeshesAfter += madeSubmeshes;
-                            vertices += batchVertices;
-                            bytes += madeBytes;
-                            skinned.AddRange(batch);
-                        }
-                        else foreach (SkinPart one in batch) Count(kept, "alone");
-                        batch.Clear();
-                        batchVertices = 0;
-                        if (part != null)
-                        {
-                            batch.Add(part);
-                            batchVertices = part.Mesh.vertexCount;
-                        }
-                    }
-                }
-                // Off until EnemySkinBone's OnEnable: a bone whose object never wakes (switched off before its
-                // Awake, say a RandomVariant's other picks) stays collapsed.
-                foreach (Transform bone in watchedBones.Distinct())
-                {
-                    bone.localScale = Vector3.zero;
-                    watched++;
-                }
-                // On builds: the merged objects that aren't bones go; those that are keep only their transform.
-                if (!ab)
-                    foreach (SkinPart part in skinned.Where(p => p.Merged))
-                    {
-                        GameObject go = part.Renderer.gameObject;
-                        if (part.Bone != go.transform)
-                        {
-                            UnityEngine.Object.DestroyImmediate(go);
-                            continue;
-                        }
-                        UnityEngine.Object.DestroyImmediate(go.GetComponent<MergedRenderer>());
-                        UnityEngine.Object.DestroyImmediate(part.Renderer);
-                        UnityEngine.Object.DestroyImmediate(go.GetComponent<MeshFilter>());
-                    }
-            }
-            return "CROW_ENEMY_SKIN scene=" + sceneName + " type=" + type + " n=" + enemies.Count(e => e != null) + " mode=" + (ab ? "ab" : "on") + " skins=" + skins +
-                   " parts=" + partsIn + " (merged " + mergedIn + ") bones=" + bones + " watched=" + watched + " newBones=" + newBones +
-                   " submeshes=" + submeshesBefore + "->" + submeshesAfter + " vertices=" + vertices + " bytes=" + bytes +
-                   " kept: " + string.Join(" ", kept.OrderByDescending(p => p.Value).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()) +
-                   " groups (layer|shadows|receive|probes|reflections|normals): " + string.Join(" ", keys.Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray());
-        }
-
-        // One SkinnedMeshRenderer (a CrowSkin object below place) for the parts, its record (EnemySkin), and the
-        // parts' renderers off (Skin removes on builds' merged ones afterwards).
-        static void BuildSkin(string type, Transform enemy, Transform place, List<SkinPart> parts, List<SkinPart> all, bool ab, out int submeshes, out long bytes)
-        {
-            var go = new GameObject("CrowSkin");
-            go.layer = parts[0].Renderer.gameObject.layer;
-            go.transform.SetParent(place, false);
-            Matrix4x4 toSkin = go.transform.worldToLocalMatrix;
-            string channels = string.Concat(parts.Select(p => Channels(p.Mesh)).ToArray());
-            bool hasN = channels.Contains("n"), hasC = channels.Contains("c"), has0 = channels.Contains("0"), has1 = channels.Contains("1");
-            bool hasT = channels.Contains("t") && parts.Any(p => p.Materials.Any(KeepsTangents));
-            var boneList = new List<Transform>();
-            var boneIndex = new Dictionary<Transform, int>();
-            var positions = new List<Vector3>();
-            var normals = new List<Vector3>();
-            var tangents = new List<Vector4>();
-            var colors = new List<Color32>();
-            var uv0 = new List<Vector2>();
-            var uv1 = new List<Vector2>();
-            var weights = new List<BoneWeight>();
-            var materialOrder = new List<Material>();
-            var subIndices = new List<List<int>>();
-            var boneMin = new List<Vector3>();
-            var boneMax = new List<Vector3>();
-            var cache = new Dictionary<Mesh, MeshData>();
-            foreach (SkinPart part in parts)
-            {
-                int bone;
-                if (!boneIndex.TryGetValue(part.Bone, out bone))
-                {
-                    boneIndex[part.Bone] = bone = boneList.Count;
-                    boneList.Add(part.Bone);
-                    boneMin.Add(new Vector3(float.MaxValue, float.MaxValue, float.MaxValue));
-                    boneMax.Add(new Vector3(float.MinValue, float.MinValue, float.MinValue));
-                }
-                MeshData data;
-                if (!cache.TryGetValue(part.Mesh, out data)) cache[part.Mesh] = data = new MeshData(part.Mesh);
-                Matrix4x4 matrix = toSkin * part.Renderer.transform.localToWorldMatrix;
-                Matrix4x4 toBone = part.Bone.worldToLocalMatrix * part.Renderer.transform.localToWorldMatrix;
-                Matrix4x4 normalMatrix = matrix.inverse.transpose;
-                bool flip = matrix.determinant < 0f;
-                int offset = positions.Count;
-                for (int v = 0; v < data.positions.Length; v++)
-                {
-                    positions.Add(matrix.MultiplyPoint3x4(data.positions[v]));
-                    Vector3 local = toBone.MultiplyPoint3x4(data.positions[v]);
-                    boneMin[bone] = Vector3.Min(boneMin[bone], local);
-                    boneMax[bone] = Vector3.Max(boneMax[bone], local);
-                    if (hasN) normals.Add(v < data.normals.Length ? normalMatrix.MultiplyVector(data.normals[v]).normalized : Vector3.up);
-                    if (hasT)
-                    {
-                        Vector4 t = v < data.tangents.Length ? data.tangents[v] : new Vector4(1f, 0f, 0f, 1f);
-                        Vector3 direction = matrix.MultiplyVector(new Vector3(t.x, t.y, t.z)).normalized;
-                        tangents.Add(new Vector4(direction.x, direction.y, direction.z, flip ? -t.w : t.w));
-                    }
-                    if (hasC) colors.Add(v < data.colors.Length ? data.colors[v] : new Color32(255, 255, 255, 255));
-                    if (has0) uv0.Add(v < data.uv0.Length ? data.uv0[v] : Vector2.zero);
-                    if (has1) uv1.Add(v < data.uv1.Length ? data.uv1[v] : Vector2.zero);
-                    weights.Add(new BoneWeight { boneIndex0 = bone, weight0 = 1f });
-                }
-                for (int s = 0; s < part.Materials.Length; s++)
-                {
-                    int at = materialOrder.IndexOf(part.Materials[s]);
-                    if (at < 0)
-                    {
-                        materialOrder.Add(part.Materials[s]);
-                        subIndices.Add(new List<int>());
-                        at = materialOrder.Count - 1;
-                    }
-                    if (part.Mesh.GetTopology(s) != MeshTopology.Triangles) continue;
-                    int[] source = part.Mesh.GetIndices(s);
-                    List<int> indices = subIndices[at];
-                    for (int i = 0; i + 2 < source.Length; i += 3)
-                    {
-                        indices.Add(source[i] + offset);
-                        indices.Add((flip ? source[i + 2] : source[i + 1]) + offset);
-                        indices.Add((flip ? source[i + 1] : source[i + 2]) + offset);
-                    }
-                }
-            }
-            var mesh = new Mesh { name = "CrowSkin " + type + " " + enemy.name };
-            mesh.SetVertices(positions);
-            if (hasN) mesh.SetNormals(normals);
-            if (hasT) mesh.SetTangents(tangents);
-            if (hasC) mesh.SetColors(colors);
-            if (has0) mesh.SetUVs(0, uv0);
-            if (has1) mesh.SetUVs(1, uv1);
-            mesh.subMeshCount = materialOrder.Count;
-            for (int i = 0; i < materialOrder.Count; i++) mesh.SetTriangles(subIndices[i], i);
-            mesh.boneWeights = weights.ToArray();
-            // Bind poses with every bone at scale 1 (Skin collapses the watched ones afterwards).
-            mesh.bindposes = boneList.Select(b => b.worldToLocalMatrix * go.transform.localToWorldMatrix).ToArray();
-            mesh.RecalculateBounds();
-            Unreadable.Add(mesh);
-            var skin = go.AddComponent<SkinnedMeshRenderer>();
-            SkinPart first = parts[0];
-            skin.sharedMesh = mesh;
-            skin.bones = boneList.ToArray();
-            skin.rootBone = go.transform;
-            skin.sharedMaterials = materialOrder.ToArray();
-            skin.quality = SkinQuality.Bone1;
-            skin.updateWhenOffscreen = false;
-            skin.skinnedMotionVectors = false;
-            skin.shadowCastingMode = first.Renderer.shadowCastingMode;
-            skin.receiveShadows = first.Renderer.receiveShadows;
-            skin.lightProbeUsage = first.Renderer.lightProbeUsage;
-            skin.reflectionProbeUsage = first.Renderer.reflectionProbeUsage;
-            // The parts move: the bounds of all the enemy's skinned parts, their largest extent and 10 cm bigger
-            // on every side, set once (-crow-enemy-skin-check logs a part that leaves them).
-            var bounds = new Bounds(toSkin.MultiplyPoint3x4(all[0].Renderer.bounds.center), Vector3.zero);
-            foreach (SkinPart part in all)
-            {
-                Bounds own = part.Renderer.bounds;
-                for (int corner = 0; corner < 8; corner++)
-                    bounds.Encapsulate(toSkin.MultiplyPoint3x4(own.center + Vector3.Scale(own.extents,
-                        new Vector3((corner & 1) == 0 ? -1f : 1f, (corner & 2) == 0 ? -1f : 1f, (corner & 4) == 0 ? -1f : 1f))));
-            }
-            bounds.Expand(2f * (Mathf.Max(bounds.extents.x, Mathf.Max(bounds.extents.y, bounds.extents.z)) + 0.1f));
-            skin.localBounds = bounds;
-            var record = go.AddComponent<EnemySkin>();
-            record.type = type;
-            record.parts = ab ? parts.Select(p => (Renderer)p.Renderer).ToArray() : null;
-            record.shown = parts.Select(p => p.Merged ? p.Anchor : p.Renderer.transform).ToArray();
-            record.shownBone = parts.Select(p => boneIndex[p.Bone]).ToArray();
-            record.boneCentres = Enumerable.Range(0, boneList.Count).Select(i => (boneMin[i] + boneMax[i]) * 0.5f).ToArray();
-            record.boneRadii = Enumerable.Range(0, boneList.Count).Select(i => ((boneMax[i] - boneMin[i]) * 0.5f).magnitude).ToArray();
-            foreach (SkinPart part in parts) part.Renderer.enabled = false;
-            submeshes = materialOrder.Count;
-            bytes = positions.Count * (12L + (hasN ? 12 : 0) + (hasT ? 16 : 0) + (hasC ? 4 : 0) + (has0 ? 8 : 0) + (has1 ? 8 : 0) + 32) + subIndices.Sum(l => l.Count) * 2L;
         }
     }
 }

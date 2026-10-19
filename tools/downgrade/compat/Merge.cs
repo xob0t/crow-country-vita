@@ -338,16 +338,9 @@ namespace CrowCompat
             // Animation scripts PlatformSpecificAnimation switches off for good on the PS Vita.
             public readonly HashSet<Component> stillAnimations = new HashSet<Component>();
 
-            // Every reason given for each transform (why keeps only the first of each mark), for the
-            // enemy skin (EnemyRebuild.cs).
-            public readonly Dictionary<Transform, HashSet<string>> allWhy = new Dictionary<Transform, HashSet<string>>();
-
             public void Add(Transform transform, Mark mark, string reason)
             {
                 if (transform == null) return;
-                HashSet<string> all;
-                if (!allWhy.TryGetValue(transform, out all)) allWhy[transform] = all = new HashSet<string>();
-                all.Add(reason);
                 Mark known;
                 marks.TryGetValue(transform, out known);
                 if ((known & mark) == mark) return;
@@ -1695,17 +1688,7 @@ namespace CrowCompat
                 .Append(string.Join(" ", merging.OrderByDescending(g => g.Count).Take(12).Select(g => g[0].material.name.Replace(' ', '_') + "=" + g.Count).ToArray())).Append('\n');
             // Last: the report above reads the parts this destroys.
             if (strip) report.Append(Strip(scene, analysis, created.Select(go => go.GetComponent<MergedRenderer>()))).Append('\n');
-            if (rebuild)
-            {
-                // The enemies' candidates the merge left as they are (their groups of one), for the skin.
-                var left = new List<KeyValuePair<MeshRenderer, Transform>>();
-                var leftSeen = new HashSet<MeshRenderer>();
-                foreach (List<Slot> group in groups.Values)
-                    foreach (Slot slot in group)
-                        if (!merged.Contains(slot.renderer) && leftSeen.Add(slot.renderer) && analysis.InEnemy(slot.renderer.transform))
-                            left.Add(new KeyValuePair<MeshRenderer, Transform>(slot.renderer, slot.anchor));
-                report.Append(Rebuild(scene, analysis, created, left)).Append('\n');
-            }
+            if (rebuild) report.Append(Rebuild(scene, analysis, created)).Append('\n');
             return report.ToString();
         }
 
