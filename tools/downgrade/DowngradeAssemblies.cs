@@ -31,6 +31,7 @@ using Mono.Cecil.Cil;
 //   Alloc.cs                allocation in play: PlayMaker's DOTween tweens recyclable, delegates and
 //                           DOTween's shortcut closures made once
 //   Decor.cs                decoration off screen: DOTween's and the animation scripts' hooks
+//   Tweens.cs               DOTween's update and callbacks timed, its tweens counted and held for tests
 //   Pad.cs                  Rewired's queries and update through CrowCompat's PS Vita pad reader
 //   PlayMakerData.cs        load time: ActionData's lists as arrays, action fields set without reflection
 //   FastPaths.cs            PlayMaker's Get and Set Property, and object names, without reflection
@@ -151,6 +152,8 @@ partial class DowngradeAssemblies
         // Decor.cs
         new Pass("decor", Scope.All, DecorTweenHooks),
         new Pass("decor", Scope.Game, DecorAnimationScripts),
+        // Tweens.cs (after DecorTweenHooks: CrowGoto reads crowDecor)
+        new Pass("tweens", Scope.All, TweenProbeHooks),
         // Cuts.cs
         new Pass("cuts", Scope.All, FsmGateHooks),
         new Pass("cuts", Scope.All, FsmDeltaTime),

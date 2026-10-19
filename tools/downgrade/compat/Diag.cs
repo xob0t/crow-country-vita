@@ -83,6 +83,7 @@ namespace CrowCompat
             Guard("FastPaths", FastPaths.Install);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
             Guard("Decor", Decor.Install);  // decoration off screen, -crow-motion-report (Decor.cs)
             Guard("Cuts", Cuts.Install);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
+            Guard("Tweens", TweenProbe.Install);  // -crow-tween-log: DOTween's update timed (Tweens.cs)
             Guard("Pad", Pad.Install);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
             Guard("FsmTrim", FsmTrim.Install);  // PlayMaker's updates that do nothing, skipped (FsmTrim.cs; PS Vita default)
             Guard("FsmCompile", FsmCompile.Install);  // PlayMaker's FSM code compiled (FsmCompile.cs; PS Vita default)

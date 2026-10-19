@@ -294,6 +294,7 @@ COMPAT_SOURCES = [
             'FsmTrim',
             'FsmCompile',
             'Pad',
+            'Tweens',
         )
     ),
 ]
@@ -330,6 +331,7 @@ REWRITER_SOURCES = [
             'FsmTrim',
             'FsmCompile',
             'Pad',
+            'Tweens',
         )
     ),
 ]

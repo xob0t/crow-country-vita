@@ -94,7 +94,7 @@ namespace CrowCompat
         {
             Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
             FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change, Pad.Change,
-            Clock.Change
+            Clock.Change, TweenProbe.Change
         };
 
         // Applies a change list (-crow-ab, -crow-cycle, -crow-fight-cycle).

@@ -1692,6 +1692,7 @@ namespace CrowCompat
             windowCpu = 0;
             cpuFrames = 0;
             FsmTrim.Mark();
+            TweenProbe.Mark();
             loopStart = (long[])LoopProfile.Totals.Clone();
             if (loopRunStart == null) loopRunStart = loopStart;
             gcStart = GC.CollectionCount(0);
@@ -1789,6 +1790,7 @@ namespace CrowCompat
             if (tweens >= 0) line.Append(" tweens=").Append(tweens);
             if (EnemySplit.Report() != null) line.Append(' ').Append(EnemySplit.Report());
             line.Append(' ').Append(FsmTrim.Report());
+            line.Append(' ').Append(TweenProbe.Report());
             Debug.Log(line.ToString());
             LoopProfile.Flush("fight-w" + windowIndex);
             ActionProfile.Report("fight-w" + windowIndex + (windowSet != null ? " set=" + windowSet : ""), windowCount);

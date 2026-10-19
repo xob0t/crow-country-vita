@@ -209,6 +209,14 @@ namespace CrowCompat
             return entry != 0 && ((entry < 0 ? -entry : entry) >> 16) == generation;
         }
 
+        // The view of a cached entry of this generation, or null (Tweens.cs' census and holds).
+        internal static View Of(int entry)
+        {
+            if (entry <= 0 || (entry >> 16) != generation) return null;
+            int index = (entry & 0xFFFF) - 1;
+            return index < list.Count ? list[index] : null;
+        }
+
         static int Classify(Transform target)
         {
             if (target == null) return -(generation << 16);
