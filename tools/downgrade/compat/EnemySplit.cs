@@ -46,6 +46,8 @@ namespace CrowCompat
         internal static bool Filter = true;
         const int FilterBits = 16;
         static readonly uint[] filter = new uint[1 << (FilterBits - 5)];
+        // Calls that reached the filter, passed it, and found a moved part or one inside one (RigPark's report).
+        internal static int Touches, Passes, Hits;
         static int filterStale;
 
         struct Place
@@ -100,6 +102,11 @@ namespace CrowCompat
             Array.Clear(filter, 0, filter.Length);
             foreach (Transform t in moved.Keys) Mark(t);
             foreach (Transform t in inside) Mark(t);
+            // The parked groups' ancestors (TouchAncestor asks the filter first; before 20 Oct a rebuild dropped them,
+            // so a child lookup on an ancestor after one no longer brought its parked UI back).
+            foreach (Transform t in uiAncestors.Keys) Mark(t);
+            foreach (Transform[] below in rigBelow.Values)
+                for (int i = 1; i < below.Length; i++) Mark(below[i]);
             filterStale = 0;
         }
 
@@ -113,8 +120,12 @@ namespace CrowCompat
             adopted.RemoveAll(a => a.Part == null || a.Holder == null);
             foreach (Transform parent in uiByParent.Keys.Where(k => k == null).ToList()) uiByParent.Remove(parent);
             foreach (Transform up in uiAncestors.Keys.Where(k => k == null).ToList()) uiAncestors.Remove(up);
-            UiParked = 0;
-            foreach (List<Transform> group in uiByParent.Values) UiParked += group.Count;
+            rigParents.RemoveWhere(k => k == null);
+            foreach (Transform part in rigBelow.Keys.Where(k => k == null).ToList()) rigBelow.Remove(part);
+            UiParked = RigParked = 0;
+            foreach (KeyValuePair<Transform, List<Transform>> group in uiByParent)
+                if (rigParents.Contains(group.Key)) RigParked += group.Value.Count;
+                else UiParked += group.Value.Count;
             var gone = new List<int>();
             foreach (KeyValuePair<int, Transform> pair in holders) if (pair.Value == null) gone.Add(pair.Key);
             foreach (int key in gone) holders.Remove(key);
@@ -240,13 +251,25 @@ namespace CrowCompat
         // inside them) and also when the game's code looks at their old parent's children or at any
         // ancestor's (GetChild, childCount, foreach, Find, sibling indices, GetComponent(s)InChildren with
         // inactive ones): all the parked children of an old parent go back together, in their order.
+        // The camera rig's switched-off subtrees (RigPark, UiPark.cs) are parked and come back the same way.
         static readonly Dictionary<Transform, List<Transform>> uiByParent = new Dictionary<Transform, List<Transform>>(Same.Comparer);
         static readonly Dictionary<Transform, List<Transform>> uiAncestors = new Dictionary<Transform, List<Transform>>(Same.Comparer);
         internal static int UiParked, UiRestores;
         internal static Action<Transform, string> UiRestored;  // UiPark's log (check mode)
+        // The camera rig's parked parts (RigPark, UiPark.cs): the same groups, by old parent, counted and
+        // logged apart.
+        static readonly HashSet<Transform> rigParents = new HashSet<Transform>(Same.Comparer);
+        // Each parked rig part's transforms (its own first), for the filter's rebuilds; and the rig's holder, whose
+        // descendants are inside a parked part.
+        static readonly Dictionary<Transform, Transform[]> rigBelow = new Dictionary<Transform, Transform[]>(Same.Comparer);
+        internal static Transform RigHolder;
+        internal static int RigInsideRestores;  // restores for a call on a transform inside a parked rig part
+        internal static int RigParked, RigRestores;
+        internal static Action<Transform, string> RigRestored;
+        internal static Action<Transform, string, int, double, double> RigGroupRestored;  // transforms, ms, ms moving
 
         // Parks the parts of one old parent at once, highest sibling first, so each keeps its old index.
-        internal static int ParkUiGroup(Transform parent, List<Transform> parts, Transform holder)
+        internal static int ParkUiGroup(Transform parent, List<Transform> parts, Transform holder, bool rig = false)
         {
             if (parent == null || parts.Count == 0 || uiByParent.ContainsKey(parent)) return 0;
             int transforms = 0;
@@ -259,6 +282,7 @@ namespace CrowCompat
             }
             if (group.Count == 0) return 0;
             uiByParent[parent] = group;
+            if (rig) rigParents.Add(parent);
             for (Transform up = parent; up != null; up = up.parent)
             {
                 List<Transform> below;
@@ -271,14 +295,27 @@ namespace CrowCompat
                 Transform part = group[i];
                 Mark(part);
                 Transform[] below = part.GetComponentsInChildren<Transform>(true);
-                for (int k = 1; k < below.Length; k++)
+                if (rig)
                 {
-                    inside.Add(below[k]);
-                    Mark(below[k]);
+                    // Not in inside: a call inside one is found by its root (RigHolder), and the restore has
+                    // nothing to take out per transform.
+                    rigBelow[part] = below;
+                    for (int k = 1; k < below.Length; k++) Mark(below[k]);
                 }
+                else
+                    for (int k = 1; k < below.Length; k++)
+                    {
+                        inside.Add(below[k]);
+                        Mark(below[k]);
+                    }
                 transforms += below.Length;
                 part.SetParent(holder, false);
-                UiParked++;
+                if (rig)
+                {
+                    RigHolder = holder;
+                    RigParked++;
+                }
+                else UiParked++;
             }
             return transforms;
         }
@@ -289,6 +326,9 @@ namespace CrowCompat
             List<Transform> group;
             if (!uiByParent.TryGetValue(parent, out group)) return;
             uiByParent.Remove(parent);
+            bool rig = rigParents.Remove(parent);
+            long started = System.Diagnostics.Stopwatch.GetTimestamp(), moving = 0;
+            int transforms = 0;
             for (Transform up = parent; up != null; up = up.parent)
             {
                 List<Transform> below;
@@ -304,25 +344,61 @@ namespace CrowCompat
                 if (!moved.TryGetValue(part, out place)) continue;
                 moved.Remove(part);
                 if (part == null) continue;
-                Transform[] below = part.GetComponentsInChildren<Transform>(true);
-                for (int i = 1; i < below.Length; i++) inside.Remove(below[i]);
-                filterStale += below.Length;
+                Transform[] below;
+                if (rig && rigBelow.TryGetValue(part, out below))
+                    // Its transforms' filter bits stay until the next rebuild (a lookup more, no harm), and a park
+                    // sets them again anyway. (Taking 1,500 transforms out of inside one by one cost 120 ms on the
+                    // PS Vita, the whole restore now 7-8 ms.)
+                    rigBelow.Remove(part);
+                else
+                {
+                    below = part.GetComponentsInChildren<Transform>(true);
+                    for (int i = 1; i < below.Length; i++) inside.Remove(below[i]);
+                    filterStale += below.Length;
+                }
+                transforms += below.Length;
                 if (parent != null)
                 {
+                    long before = System.Diagnostics.Stopwatch.GetTimestamp();
                     part.SetParent(parent, false);
                     part.SetSiblingIndex(Math.Min(place.Sibling, parent.childCount - 1));
+                    moving += System.Diagnostics.Stopwatch.GetTimestamp() - before;
+                }
+                if (rig)
+                {
+                    RigParked--;
+                    RigRestores++;
+                    if (RigRestored != null) RigRestored(part, why);
+                    continue;
                 }
                 UiParked--;
                 UiRestores++;
                 if (UiRestored != null) UiRestored(part, why);
             }
             if (filterStale > 1024) Rebuild();
+            if (rig && RigGroupRestored != null)
+            {
+                double tick = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                RigGroupRestored(parent, why, transforms, (System.Diagnostics.Stopwatch.GetTimestamp() - started) * tick, moving * tick);
+            }
         }
 
         // Every UI part back (UiPark off, and before an unload destroys what they belonged to).
         internal static void RestoreAllUi(string why)
         {
-            foreach (Transform parent in uiByParent.Keys.ToList()) RestoreUiGroup(parent, why);
+            foreach (Transform parent in uiByParent.Keys.Where(p => !rigParents.Contains(p)).ToList()) RestoreUiGroup(parent, why);
+        }
+
+        // Every part of the camera rig back (RigPark off).
+        internal static void RestoreAllRig(string why)
+        {
+            foreach (Transform parent in uiByParent.Keys.Where(p => rigParents.Contains(p)).ToList()) RestoreUiGroup(parent, why);
+        }
+
+        // RigPark's check: the parked parts by old parent.
+        internal static IEnumerable<KeyValuePair<Transform, List<Transform>>> RigGroups()
+        {
+            return uiByParent.Where(pair => rigParents.Contains(pair.Key));
         }
 
         // A call that sees t's children or descendants: the parked parts below t back first.
@@ -365,19 +441,43 @@ namespace CrowCompat
         static void Touch(Transform t, bool switching)
         {
             if (moved.Count == 0 || ReferenceEquals(t, null)) return;
+            Touches++;
             if (Filter)
             {
                 int bit = Bit(t);
                 if ((filter[bit >> 5] & (1u << (bit & 31))) == 0) return;
             }
+            Passes++;
             if (moved.ContainsKey(t))
             {
+                Hits++;
                 if (switching) restoredBySwitch++;
                 else restoredByTouch++;
                 Restore(t);
                 return;
             }
-            if (!inside.Contains(t)) return;
+            if (!inside.Contains(t))
+            {
+                // Inside one of the camera rig's parked parts (RigPark): below its holder.
+                if (rigBelow.Count == 0 || ReferenceEquals(RigHolder, null) || RigHolder == null || t.root != RigHolder) return;
+                for (Transform up = t; up != null; up = up.parent)
+                    if (up.parent == RigHolder)
+                    {
+                        if (!moved.ContainsKey(up)) return;
+                        Hits++;
+                        restoredByInside++;
+                        RigInsideRestores++;
+                        if (check)
+                        {
+                            misses++;
+                            Debug.Log("CROW_SPLIT_MISS " + t.name + " inside " + up.name + " (" + misses + ")\n" + Environment.StackTrace);
+                        }
+                        Restore(up);
+                        return;
+                    }
+                return;
+            }
+            Hits++;
             // A part inside a moved subtree: its root back.
             for (Transform up = t.parent; up != null; up = up.parent)
                 if (moved.ContainsKey(up))
