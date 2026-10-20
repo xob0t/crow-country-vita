@@ -40,6 +40,23 @@ using UnityEngine.UI;
 //                          hid it by depth, the map's and pause's overlay images covered it) is left out:
 //                          its culling, draws and shadow pass. The camera's own mask comes back when the
 //                          menu closes. -crow-cycle / -crow-ab / -crow-fight-cycle take menucull=.
+//   -crow-near-plane <m>|game  the near plane of the cameras that draw the game through its camera
+//                          effect (CrowCountryCamEffect) with a far plane under 100 m (the player's
+//                          Main Camera, 0.1-24 m; Ladder's; not the story and title cameras' 1000 m)
+//                          at m metres at least (the PS Vita's default 1; game elsewhere), short of
+//                          anything the camera carries itself (other cameras of Ladder, Results and
+//                          CrowQuest Unlock hold a fade sprite 0.78 m in front). The PS Vita
+//                          player gives a camera that renders into a render texture (the effect's
+//                          picture) depth of about 16 bits, whatever it asks for (16, 24 or 32 bits, a
+//                          Depth or Shadowmap texture: the same), and the camera sits 15-24 m from what
+//                          it shows, so with the game's 0.1 m two surfaces 3-6 cm apart there fought
+//                          (Fairy Forest's gate: a building's black end cap 0.3 mm in front of its
+//                          wall's end, in stripes and steps); at 1 m the steps are ten times finer.
+//                          Linear fog reads the clip-space depth, which on the PS Vita (GL-style clip
+//                          space) moves with the near plane: for each such camera's render the fog's
+//                          start and end are moved to where they give the same fog, and put back after
+//                          (-crow-near-fog off leaves them, a test). -crow-cycle / -crow-ab /
+//                          -crow-fight-cycle take near=<m>|game and nearfog=on|off.
 //   -crow-camera-report [s] after each scene load (and every s seconds, if given), each camera that
 //                          rendered (CROW_CAMERA): its path, target, depth, projection, clip planes,
 //                          culling mask, clear flags, occlusion culling, layer cull distances, image
@@ -75,6 +92,9 @@ namespace CrowCompat
             if (menu != null) MenuCull.Set(menu == "on");
             string fog = CrowFlags.Value(args, "-crow-fog-far");
             if (fog != null) FogFar(fog == "on");
+            string near = CrowFlags.Value(args, "-crow-near-plane") ?? (Application.platform == RuntimePlatform.PSP2 ? "1" : null);
+            if (CrowFlags.Value(args, "-crow-near-fog") == "off") NearPlane.FogMap(false);
+            if (near != null) NearPlane.Set(near);
             UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens parked
         }
 
@@ -206,6 +226,16 @@ namespace CrowCompat
             if (key == "fogfar")
             {
                 FogFar(value == "on");
+                return true;
+            }
+            if (key == "near")
+            {
+                NearPlane.Set(value);
+                return true;
+            }
+            if (key == "nearfog")
+            {
+                NearPlane.FogMap(value != "off");
                 return true;
             }
             if (RenderCost.Change(key, value) || UiPark.Change(key, value)) return true;
@@ -836,6 +866,147 @@ namespace CrowCompat
                 culling = true;
             }
             else if (!covered && culling) Release();
+        }
+    }
+
+    // -crow-near-plane: the game cameras' near plane further out, for depth precision (see the top).
+    static class NearPlane
+    {
+        static float near = -1f;  // <= 0: the game's
+        static bool fogMap = true, hooked, glClip;
+        static readonly Dictionary<Camera, float> changed = new Dictionary<Camera, float>();  // camera: its own near plane
+        static readonly Dictionary<Camera, float> limits = new Dictionary<Camera, float>();  // camera: the near plane it gets
+        static readonly HashSet<Camera> left = new HashSet<Camera>();
+        static Camera fogged;
+        static float gameStart, gameEnd;
+
+        internal static void Set(string value)
+        {
+            float metres;
+            near = value != "game" && float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out metres) ? metres : -1f;
+            if (!hooked)
+            {
+                hooked = true;
+                // OpenGL-style clip space (z from -w to w): the PS Vita's and OpenGL's; Direct3D's from 0 to w.
+                UnityEngine.Rendering.GraphicsDeviceType device = SystemInfo.graphicsDeviceType;
+                glClip = device == UnityEngine.Rendering.GraphicsDeviceType.PlayStationVita || device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore ||
+                         device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLES2 || device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLES3;
+                Camera.onPreCull += PreCull;
+                Camera.onPostRender += PostRender;
+                SceneManager.sceneUnloaded += scene =>
+                {
+                    foreach (Camera gone in changed.Keys.Where(c => c == null).ToList()) changed.Remove(gone);
+                    foreach (Camera gone in limits.Keys.Where(c => c == null).ToList()) limits.Remove(gone);
+                    left.RemoveWhere(c => c == null);
+                };
+            }
+            left.Clear();
+            if (near <= 0f)
+            {
+                foreach (KeyValuePair<Camera, float> pair in changed)
+                    if (pair.Key != null) pair.Key.nearClipPlane = pair.Value;
+                changed.Clear();
+            }
+            limits.Clear();
+            Debug.Log("CROW_CAMERA near plane " + (near > 0f ? near.ToString(CultureInfo.InvariantCulture) + " m" : "game") + (fogMap ? "" : ", fog not mapped"));
+        }
+
+        internal static void FogMap(bool on)
+        {
+            fogMap = on;
+        }
+
+        // The cameras the game draws through its camera effect, short-sighted (the story and title
+        // cameras see 1000 m and keep theirs).
+        static bool Applies(Camera camera)
+        {
+            if (camera.orthographic || camera.farClipPlane >= 100f) return false;
+            foreach (MonoBehaviour behaviour in camera.GetComponents<MonoBehaviour>())
+                if (behaviour != null && behaviour.GetType().Name == "CrowCountryCamEffect") return true;
+            return false;
+        }
+
+        // The near plane a camera gets: short of anything it carries itself (Ladder's, Results' and
+        // CrowQuest Unlock's other cameras hold a full-screen fade sprite 0.78 m in front), switched off
+        // or not; nothing the game draws in the world comes that close to a 10-degree view.
+        static float Limit(Camera camera, out string by)
+        {
+            float limit = near;
+            by = null;
+            Matrix4x4 view = camera.worldToCameraMatrix;
+            foreach (Renderer renderer in camera.GetComponentsInChildren<Renderer>(true))
+            {
+                Bounds bounds;
+                var filter = renderer.GetComponent<MeshFilter>();
+                var sprite = renderer as SpriteRenderer;
+                if (sprite != null && sprite.sprite != null) bounds = sprite.sprite.bounds;
+                else if (filter != null && filter.sharedMesh != null) bounds = filter.sharedMesh.bounds;
+                else bounds = new Bounds(Vector3.zero, Vector3.zero);
+                Matrix4x4 toView = view * renderer.transform.localToWorldMatrix;
+                for (int corner = 0; corner < 8; corner++)
+                {
+                    Vector3 local = bounds.center + Vector3.Scale(bounds.extents, new Vector3((corner & 1) == 0 ? -1 : 1, (corner & 2) == 0 ? -1 : 1, (corner & 4) == 0 ? -1 : 1));
+                    float depth = -toView.MultiplyPoint3x4(local).z;  // the view looks down -z
+                    if (depth > 0f && depth * 0.8f < limit)
+                    {
+                        limit = depth * 0.8f;
+                        by = renderer.name;
+                    }
+                }
+            }
+            return limit;
+        }
+
+        // Linear fog's coordinate at a distance d, a d + b: the clip-space z where it runs from -w to w (the
+        // PS Vita), the shaders' distance from it where it runs from 0 to w (Direct3D).
+        static void Clip(float n, float f, out float a, out float b)
+        {
+            a = glClip ? (f + n) / (f - n) : f / (f - n);
+            b = glClip ? -2f * f * n / (f - n) : -f * n / (f - n);
+        }
+
+        static void PreCull(Camera camera)
+        {
+            if (fogged != null) PostRender(fogged);  // a render that never ended: its fog given back
+            if (near <= 0f || left.Contains(camera)) return;
+            float own, set;
+            if (!changed.TryGetValue(camera, out own) || !limits.TryGetValue(camera, out set))
+            {
+                string by = null;
+                set = Applies(camera) ? Limit(camera, out by) : 0f;
+                if (set <= camera.nearClipPlane)
+                {
+                    left.Add(camera);
+                    return;
+                }
+                own = camera.nearClipPlane;
+                changed[camera] = own;
+                limits[camera] = set;
+                Debug.Log("CROW_CAMERA near plane " + camera.name + " " + own.ToString(CultureInfo.InvariantCulture) + " -> " +
+                          set.ToString("0.###", CultureInfo.InvariantCulture) + " m (far " + camera.farClipPlane.ToString(CultureInfo.InvariantCulture) +
+                          (by == null ? "" : "; short of its own " + by) + ")");
+            }
+            camera.nearClipPlane = set;
+            if (!fogMap || !RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear) return;
+            // The fog's start and end where the clip-space z at the new near plane equals the old one's at
+            // the game's start and end: c' = k c + m for every distance.
+            float far = camera.farClipPlane, a, b, a1, b1;
+            Clip(own, far, out a, out b);
+            Clip(set, far, out a1, out b1);
+            float k = a1 / a, m = b1 - k * b;
+            gameStart = RenderSettings.fogStartDistance;
+            gameEnd = RenderSettings.fogEndDistance;
+            RenderSettings.fogStartDistance = k * gameStart + m;
+            RenderSettings.fogEndDistance = k * gameEnd + m;
+            fogged = camera;
+        }
+
+        static void PostRender(Camera camera)
+        {
+            if (camera != fogged || fogged == null) return;
+            RenderSettings.fogStartDistance = gameStart;
+            RenderSettings.fogEndDistance = gameEnd;
+            fogged = null;
         }
     }
 }
