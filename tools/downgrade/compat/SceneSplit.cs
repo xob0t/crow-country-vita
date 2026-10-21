@@ -110,9 +110,9 @@ namespace CrowCompat
             hooked = true;
             // Collected in the frame after a load: the split (at run time) and the holders' switching
             // happen while the scene loads.
-            SceneManager.sceneLoaded += (scene, mode) => Dirty();
+            CrowEvents.Loaded("SplitFollow.sceneLoaded", (scene, mode) => Dirty());
             SceneManager.sceneUnloaded += scene => Dirty();
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("SplitFollow.Tick", Tick);
         }
 
         static int collectFrame;
@@ -245,11 +245,11 @@ namespace CrowCompat
             if (checking && !checkHooked)
             {
                 checkHooked = true;
-                Application.onBeforeRender += Check;
+                CrowEvents.BeforeRender("SceneSplit.Check", Check);
             }
             if (hooked) return;
             hooked = true;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
+            CrowEvents.Loaded("SceneSplit.sceneLoaded", (scene, loadMode) =>
             {
                 bool area = scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara" && scene.name != "CrowGap";
                 if (area && (mode.StartsWith("report") || mode.StartsWith("apply")))
@@ -258,7 +258,7 @@ namespace CrowCompat
                     Debug.Log("CROW_" + Merge.Split(scene, !mode.StartsWith("report")));
                 }
                 else Apply();
-            };
+            });
         }
 
         static void Apply()

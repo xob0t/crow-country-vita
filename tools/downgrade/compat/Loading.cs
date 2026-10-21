@@ -59,7 +59,7 @@ namespace CrowCompat
 
         static class Trace
         {
-            static readonly List<string> labels = new List<string>();
+            static List<string> labels;
             static long[] ticks;
             static long last, frameStart, threshold, loadTicks;
             static int previous = -1, frame, loadFrames, quietFrames;
@@ -69,35 +69,16 @@ namespace CrowCompat
             public static void Install(float ms)
             {
                 threshold = (long)(ms / Ms);
-                PlayerLoopSystem root = PlayerLoop.GetDefaultPlayerLoop();
-                PlayerLoopSystem[] phases = root.subSystemList;
-                for (int p = 0; p < phases.Length; p++)
-                {
-                    string phase = phases[p].type == null ? "?" : phases[p].type.Name;
-                    PlayerLoopSystem[] steps = phases[p].subSystemList ?? new PlayerLoopSystem[0];
-                    var list = new List<PlayerLoopSystem>();
-                    foreach (PlayerLoopSystem step in steps)
-                    {
-                        list.Add(Marker(phase + "." + (step.type == null ? "?" : step.type.Name)));
-                        list.Add(step);
-                    }
-                    list.Add(Marker(phase + ".(end)"));
-                    phases[p].subSystemList = list.ToArray();
-                }
-                root.subSystemList = phases;
+                // LoopProfile's markers (one before every step of the player loop and one at each phase's end),
+                // not a loop of its own: one SetPlayerLoop would drop the other's (Quality.cs, LoopProfile.OnMark).
+                if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // no reports of its own
+                labels = LoopProfile.Labels;
                 ticks = new long[labels.Count];
-                PlayerLoop.SetPlayerLoop(root);
-                SceneManager.sceneLoaded += (scene, mode) => Event("loaded " + scene.name + " (" + mode + ")");
+                LoopProfile.OnMark += Mark;
+                CrowEvents.Loaded("Trace.sceneLoaded", (scene, mode) => Event("loaded " + scene.name + " (" + mode + ")"));
                 SceneManager.sceneUnloaded += scene => Event("unloaded " + scene.name);
                 SceneManager.activeSceneChanged += (from, to) => Event("active " + to.name);
                 Debug.Log("CROW_LOAD trace on: frames of " + ms + " ms or more, " + labels.Count + " markers");
-            }
-
-            static PlayerLoopSystem Marker(string label)
-            {
-                int index = labels.Count;
-                labels.Add(label);
-                return new PlayerLoopSystem { type = typeof(Loading), updateDelegate = () => Mark(index) };
             }
 
             // A scene event: the step it happens in and how far into the frame.
@@ -205,12 +186,12 @@ namespace CrowCompat
                     Debug.Log("CROW_LOADCPU no thread accounting on this player");
                     return;
                 }
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("LoadCpu.sceneLoaded", (scene, mode) =>
                 {
                     if (scene.name == SceneGap.Scene || scene.name == MaraScene.Scene) return;
                     Begin();
                     endAt = clock.ElapsedMilliseconds + 8000;
-                };
+                });
                 new System.Threading.Thread(() => Run(Math.Max(20, ms))) { IsBackground = true, Name = "CrowLoadCpu" }.Start();
                 Debug.Log("CROW_LOADCPU every " + ms + " ms through loads");
             }
@@ -290,7 +271,7 @@ namespace CrowCompat
                     Debug.Log("CROW_MCS MeshCombineStudio's members not found");
                     return;
                 }
-                SceneManager.sceneLoaded += (scene, mode) => CombineNow(scene);
+                CrowEvents.Loaded("CombineTimer.sceneLoaded", (scene, mode) => CombineNow(scene));
             }
 
             static void CombineNow(Scene scene)
@@ -356,11 +337,11 @@ namespace CrowCompat
         {
             available = Application.CanStreamedLevelBeLoaded(Scene);
             if (!available) return;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("MaraScene.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == Scene) Take(scene);
                 else if (scene.name == "Title" && !requested) RequestSoon();
-            };
+            });
         }
 
         // Whether CrowCompat's Addressables should leave this key to the scene (no prefab in the build).
@@ -377,14 +358,14 @@ namespace CrowCompat
         static void RequestSoon()
         {
             requestAt = Time.realtimeSinceStartup + 1f;
-            Canvas.willRenderCanvases += Poll;
+            CrowEvents.Canvases("MaraScene.Poll", Poll);
         }
 
         static void Poll()
         {
-            if (requested) { Canvas.willRenderCanvases -= Poll; return; }
+            if (requested) { CrowEvents.CanvasesOff(Poll); return; }
             if (Time.realtimeSinceStartup < requestAt) return;
-            Canvas.willRenderCanvases -= Poll;
+            CrowEvents.CanvasesOff(Poll);
             Request();
         }
 
@@ -459,20 +440,20 @@ namespace CrowCompat
             if (args.Contains("-crow-scene") || args.Contains("-crow-no-prefetch")) return;
             if (SceneManager.GetActiveScene().buildIndex != 0 || !Application.CanStreamedLevelBeLoaded(First)) return;
             waiting = true;
-            Canvas.willRenderCanvases += Request;  // every frame, canvases or not
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Canvases("ScenePrefetch.Request", Request);  // every frame, canvases or not
+            CrowEvents.Loaded("ScenePrefetch.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name != First || clock.ElapsedMilliseconds == 0) return;
                 held = null;  // activated: nothing left to hold
                 Application.backgroundLoadingPriority = ThreadPriority.Normal;
                 Debug.Log("CROW_PREFETCH " + First + " loaded " + clock.ElapsedMilliseconds + " ms after the request");
                 clock.Reset();
-            };
+            });
         }
 
         static void Request()
         {
-            Canvas.willRenderCanvases -= Request;
+            CrowEvents.CanvasesOff(Request);
             if (!waiting) return;
             waiting = false;
             heldName = First;
@@ -545,7 +526,7 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             additive = !args.Contains("-crow-gap-single");
-            if (additive) SceneManager.sceneLoaded += Arrived;
+            if (additive) CrowEvents.Loaded("SceneGap.Arrived", Arrived);
         }
 
         static bool On
@@ -623,7 +604,7 @@ namespace CrowCompat
             if (!drainHooked)
             {
                 drainHooked = true;
-                Application.onBeforeRender += DrainTick;
+                CrowEvents.BeforeRender("SceneGap.DrainTick", DrainTick);
             }
         }
 
@@ -777,13 +758,13 @@ namespace CrowCompat
         {
             main = System.Threading.Thread.CurrentThread;
             on = true;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("LoadStats.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == SceneGap.Scene) return;
                 Debug.Log("CROW_LOADSTATS " + scene.name.Replace(' ', '_') + " " + Line());
                 Array.Clear(ticks, 0, ticks.Length);
                 Array.Clear(counts, 0, counts.Length);
-            };
+            });
         }
 
         public static long Start()

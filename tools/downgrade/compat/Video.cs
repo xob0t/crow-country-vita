@@ -388,7 +388,7 @@ namespace CrowCompat
         void Start()
         {
             lastLoad = Time.realtimeSinceStartup;
-            SceneManager.sceneLoaded += (scene, mode) => { lastLoad = Time.realtimeSinceStartup; activated.Clear(); };
+            CrowEvents.Loaded("VideoProbe.sceneLoaded", (scene, mode) => { lastLoad = Time.realtimeSinceStartup; activated.Clear(); });
         }
 
         void Update()

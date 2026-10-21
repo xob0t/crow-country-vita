@@ -104,13 +104,13 @@ namespace CrowCompat
 
         internal static void Install()
         {
-            Application.onBeforeRender += Tick;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.BeforeRender("Merge.Check.Tick", Tick);
+            CrowEvents.Loaded("Merge.Check.sceneLoaded", (scene, mode) =>
             {
                 relative.Clear();
                 materials.Clear();
                 next = Time.realtimeSinceStartup + 3f;
-            };
+            });
         }
 
         static void Tick()
@@ -189,11 +189,11 @@ namespace CrowCompat
             if (kilobytes >= 0) MaxBytes = kilobytes * 1024L;
             InstallPlayer(args);  // PlayerMerge.cs
             if (mode == null) return;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
+            CrowEvents.Loaded("Merge.sceneLoaded", (scene, loadMode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
                 Set(mode, scene);
-            };
+            });
         }
 
         // -crow-cycle merge=on|off|report: now, in every loaded scene.

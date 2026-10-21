@@ -54,17 +54,17 @@ namespace CrowCompat
 #endif
             if (censusAfter < 0f) return;
             Hook();
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("PhysCost.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name != "CrowMara") censusAt = Time.realtimeSinceStartup + censusAfter;
-            };
+            });
         }
 
         static void Hook()
         {
             if (hooked) return;
             hooked = true;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Canvases("PhysCost.Frame", Frame);
         }
 
         // EnemyCost.Change's first look: true when the key is one of these.
@@ -448,8 +448,8 @@ namespace CrowCompat
 
         internal static void Install()
         {
-            SceneManager.sceneLoaded += (scene, mode) => nextScan = Time.realtimeSinceStartup + 2f;
-            Canvas.willRenderCanvases += Tick;
+            CrowEvents.Loaded("PhysEvents.sceneLoaded", (scene, mode) => nextScan = Time.realtimeSinceStartup + 2f);
+            CrowEvents.Canvases("PhysEvents.Tick", Tick);
             Debug.Log("CROW_PHYS events on");
         }
 

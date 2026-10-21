@@ -200,13 +200,13 @@ namespace CrowCompat
         {
             if (hooked) return;
             hooked = true;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("Cameras.sceneLoaded", (scene, mode) =>
             {
                 nextScan = nextShown = nextFog = 0f;
                 if (nextReport >= 0f) nextReport = Time.realtimeSinceStartup + 5f;
                 rendered.Clear();
-            };
-            Application.onBeforeRender += Tick;
+            });
+            CrowEvents.BeforeRender("Cameras.Tick", Tick);
             Camera.onPostRender += AfterRender;
         }
 
@@ -701,7 +701,7 @@ namespace CrowCompat
             if (watchFrames < 0)
             {
                 watchFrames = 0;
-                Application.onBeforeRender += WatchTick;
+                CrowEvents.BeforeRender("RenderCost.WatchTick", WatchTick);
             }
             if (watched.Count == 0) watchFrames = 0;
             canvas.transform.hasChanged = false;
@@ -812,8 +812,8 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                Application.onBeforeRender += Tick;
-                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
+                CrowEvents.BeforeRender("MenuCull.Tick", Tick);
+                CrowEvents.Loaded("MenuCull.sceneLoaded", (scene, mode) => nextFind = 0f);
             }
             if (!on) Release();
             Debug.Log("CROW_CAMERA menu cull " + (on ? "on" : "off"));
@@ -912,13 +912,13 @@ namespace CrowCompat
                     left.RemoveWhere(c => c == null);
                 };
             }
+            // Every camera back to its own near plane, whatever comes next: PreCull starts again from the game's.
+            // (Only for "game" before 21 Oct: 1 -> 0.5 m left the cameras at 1, and 1 -> 2 took 1 m for the game's
+            // own, the fog mapped from there.)
+            foreach (KeyValuePair<Camera, float> pair in changed)
+                if (pair.Key != null) pair.Key.nearClipPlane = pair.Value;
+            changed.Clear();
             left.Clear();
-            if (near <= 0f)
-            {
-                foreach (KeyValuePair<Camera, float> pair in changed)
-                    if (pair.Key != null) pair.Key.nearClipPlane = pair.Value;
-                changed.Clear();
-            }
             limits.Clear();
             Debug.Log("CROW_CAMERA near plane " + (near > 0f ? near.ToString(CultureInfo.InvariantCulture) + " m" : "game") + (fogMap ? "" : ", fog not mapped"));
         }

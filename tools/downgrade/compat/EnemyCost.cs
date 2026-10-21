@@ -58,12 +58,12 @@ namespace CrowCompat
             dynamicVelocity = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "dynamic";
             stopCorpses = CrowFlags.Value(args, "-crow-corpses") == "off";
             if (!dynamicVelocity && !stopCorpses) return;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
+            CrowEvents.Loaded("EnemyCost.sceneLoaded", (scene, loadMode) =>
             {
                 scanAt = Time.realtimeSinceStartup + 1f;
                 corpseScanAt = Time.realtimeSinceStartup + 3f;
-            };
-            Canvas.willRenderCanvases += Frame;
+            });
+            CrowEvents.Canvases("EnemyCost.Frame", Frame);
             Debug.Log("CROW_ENEMY audio velocity " + (dynamicVelocity ? "Dynamic" : "game") + ", corpses " + (stopCorpses ? "stopped" : "game"));
         }
 
@@ -346,7 +346,7 @@ namespace CrowCompat
                     else if (!sliceHooked)
                     {
                         sliceHooked = true;
-                        Canvas.willRenderCanvases += SliceFrame;
+                        CrowEvents.Canvases("EnemyCost.SliceFrame", SliceFrame);
                     }
                     Debug.Log("CROW_ENEMY eslice=" + value);
                     return true;
@@ -432,7 +432,7 @@ namespace CrowCompat
         {
             if (body == null || body.isKinematic || !body.gameObject.activeInHierarchy) return false;
             string name = body.name;
-            if (name.StartsWith("Enemy ", StringComparison.Ordinal) || name.EndsWith("bullet", StringComparison.OrdinalIgnoreCase)) return false;
+            if (name.StartsWith("Enemy ", StringComparison.Ordinal) || FixedStep.IsBullet(name)) return false;
             return body.transform.root.name.IndexOf("CharacterCameraPrefab", StringComparison.Ordinal) < 0;
         }
 

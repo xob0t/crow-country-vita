@@ -56,8 +56,10 @@ namespace CrowCompat
         internal static void Install()
         {
             string[] args = ProbeFiles.Args;
-            MeshRelease.Install(args);
-            GcSettings(args);
+            // The GC's settings first, on their own (the out-of-memory protection: retries, divisor, governor,
+            // PHYCONT pool), then the mesh caches' release: one failing doesn't take the other with it.
+            Diag.Guard("Memory.GcSettings", () => GcSettings(args));
+            Diag.Guard("MeshRelease", () => MeshRelease.Install(args));
             int watch = Array.IndexOf(args, "-crow-memory-watch");
             if (watch >= 0)
             {
@@ -84,7 +86,7 @@ namespace CrowCompat
         void Start()
         {
             started = lastBeat = Time.realtimeSinceStartup;
-            SceneManager.sceneLoaded += (scene, mode) => { typesAt = Time.realtimeSinceStartup + 5f; };
+            CrowEvents.Loaded("Memory.sceneLoaded", (scene, mode) => { typesAt = Time.realtimeSinceStartup + 5f; });
             Line("start");
             if (types) typesAt = started + 5f;
         }
@@ -245,7 +247,8 @@ namespace CrowCompat
                     try
                     {
                         long heap = (long)(ulong)GC_get_heap_size();
-                        long room = Math.Max(0L, free() - reserve);
+                        long freeNow = free();
+                        long room = Math.Max(0L, freeNow - reserve);
                         // Not by slivers: each section is a memory block of its own, and Boehm has a
                         // fixed number of section slots.
                         if (room < 4 * 1048576L) room = 0;
@@ -256,7 +259,7 @@ namespace CrowCompat
                         {
                             held = holds;
                             Debug.Log("CROW_GC " + (held ? "heap held at " : "heap free to grow from ") + F(heap / MB) + " MB, " +
-                                      F((room + reserve) / MB) + " MB of main memory free");
+                                      F(freeNow / MB) + " MB of main memory free");  // not room + reserve: room is 0 when held
                         }
                     }
                     catch (Exception e)
@@ -724,7 +727,7 @@ namespace CrowCompat
                 return;
             }
             if (args.Contains("-crow-no-mesh-combine"))
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("MeshRelease.sceneLoaded", (scene, mode) =>
                 {
                     var instances = instancesField.GetValue(null) as System.Collections.IList;
                     if (instances == null) return;
@@ -734,7 +737,7 @@ namespace CrowCompat
                         if (behaviour != null) behaviour.enabled = false;
                     }
                     Debug.Log("MeshRelease: disabled " + instances.Count + " MeshCombiners");
-                };
+                });
             if (!on) return;
             var holder = new GameObject("CrowMeshRelease");
             DontDestroyOnLoad(holder);

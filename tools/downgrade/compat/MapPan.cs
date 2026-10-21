@@ -62,8 +62,8 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                Canvas.willRenderCanvases += Tick;
-                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
+                CrowEvents.Canvases("MapPan.Tick", Tick);
+                CrowEvents.Loaded("MapPan.sceneLoaded", (scene, mode) => nextFind = 0f);
             }
             Debug.Log("CROW_MAP pan " + (on ? "on" : "game"));
         }
@@ -134,8 +134,8 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                Canvas.willRenderCanvases += Tick;
-                SceneManager.sceneLoaded += (scene, mode) => nextFind = 0f;
+                CrowEvents.Canvases("MapPan.Tick", Tick);
+                CrowEvents.Loaded("MapPan.sceneLoaded", (scene, mode) => nextFind = 0f);
             }
             Arrows();
             Debug.Log("CROW_MAP arrows " + (arrowsOn ? "canvas" : "game"));

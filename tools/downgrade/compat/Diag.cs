@@ -147,7 +147,7 @@ namespace CrowCompat
             Audio.Install(probe);
         }
 
-        static void Guard(string module, Action install)
+        internal static void Guard(string module, Action install)
         {
             try
             {
@@ -189,7 +189,7 @@ namespace CrowCompat
             if (Doppler.Owns(this)) return;  // a -crow-doppler test tone's filter (Audio.cs)
             started = lastBeat = lastLoad = Time.realtimeSinceStartup;
             collections = GC.CollectionCount(0);
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("Diag.sceneLoaded", (scene, mode) =>
             {
                 lastLoad = Time.realtimeSinceStartup;
                 shotTaken = false;
@@ -197,7 +197,7 @@ namespace CrowCompat
                 found = false;
                 teleported = false;
                 Debug.Log("CROW_DIAG scene loaded " + scene.name + " (" + mode + ") at " + lastLoad.ToString("F2") + " s");
-            };
+            });
             Debug.Log("CROW_DIAG started: " + string.Join(" ", args.Where(a => a.StartsWith("-crow-")).ToArray()));
         }
 
@@ -961,6 +961,86 @@ namespace CrowCompat
             frameSum = 0;
             worst = 0f;
             collections = gc;
+        }
+    }
+
+    // The engine events CrowCompat's modules hang their work on: Canvas.willRenderCanvases (every frame),
+    // Application.onBeforeRender (every frame) and SceneManager.sceneLoaded (every load). Each is one multicast
+    // delegate that Unity 2018.2 invokes with no try/catch, so a handler that throws skips every handler after
+    // it, for that frame or that load: 26 CrowCompat handlers share willRenderCanvases, MaraScene's Poll and
+    // ScenePrefetch's Request among them; the gap's drain is the last onBeforeRender handler (hooked at the first
+    // area change), and SceneGap.Arrived (the area made active: its fog) comes after Quality's, Perf's and VitaLit's load handlers.
+    // One module failing every frame would hold the player on a black screen with an exception a frame in the log.
+    // So every module subscribes here: each handler runs in its own try/catch, a failure is logged with the
+    // handler's name (CROW_HOOK_FAIL: the first with its stack, then a count every 1000th) and the handlers after
+    // it run. Each is subscribed where it was, so the order is the same (21 Oct).
+    public static class CrowEvents
+    {
+        static readonly Dictionary<string, int> failures = new Dictionary<string, int>();
+        // The wrapper of each willRenderCanvases handler, for CanvasesOff (Delegate equality: method and target).
+        static readonly Dictionary<Action, Canvas.WillRenderCanvases> canvases = new Dictionary<Action, Canvas.WillRenderCanvases>();
+
+        internal static void Canvases(string name, Action handler)
+        {
+            Canvas.WillRenderCanvases wrapped;
+            if (!canvases.TryGetValue(handler, out wrapped))
+                canvases[handler] = wrapped = () =>
+                {
+                    try
+                    {
+                        handler();
+                    }
+                    catch (Exception exception)
+                    {
+                        Fail(name, exception);
+                    }
+                };
+            Canvas.willRenderCanvases += wrapped;
+        }
+
+        internal static void CanvasesOff(Action handler)
+        {
+            Canvas.WillRenderCanvases wrapped;
+            if (canvases.TryGetValue(handler, out wrapped)) Canvas.willRenderCanvases -= wrapped;
+        }
+
+        internal static void BeforeRender(string name, Action handler)
+        {
+            Application.onBeforeRender += () =>
+            {
+                try
+                {
+                    handler();
+                }
+                catch (Exception exception)
+                {
+                    Fail(name, exception);
+                }
+            };
+        }
+
+        internal static void Loaded(string name, Action<Scene, LoadSceneMode> handler)
+        {
+            SceneManager.sceneLoaded += (scene, mode) =>
+            {
+                try
+                {
+                    handler(scene, mode);
+                }
+                catch (Exception exception)
+                {
+                    Fail(name, exception);
+                }
+            };
+        }
+
+        static void Fail(string name, Exception exception)
+        {
+            int count;
+            failures.TryGetValue(name, out count);
+            failures[name] = ++count;
+            if (count == 1) Debug.LogError("CROW_HOOK_FAIL " + name + ": " + exception);
+            else if (count % 1000 == 0) Debug.LogError("CROW_HOOK_FAIL " + name + " (" + count + " times): " + exception.GetType().Name + " " + exception.Message);
         }
     }
 }

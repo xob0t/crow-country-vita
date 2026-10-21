@@ -930,10 +930,10 @@ namespace CrowCompat
                 from = scene;
                 if (from == null) origin = 0f;
                 else
-                    SceneManager.sceneLoaded += (loaded, how) =>
+                    CrowEvents.Loaded("Presses.sceneLoaded", (loaded, how) =>
                     {
                         if (origin < 0f && loaded.name == from) origin = Time.realtimeSinceStartup;
-                    };
+                    });
                 Debug.Log("CROW_PAD presses=" + presses.Count + (from != null ? " from " + from : ""));
             }
 

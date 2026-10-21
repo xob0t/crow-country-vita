@@ -22,13 +22,15 @@ using UnityEngine.SceneManagement;
 //                               what they cost); game leaves them
 //   -crow-physics-report <s>    every s seconds (CROW_PHYSICS): the fixed time step, the physics steps per
 //                               frame, rigidbodies (awake, kinematic) and colliders by kind
-//   -crow-physics <changes>     physics settings: fixed=<s> (Time.fixedDeltaTime), maxdt=<s>
-//                               (Time.maximumDeltaTime), iter=<n> (default solver iterations), sync=0|1
-//                               (Physics.autoSyncTransforms), comma-separated
+//   -crow-physics <changes>     physics settings: iter=<n> (default solver iterations), sync=0|1
+//                               (Physics.autoSyncTransforms), comma-separated; the step and the longest
+//                               frame are FixedStep's fixeddt= and physcap= (fixed= and maxdt=, which set
+//                               Time.fixedDeltaTime and maximumDeltaTime behind FixedStep, which put its
+//                               own back the next frame, are gone since 21 Oct)
 //   -crow-cycle <s> <sets>      after the first area loads (any scene but Logos, Title and CrowMara),
 //                               every s seconds apply the next change set of <sets> (sets separated by
 //                               '/', changes in a set by ','; Quality.Change's keys and these: particles=,
-//                               fixed=, maxdt=, iter=, sync=, gpu=<MHz>, vsync=<n>, camera=624|550|416,
+//                               iter=, sync=, gpu=<MHz>, vsync=<n>, camera=624|550|416,
 //                               merge=on|off|merged|report (Merge.cs, in the loaded scenes),
 //                               sort=default|nodistance|
 //                               fronttoback (the cameras' opaque sort), probes=off and reflections=off
@@ -71,11 +73,12 @@ namespace CrowCompat
     {
         public static void Install(string[] args)
         {
-            RewiredPad.Install(args);
-            MapPan.Install(args);
-            PlayerSplit.Install(args);
-            ScaledColliders.Install(args);
-            SceneSplit.Install(args);
+            // The PS Vita defaults each under a Guard of their own (Diag.Guard; see Quality.Install).
+            Diag.Guard("RewiredPad", () => RewiredPad.Install(args));
+            Diag.Guard("MapPan", () => MapPan.Install(args));
+            Diag.Guard("PlayerSplit", () => PlayerSplit.Install(args));
+            Diag.Guard("ScaledColliders", () => ScaledColliders.Install(args));
+            Diag.Guard("SceneSplit", () => SceneSplit.Install(args));
             float moving = CrowFlags.Number(args, "-crow-moving-report", -1f);
             if (moving > 0f) MovingReport.Install(moving);
             float particles = CrowFlags.Number(args, "-crow-particles-report", -1f);
@@ -89,7 +92,7 @@ namespace CrowCompat
                 foreach (string change in changes.Split(','))
                 {
                     string[] pair = change.Split('=');
-                    if (pair.Length == 2) Change(pair[0], pair[1]);
+                    if (pair.Length == 2 && !Change(pair[0], pair[1])) Debug.Log("CROW_PERF -crow-physics: no change " + change);
                 }
             int cycle = Array.IndexOf(args, "-crow-cycle");
             if (cycle >= 0 && cycle + 2 < args.Length) Cycle.Install(CrowFlags.Number(args, "-crow-cycle", 10f), args[cycle + 2]);
@@ -108,12 +111,6 @@ namespace CrowCompat
                 case "merge":
                     Merge.Set(value);
                     return true;
-                case "fixed":
-                    if (numeric && number > 0f) Time.fixedDeltaTime = number;
-                    break;
-                case "maxdt":
-                    if (numeric && number > 0f) Time.maximumDeltaTime = number;
-                    break;
                 case "iter":
                     if (numeric && number >= 1f) Physics.defaultSolverIterations = (int)number;
                     break;
@@ -242,8 +239,8 @@ namespace CrowCompat
             next = 0f;
             if (hooked) return;
             hooked = true;
-            SceneManager.sceneLoaded += (scene, mode) => next = 0f;
-            Application.onBeforeRender += Tick;
+            CrowEvents.Loaded("RewiredPad.sceneLoaded", (scene, mode) => next = 0f);
+            CrowEvents.BeforeRender("RewiredPad.Tick", Tick);
         }
 
         // Once a second until Rewired is ready, and again after each scene load.
@@ -323,7 +320,7 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneLoaded += (scene, mode) => Split();
+                CrowEvents.Loaded("PlayerSplit.sceneLoaded", (scene, mode) => Split());
             }
             Split();
         }
@@ -376,7 +373,7 @@ namespace CrowCompat
         public static void Install(float seconds)
         {
             every = seconds;
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("MovingReport.Tick", Tick);
         }
 
         static void Tick()
@@ -508,8 +505,8 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneLoaded += (scene, mode) => last = -10f;
-                Application.onBeforeRender += Tick;
+                CrowEvents.Loaded("ParticleRule.sceneLoaded", (scene, mode) => last = -10f);
+                CrowEvents.BeforeRender("ParticleRule.Tick", Tick);
             }
             Tick();
         }
@@ -540,7 +537,7 @@ namespace CrowCompat
         public static void Install(float seconds)
         {
             every = seconds;
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("ParticleReport.Tick", Tick);
         }
 
         static void Tick()
@@ -621,7 +618,7 @@ namespace CrowCompat
         public static void Install(float seconds)
         {
             every = seconds;
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("PhysicsReport.Tick", Tick);
         }
 
         static void Tick()
@@ -738,13 +735,13 @@ namespace CrowCompat
             rescan = true;
             if (hooked) return;
             hooked = true;
-            SceneManager.sceneLoaded += (scene, loadMode) =>
+            CrowEvents.Loaded("ScaledColliders.sceneLoaded", (scene, loadMode) =>
             {
                 next = Time.realtimeSinceStartup + 2f;
                 rescan = true;
                 frame = -1;
-            };
-            Application.onBeforeRender += Tick;
+            });
+            CrowEvents.BeforeRender("ScaledColliders.Tick", Tick);
         }
 
         static void Tick()
@@ -870,13 +867,13 @@ namespace CrowCompat
         {
             every = Mathf.Max(2f, seconds);
             sets = list.Split('/');
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("Cycle.sceneLoaded", (scene, mode) =>
             {
                 if (start >= 0f || scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara") return;
                 start = Time.realtimeSinceStartup + every;
                 Debug.Log("CROW_CYCLE " + sets.Length + " sets every " + every + " s from " + scene.name);
-            };
-            Application.onBeforeRender += Tick;
+            });
+            CrowEvents.BeforeRender("Cycle.Tick", Tick);
         }
 
         static void Tick()

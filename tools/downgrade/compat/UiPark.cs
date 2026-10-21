@@ -57,11 +57,11 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("UiPark.sceneLoaded", (scene, mode) =>
                 {
                     if (on) nextPass = Time.realtimeSinceStartup + 2f;
-                };
-                Application.onBeforeRender += Tick;
+                });
+                CrowEvents.BeforeRender("UiPark.Tick", Tick);
                 EnemySplit.UiRestored = Restored;
             }
             if (on)
@@ -242,11 +242,11 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("RigPark.sceneLoaded", (scene, mode) =>
                 {
                     if (on) nextPass = Time.realtimeSinceStartup + 2f;
-                };
-                Application.onBeforeRender += Tick;
+                });
+                CrowEvents.BeforeRender("RigPark.Tick", Tick);
                 EnemySplit.RigRestored = Restored;
                 EnemySplit.RigGroupRestored = (parent, why, transforms, ms, moving) =>
                     Debug.Log("CROW_RIG_PARK back " + (parent == null ? "?" : Perf.Path(parent, 3)) + " by " + why + ": " + transforms + " transforms in " +

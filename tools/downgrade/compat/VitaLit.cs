@@ -118,7 +118,7 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("VitaLit.sceneLoaded", (scene, mode) =>
                 {
                     sceneTime = Time.realtimeSinceStartup;
                     swapPasses = 0;
@@ -126,8 +126,8 @@ namespace CrowCompat
                     nextList = 0f;
                     nextCamera = 0f;
                     if (!on && restoreBaked) Restore();
-                };
-                Application.onBeforeRender += Tick;
+                });
+                CrowEvents.BeforeRender("VitaLit.Tick", Tick);
             }
             if (want == on)
             {

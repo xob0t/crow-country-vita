@@ -194,7 +194,7 @@ namespace CrowCompat
             CheckDebris = debris == "check";
             log = args.Contains("-crow-enemy-rebuild-log");
             EnemyShots.Install(args);
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("EnemyRebuild.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
                 string atlas = atlasOn ? "" : SetAtlas(false, scene);
@@ -204,7 +204,7 @@ namespace CrowCompat
                               " debris=" + (debrisOut ? "out" : "in") + " atlasRecords=" + Records<EnemyAtlasRecord>(scene).Count +
                               " flattenRecords=" + Records<EnemyFlattenRecord>(scene).Count + " " + atlas + " " + flatten);
                 holdersSeen = adoptedParts = adoptedTransforms = 0;
-            };
+            });
         }
 
         // EnemyDebrisHolder.Awake: the build's moved parts to EnemySplit (in their places with debris in).

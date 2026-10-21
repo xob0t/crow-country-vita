@@ -48,17 +48,17 @@ namespace CrowCompat
             PlayerMergeCheck.Install(args);
             playerReportAfter = CrowFlags.Number(args, "-crow-player-merge-report", -1f);
             if (playerReportAfter < 0f) return;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("PlayerMerge.report.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
                 playerReportAt = Time.realtimeSinceStartup + playerReportAfter;
-            };
-            Application.onBeforeRender += () =>
+            });
+            CrowEvents.BeforeRender("PlayerMerge.report.onBeforeRender", () =>
             {
                 if (playerReportAt < 0f || Time.realtimeSinceStartup < playerReportAt) return;
                 playerReportAt = -1f;
                 ReportPlayer();
-            };
+            });
         }
 
         internal static void ReportPlayer()
@@ -576,7 +576,7 @@ namespace CrowCompat
         {
             string dry = CrowFlags.Value(args, "-crow-player-merge-dry");
             if (dry != null)
-                SceneManager.sceneLoaded += (scene, mode) =>
+                CrowEvents.Loaded("PlayerMerge.dry.sceneLoaded", (scene, mode) =>
                 {
                     if (scene.name != "CrowMara") return;
                     try
@@ -589,14 +589,14 @@ namespace CrowCompat
                     {
                         Debug.Log("CROW_PLAYER_MERGE dry failed: " + exception);
                     }
-                };
+                });
             string value = CrowFlags.Value(args, "-crow-player-merge");
             if (value == null || value == "on") return;
             playerMode = value;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("PlayerMerge.switch.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == "CrowMara" || (scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowGap")) Debug.Log(SetPlayer(playerMode));
-            };
+            });
         }
 
         // The game's random picks the player's objects make at run time (in Awake or OnEnable: the blood stains'
@@ -808,14 +808,14 @@ namespace CrowCompat
             groups = args.Contains("-crow-player-shots-groups");
             int count;
             if (at + 3 < args.Length && int.TryParse(args[at + 3], out count)) times = count;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("PlayerShots.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
                 area = scene.name.Replace(' ', '_');
                 taken = 0;
                 next = Time.realtimeSinceStartup + every;
-            };
-            Canvas.willRenderCanvases += Tick;
+            });
+            CrowEvents.Canvases("PlayerShots.Tick", Tick);
         }
 
         static void Tick()
@@ -1017,7 +1017,7 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             if (!args.Contains("-crow-player-merge-check")) return;
-            Canvas.willRenderCanvases += Tick;
+            CrowEvents.Canvases("PlayerMergeCheck.Tick", Tick);
         }
 
         static void Tick()

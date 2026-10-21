@@ -60,22 +60,25 @@ namespace CrowCompat
         static string shadows;
 
         // Called by Diag.Install, the probe's one start hook: Unity lists a build's start hooks in the
-        // build itself, so a probe DLL swapped into a built player can't add another.
+        // build itself, so a probe DLL swapped into a built player can't add another. Each module under a
+        // Guard of its own (Diag.Guard), so one that throws doesn't skip the PS Vita defaults after it
+        // (VitaLit's key lights, the shadows, the job workers' placement; one Guard for all before 21 Oct).
         public static void Install()
         {
             string[] args = ProbeFiles.Args;
             float profile = CrowFlags.Number(args, "-crow-loop-profile", -1);
-            if (profile > 0) LoopProfile.Install(profile);
+            if (profile > 0) Diag.Guard("LoopProfile", () => LoopProfile.Install(profile));
             float report = CrowFlags.Number(args, "-crow-light-report", -1);
-            if (report > 0) LightReport.Install(report);
-            Draws.Install(args);
-            Perf.Install(args);
-            VitaLit.Install(args);
+            if (report > 0) Diag.Guard("LightReport", () => LightReport.Install(report));
+            Diag.Guard("Draws", () => Draws.Install(args));
+            Diag.Guard("Perf", () => Perf.Install(args));
+            Diag.Guard("VitaLit", () => VitaLit.Install(args));
             int ab = Array.IndexOf(args, "-crow-ab");
-            if (ab >= 0 && ab + 3 < args.Length) AB.Install(CrowFlags.Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3], CrowFlags.Number(args, "-crow-ab-hold", 0f));
+            if (ab >= 0 && ab + 3 < args.Length)
+                Diag.Guard("AB", () => AB.Install(CrowFlags.Number(args, "-crow-ab", 10f), args[ab + 2], args[ab + 3], CrowFlags.Number(args, "-crow-ab-hold", 0f)));
             float census = CrowFlags.Number(args, "-crow-census", -1);
             if (census > 0 || CrowFlags.Has(args, "-crow-disable"))
-                Census.Install(census, CrowFlags.Value(args, "-crow-disable"), CrowFlags.Value(args, "-crow-disable-in"));
+                Diag.Guard("Census", () => Census.Install(census, CrowFlags.Value(args, "-crow-disable"), CrowFlags.Value(args, "-crow-disable-in")));
             pixelLights = (int)CrowFlags.Number(args, "-crow-pixel-lights", -1);
             shadowResolution = (int)CrowFlags.Number(args, "-crow-shadow-resolution", -1);
             shadowDistance = CrowFlags.Number(args, "-crow-shadow-distance", -1);
@@ -90,10 +93,10 @@ namespace CrowCompat
                 if (shadowResolution < 0) shadowResolution = 0;
                 if (shadowDistance < 0) shadowDistance = 12f;
             }
-            GfxThreads.Install(args);
+            Diag.Guard("GfxThreads", () => GfxThreads.Install(args));
             if (pixelLights < 0 && shadowResolution < 0 && shadowDistance < 0 && shadows == null) return;
             Apply();
-            SceneManager.sceneLoaded += (scene, mode) => Apply();
+            CrowEvents.Loaded("Quality.sceneLoaded", (scene, mode) => Apply());
         }
 
         // The modules' own change keys, asked in turn after Quality's: each takes the keys it knows and
@@ -151,8 +154,8 @@ namespace CrowCompat
             every = seconds;
             disabled = types == null ? null : types.Split(',');
             disableIn = scene;
-            SceneManager.sceneLoaded += (s, mode) => loaded = Time.realtimeSinceStartup;
-            Application.onBeforeRender += Tick;
+            CrowEvents.Loaded("Census.sceneLoaded", (s, mode) => loaded = Time.realtimeSinceStartup);
+            CrowEvents.BeforeRender("Census.Tick", Tick);
             if (disabled != null) Debug.Log("CROW_CENSUS disabling " + types + (scene == null ? "" : " in " + scene));
         }
 
@@ -248,13 +251,13 @@ namespace CrowCompat
             path = prefix;
             sets = list.Split('/');
             hold = holdSeconds;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("AB.sceneLoaded", (scene, mode) =>
             {
                 if (step > 0 && step <= 2 * sets.Length + 1) return;  // waiting: s seconds after the last load
                 loaded = Time.realtimeSinceStartup;
                 step = 0;
-            };
-            Application.onBeforeRender += Tick;
+            });
+            CrowEvents.BeforeRender("AB.Tick", Tick);
         }
 
         // Steps: 0 waits for the moment; then for each picture an odd step that saves it (after 10
@@ -333,6 +336,11 @@ namespace CrowCompat
         internal static Action FixedHook;
         internal static List<string> Labels { get { return labels; } }
         internal static long[] Totals { get { return totals; } }
+        // Loading's -crow-load-trace: called at each marker with its index (Labels), so the trace times the steps on
+        // these markers. 2018.2 has no GetCurrentPlayerLoop: each installer built the default loop with its own
+        // markers, and the later SetPlayerLoop dropped the earlier's (no CROW_LOAD frames with -crow-fight, no
+        // CROW_LOOP lines and a -crow-fight physics that never started with -crow-loop-profile; until 21 Oct).
+        internal static Action<int> OnMark;
 
         public static void Install(float seconds)
         {
@@ -377,6 +385,9 @@ namespace CrowCompat
         // camera effect's passes) and late (from the effect's end to the next camera or the frame's
         // end); the rest of after is before the effect (Unity's own image-effect setup).
         static readonly Dictionary<string, long[]> cameras = new Dictionary<string, long[]>();
+        // Each camera's slot above, so its name is read once a camera, not three times a frame: Object.name makes a
+        // new string at each read (CrowCompat's code has no names cache), ~3 KB/s of the fight bench's allocKBs.
+        static readonly Dictionary<Camera, long[]> slots = new Dictionary<Camera, long[]>();
         static long[] lastCamera;
         static long cameraMark, imageMark;
 
@@ -385,7 +396,12 @@ namespace CrowCompat
             long now = System.Diagnostics.Stopwatch.GetTimestamp();
             if (stage == 0) CameraEnd(now);
             long[] slot;
-            if (!cameras.TryGetValue(camera.name, out slot)) cameras[camera.name] = slot = new long[6];
+            if (!slots.TryGetValue(camera, out slot))
+            {
+                string name = camera.name;
+                if (!cameras.TryGetValue(name, out slot)) cameras[name] = slot = new long[6];
+                slots[camera] = slot;
+            }
             FrameProbe.Stage = stage + 1;
             if (stage == 1) slot[0] += now - cameraMark;
             if (stage == 2)
@@ -460,6 +476,7 @@ namespace CrowCompat
             previous = index;
             last = now;
             FrameProbe.Step = index;
+            if (OnMark != null) OnMark(index);
             if (index != 0) return;
             if (mainUid > 0)
             {
@@ -507,6 +524,7 @@ namespace CrowCompat
                 Array.Clear(pair.Value, 0, pair.Value.Length);
             }
             Debug.Log(line.ToString());
+            foreach (Camera gone in slots.Keys.Where(c => c == null).ToList()) slots.Remove(gone);
             FrameProbe.Report(label, total * ms / frames);
             Array.Clear(ticks, 0, ticks.Length);
             frames = 0;
@@ -889,8 +907,8 @@ namespace CrowCompat
         public static void Install(float seconds)
         {
             every = seconds;
-            SceneManager.sceneLoaded += (scene, mode) => detail = true;
-            Application.onBeforeRender += Tick;
+            CrowEvents.Loaded("LightReport.sceneLoaded", (scene, mode) => detail = true);
+            CrowEvents.BeforeRender("LightReport.Tick", Tick);
         }
 
         static void Tick()

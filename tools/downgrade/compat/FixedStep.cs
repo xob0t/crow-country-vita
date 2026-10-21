@@ -18,17 +18,19 @@ using UnityEngine.SceneManagement;
 //     adjusted body (Instantiate copies its drags: the handgun's bullets and spent chambers, cloned from
 //     templates in Mara's prefab; Fight's stress copies of enemies) is known by its drags, a pair FixedStep
 //     set (madeFrom; no game or prefab body has such a pair), and gets its original's, not Drag() twice.
-//   - The bullets (handgun, shotgun, magnum, flame bullets: 18 m/s, 0.6 m a step at 1/30) detect
-//     collisions continuously, so they don't pass through an enemy's small colliders
-//     (-crow-bullet-ccd off leaves them discrete).
+//   - The bullets (handgun, the Secret Costume's and the Crow Hat's too, shotgun, magnum, flame bullets:
+//     18 m/s, 0.6 m a step at 1/30; IsBullet) detect collisions continuously, so they don't pass through an
+//     enemy's small colliders (-crow-bullet-ccd off leaves them discrete).
 // One-off impulses, set velocities (the Grinners' walk), gravity and forces are already step-independent.
-// -crow-physics-cap on|off|<n> (on is 1; the PS Vita's default is 2): Time.maximumDeltaTime at n physics
-// steps, so a frame slower than n steps runs n steps and game time advances by n steps' time (Unity clamps
-// Time.deltaTime, Time.time and the fixed steps' clock alike), instead of 3 or more steps in one long frame
-// making the next one long too; off keeps the project's maximumDeltaTime (0.3333 s). In a clamped frame
-// the whole game slows with it, physics, scripts, animation, tweens and timers together; sound and
-// unscaled time don't. One step a frame (on) saves 2-4 ms of physics in a 50-65 ms fight frame but runs
-// the fight at 55-66% of real time; at 2 a frame up to 66.7 ms keeps the game's speed and only hitches
+// -crow-physics-cap on|off|<n> (on is 1; the PS Vita's default is 2): Time.maximumDeltaTime at n thirtieths
+// of a second (n physics steps at the PS Vita's 1/30, whatever the step: a time, so -crow-fixed-dt game or
+// fixeddt=game keeps 66.7 ms at 2, not 2 x 0.02 = 40 ms, which slowed the fights' 50-65 ms frames and biased
+// the step's A/B until 21 Oct; never under the step, as Unity keeps it), so a slower frame advances game time
+// by the cap (Unity clamps Time.deltaTime, Time.time and the fixed steps' clock alike), instead of 3 or more
+// steps in one long frame making the next one long too; off keeps the project's maximumDeltaTime (0.3333 s).
+// In a clamped frame the whole game slows with it, physics, scripts, animation, tweens and timers together;
+// sound and unscaled time don't. One step a frame (on) saves 2-4 ms of physics in a 50-65 ms fight frame but
+// runs the fight at 55-66% of real time; at 2 a frame up to 66.7 ms keeps the game's speed and only hitches
 // are clamped. -crow-cycle / -crow-fight-cycle / -crow-ab take physcap=on|off|<n>.
 // -crow-ground-cache <steps>|off (groundcache=; Cuts.cs sets the PS Vita's 4): the ground friction under a body
 // that Gain looks up with a raycast at every AddForce (84 us a call on the PS Vita, ~1 ms a frame in Station
@@ -53,8 +55,9 @@ namespace CrowCompat
         static readonly Dictionary<long, Vector2> madeFrom = new Dictionary<long, Vector2>();
         static float nextScan = -1f;
         static bool fullScan;
-        // -crow-physics-cap: steps a frame at most (0: off), and the project's maximumDeltaTime.
-        static float capSteps;
+        // -crow-physics-cap: the longest frame in seconds (n / 30; 0: off), and the project's maximumDeltaTime.
+        const float CapUnit = 1f / 30f;
+        static float capSeconds;
         static float gameMaxDelta = -1f;
 
         // -crow-cycle / -crow-fight-cycle / -crow-ab: fixeddt=<s or fps> (game for 0.02), as -crow-fixed-dt.
@@ -81,13 +84,13 @@ namespace CrowCompat
         {
             if (hooked) return;
             hooked = true;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("FixedStep.sceneLoaded", (scene, mode) =>
             {
                 nextScan = Time.realtimeSinceStartup + 0.5f;
                 fullScan = true;
-            };
+            });
             SceneManager.sceneUnloaded += scene => Forget();
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Canvases("FixedStep.Frame", Frame);
         }
 
         // The destroyed bodies' entries (spent chambers, debris and an unloaded area's bodies), at each unload.
@@ -109,15 +112,19 @@ namespace CrowCompat
             Check.On = CrowFlags.Has(args, "-crow-fixed-check");
             Check.Old = CrowFlags.Optional(args, "-crow-fixed-check") == "old";
             string capValue = CrowFlags.Value(args, "-crow-physics-cap") ?? (Application.platform == RuntimePlatform.PSP2 ? "2" : null);
-            if (capValue != null) Cap(capValue);
             // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
             if (value == null && Application.platform == RuntimePlatform.PSP2) value = "30";
             float number;
             if (Check.On) Hook();  // also at the game's step, for its numbers
-            if (value == null || value == "game" || !float.TryParse(value, System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out number) || number <= 0f) return;
-            Hook();
-            Set(number > 1f ? 1f / number : number);
+            if (value != null && value != "game" && float.TryParse(value, System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out number) && number > 0f)
+            {
+                Hook();
+                Set(number > 1f ? 1f / number : number);
+            }
+            // After the step, so the cap's line gives the step in use (it said fixedDeltaTime=0.0200 and
+            // maximumDeltaTime=0.0400 on every PS Vita launch before 21 Oct).
+            if (capValue != null) Cap(capValue);
         }
 
         // The step from now on (also Fight's physics test).
@@ -127,7 +134,7 @@ namespace CrowCompat
             compensate = keepGame;
             on = Mathf.Abs(step - GameStep) > 1e-6f && keepGame;
             Time.fixedDeltaTime = step;
-            if (capSteps > 0f) ApplyCap();
+            if (capSeconds > 0f) ApplyCap();
             // The bodies seen so far get their drags for the new step, from the game's.
             var known = new List<Rigidbody>(gameDrag.Keys);
             foreach (Rigidbody body in known)
@@ -146,7 +153,7 @@ namespace CrowCompat
             Debug.Log("CROW_FIXED step " + step.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) + " s" + (on ? " (game kept as at 0.02)" : compensate ? "" : " (uncompensated)"));
         }
 
-        // -crow-physics-cap's value: on (1 step), off, or a number of steps.
+        // -crow-physics-cap's value: on (1), off, or a number of thirtieths of a second (steps at 1/30).
         static void Cap(string value)
         {
             if (gameMaxDelta < 0f) gameMaxDelta = Time.maximumDeltaTime;
@@ -155,10 +162,10 @@ namespace CrowCompat
             else if (value == "off" || value == "game") steps = 0f;
             else if (!float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out steps) || steps < 0f)
                 return;
-            capSteps = steps;
-            if (capSteps > 0f) ApplyCap();
+            capSeconds = steps * CapUnit;
+            if (capSeconds > 0f) ApplyCap();
             else Time.maximumDeltaTime = gameMaxDelta;
-            Debug.Log("CROW_FIXED cap " + (capSteps > 0f ? capSteps.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + " steps" : "off") +
+            Debug.Log("CROW_FIXED cap " + (capSeconds > 0f ? steps.ToString("0.##", System.Globalization.CultureInfo.InvariantCulture) + "/30 s" : "off") +
                       ": maximumDeltaTime=" + Time.maximumDeltaTime.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) +
                       " fixedDeltaTime=" + Time.fixedDeltaTime.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture));
         }
@@ -166,7 +173,7 @@ namespace CrowCompat
         // Unity keeps maximumDeltaTime at least fixedDeltaTime.
         static void ApplyCap()
         {
-            Time.maximumDeltaTime = Mathf.Max(Time.fixedDeltaTime * capSteps, Time.fixedDeltaTime);
+            Time.maximumDeltaTime = Mathf.Max(capSeconds, Time.fixedDeltaTime);
         }
 
         static void Frame()
@@ -228,9 +235,18 @@ namespace CrowCompat
             if (madeAngular != angularDrag) body.angularDrag = madeAngular;
             madeFrom[Key(body.drag, body.angularDrag)] = game;
             if (Check.On) Check.Seen(body, game, copied, drag, angularDrag);
-            if (bulletCcd && step > GameStep && body.name.EndsWith("bullet", StringComparison.OrdinalIgnoreCase) && !body.isKinematic)
+            if (bulletCcd && step > GameStep && IsBullet(body.name) && !body.isKinematic)
                 body.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
             return 1;
+        }
+
+        // A bullet body by its name: Mara's prefab has "handgun bullet", "Flame bullet", "Magnum bullet", "shotgun
+        // bullet", and the Secret Costume's "handgun bullet secret" and the Crow Hat's "handgun bullet feather", which
+        // an ends-with test missed (left discrete at 1/30), as it missed every "(Clone)" in EnemyCost.Debris (21 Oct).
+        // No other body in the prefab or the scenes has "bullet" in its name.
+        internal static bool IsBullet(string name)
+        {
+            return name.IndexOf("bullet", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
         // -crow-fixed-check (old: clones get Drag() of their copied drags, as before 19 Oct, for A/B).

@@ -63,15 +63,15 @@ namespace CrowCompat
             captureAfter = CrowFlags.Number(args, "-crow-renderdoc", -1f);
             captures = Math.Max(1, (int)CrowFlags.Number(args, "-crow-renderdoc-count", 1f));
             if (after < 0f && captureAfter < 0f) return;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("Audit.sceneLoaded", (scene, mode) =>
             {
                 loadedAt = Time.realtimeSinceStartup;
                 if (!Fight.On && after >= 0f) nextAudit = loadedAt + after;
                 if (!Fight.On && captureAfter >= 0f && captured == 0) nextCapture = loadedAt + captureAfter;
-            };
+            });
             Camera.onPreCull += OnPreCull;
             Camera.onPostRender += OnPostRender;
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("Audit.Tick", Tick);
             Debug.Log("CROW_AUDIT on: after " + after + " s, every " + every + " s, " + frames + " frames; renderdoc " + captureAfter);
         }
 

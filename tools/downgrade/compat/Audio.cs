@@ -152,7 +152,7 @@ namespace CrowCompat
             }
             if (every > 0f)
             {
-                SceneManager.sceneLoaded += (scene, mode) => Debug.Log("CROW_AUDIO scene " + scene.name + " (" + mode + ") at " + Time.realtimeSinceStartup.ToString("F2", CultureInfo.InvariantCulture));
+                CrowEvents.Loaded("Audio.sceneLoaded", (scene, mode) => Debug.Log("CROW_AUDIO scene " + scene.name + " (" + mode + ") at " + Time.realtimeSinceStartup.ToString("F2", CultureInfo.InvariantCulture)));
                 Debug.Log("CROW_AUDIO probe every " + every + " s" + (tap ? ", mixer tap" : "") + "; output " + outputRate + " Hz");
             }
         }
@@ -359,15 +359,15 @@ namespace CrowCompat
                         CrowFlags.Value(args, "-crow-workers-share") != "off";
             ceiling = max;
             active = true;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("FilterGate.sceneLoaded", (scene, mode) =>
             {
                 nextFind = 0f;
                 // The new area's cap once it is the active scene; its first second (the load's tail) unwatched.
                 resolve = true;
                 watchFrom = Time.realtimeSinceStartup + 1f;
                 windowDsp = -1.0;
-            };
-            Canvas.willRenderCanvases += Update;
+            });
+            CrowEvents.Canvases("FilterGate.Update", Update);
             Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
         }
 
@@ -391,6 +391,7 @@ namespace CrowCompat
                 {
                     var filter = found as Behaviour;
                     if (filter == null || !filter.gameObject.scene.IsValid()) continue;
+                    if (!SharedReverb.GameHasOn(filter)) continue;  // off in the game (Pool's water wheel and tank): stays off
                     AudioSource source = filter.GetComponent<AudioSource>();
                     // A filter without a source on its object filters the listener's whole mix: left alone.
                     if (source == null && idleOnly) continue;
@@ -809,9 +810,27 @@ namespace CrowCompat
             string mode = CrowFlags.Value(args, "-crow-shared-reverb");
             on = mode == null ? Application.platform == RuntimePlatform.PSP2 && !args.Contains("-crow-audio-game") : mode != "off";
             gated = gatedByFilterGate;
-            SceneManager.sceneLoaded += (scene, loadMode) => nextFind = 0f;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Loaded("SharedReverb.sceneLoaded", (scene, loadMode) => nextFind = 0f);
+            CrowEvents.Canvases("SharedReverb.Frame", Frame);
             Debug.Log("CROW_AUDIO shared reverb " + (on ? "on" : "off") + (gated ? " (FilterGate switches the groups)" : ""));
+        }
+
+        // Whether the game has a filter on: its enabled state the first time CrowCompat sees it (both finds run before
+        // either switches it). Pool's water wheel and water tank carry a reverb the scene has off (m_Enabled 0, the
+        // only two of the rip's 193) and nothing in the game switches on; taken as on, SharedReverb grouped them and
+        // FilterGate gave them a shared reverb (heard on two sounds the game plays dry, and a cap slot the area's
+        // wanted reverbs lost), and Release left them on (21 Oct). Filters the game has off are left alone.
+        static readonly Dictionary<Behaviour, bool> gameOn = new Dictionary<Behaviour, bool>();
+
+        internal static bool GameHasOn(Behaviour filter)
+        {
+            bool has;
+            if (gameOn.TryGetValue(filter, out has)) return has;
+            if (gameOn.Count > 2000)
+                foreach (Behaviour gone in gameOn.Keys.Where(k => k == null).ToList()) gameOn.Remove(gone);
+            gameOn[filter] = has = filter.enabled;
+            if (!has) Debug.Log("CROW_AUDIO " + filter.GetType().Name + " " + Path(filter.transform) + " is off in the game: left alone");
+            return has;
         }
 
         internal static bool Owns(AudioReverbFilter filter)
@@ -941,7 +960,7 @@ namespace CrowCompat
             var sample = new Dictionary<string, AudioReverbFilter>();
             foreach (AudioReverbFilter filter in Resources.FindObjectsOfTypeAll<AudioReverbFilter>())
             {
-                if (filter == null || !filter.gameObject.scene.IsValid()) continue;
+                if (filter == null || !filter.gameObject.scene.IsValid() || !GameHasOn(filter)) continue;
                 Group group;
                 AudioSource source;
                 AudioMixerGroup dest;
@@ -1045,7 +1064,7 @@ namespace CrowCompat
             foreach (Member member in group.Members)
             {
                 if (member.Source != null) member.Source.outputAudioMixerGroup = group.Dest;
-                if (member.Filter != null) member.Filter.enabled = true;  // the game's state; FilterGate switches it from here
+                if (member.Filter != null) member.Filter.enabled = GameHasOn(member.Filter);  // the game's state; FilterGate switches it from here
                 if (!ReferenceEquals(member.Filter, null)) owner.Remove(member.Filter);
             }
             group.Alive = group.Routed = false;
@@ -1109,11 +1128,11 @@ namespace CrowCompat
             int index = Array.IndexOf(args, "-crow-reverb-null");
             float seconds;
             if (index + 2 < args.Length && float.TryParse(args[index + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds)) delay = seconds;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("ReverbNull.sceneLoaded", (scene, mode) =>
             {
                 if (startAt < 0f && !done && scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowMara") startAt = Time.realtimeSinceStartup + delay;
-            };
-            Canvas.willRenderCanvases += Frame;
+            });
+            CrowEvents.Canvases("ReverbNull.Frame", Frame);
             Debug.Log("CROW_RNULL to " + dir + " " + delay + " s after the first area");
         }
 
@@ -1324,14 +1343,14 @@ namespace CrowCompat
             recordDir = CrowFlags.Optional(args, "-crow-mix-record");
             censusAfter = CrowFlags.Number(args, "-crow-audio-census", -1f);
             if (!mute && recordDir == null && censusAfter < 0f) return;
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("MixProbe.sceneLoaded", (scene, mode) =>
             {
                 nextCheck = 0f;
                 if (censusAfter >= 0f) censusAt = Time.realtimeSinceStartup + censusAfter;
-            };
+            });
             Debug.Log("CROW_MIX probe:" + (mute ? " listener volume held at 0" : "") + (recordDir != null ? " recordings to " + recordDir : "") +
                       (censusAfter >= 0f ? " census " + censusAfter + " s after each load" : ""));
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Canvases("MixProbe.Frame", Frame);
         }
 
         internal static bool Mine(Behaviour behaviour)
@@ -2101,8 +2120,8 @@ namespace CrowCompat
             clip = AudioClip.Create("CrowDopplerTone", data.Length, 1, 48000, false);
             clip.SetData(data, 0);
             // Placed once the area has settled (Fight's setup is 12 s after the load).
-            SceneManager.sceneLoaded += (scene, mode) => placeAt = Time.realtimeSinceStartup + 14f;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Loaded("Doppler.sceneLoaded", (scene, mode) => placeAt = Time.realtimeSinceStartup + 14f);
+            CrowEvents.Canvases("Doppler.Frame", Frame);
             Debug.Log("CROW_DOPPLER probe every " + every + " s; output " + Rate + " Hz");
         }
 

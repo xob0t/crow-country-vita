@@ -40,8 +40,8 @@ namespace CrowCompat
             on = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "on";
             if (!on) return;
             log = args.Contains("-crow-idle-audio-log");
-            SceneManager.sceneLoaded += (scene, loadMode) => rescanAt = Time.realtimeSinceStartup + 2f;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Loaded("IdleAudio.sceneLoaded", (scene, loadMode) => rescanAt = Time.realtimeSinceStartup + 2f);
+            CrowEvents.Canvases("IdleAudio.Frame", Frame);
             Debug.Log("CROW_IDLE_AUDIO on: idle sources off after " + IdleSeconds + " s");
         }
 

@@ -193,12 +193,12 @@ namespace CrowCompat
                       ", allocations " + (classes != null ? "every " + reportEvery + " s" : "off") +
                       (stacks ? ", stacks every " + sampleEvery / 1024 + " KB to " + stackFile : ""));
             lastStamp = System.Diagnostics.Stopwatch.GetTimestamp();
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("Alloc.sceneLoaded", (scene, mode) =>
             {
                 if (scene.name == "CrowMara") return;  // the player's scene, loaded beside the title
                 counting = false;
                 countFrom = Time.realtimeSinceStartup + 5f;
-            };
+            });
             if (classes != null) countFrom = Time.realtimeSinceStartup + 5f;
             on = true;
         }
@@ -507,7 +507,7 @@ namespace CrowCompat
         {
             every = seconds;
             next = Time.realtimeSinceStartup + seconds;
-            Canvas.willRenderCanvases += Tick;
+            CrowEvents.Canvases("Clones.Tick", Tick);
         }
 
         static void Tick()
@@ -582,7 +582,7 @@ namespace CrowCompat
             }
             seenCollections = GC.CollectionCount(0);
             on = true;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Canvases("GcPace.Frame", Frame);
             Debug.Log("CROW_GC_PACE on: a collection in pauses after " + (pauseBytes / MB).ToString("0.#", CultureInfo.InvariantCulture) + " MB");
         }
 

@@ -43,11 +43,11 @@ namespace CrowCompat
             string casters = CrowFlags.Value(args, "-crow-casters");
             if (casters != null) Casters(casters);
             else if (Application.platform == RuntimePlatform.PSP2) Casters("player");
-            Merge.Install(args);
-            Cameras.Install(args);  // Cameras.cs: -crow-rt-cameras, -crow-camera-report
+            Diag.Guard("Merge", () => Merge.Install(args));
+            Diag.Guard("Cameras", () => Cameras.Install(args));  // Cameras.cs: -crow-rt-cameras, -crow-camera-report
             if (every <= 0f) return;
-            SceneManager.sceneLoaded += (scene, mode) => detail = true;
-            Application.onBeforeRender += Tick;
+            CrowEvents.Loaded("Draws.sceneLoaded", (scene, mode) => detail = true);
+            CrowEvents.BeforeRender("Draws.Tick", Tick);
         }
 
         static void Tick()
@@ -79,9 +79,9 @@ namespace CrowCompat
             else
             {
                 castersHooked = true;
-                SceneManager.sceneLoaded += (scene, mode) => lastCasters = -10f;
+                CrowEvents.Loaded("Draws.sceneLoaded 2", (scene, mode) => lastCasters = -10f);
                 SceneManager.sceneUnloaded += scene => Forget();
-                Application.onBeforeRender += CasterTick;
+                CrowEvents.BeforeRender("Draws.CasterTick", CasterTick);
             }
             CasterTick();
         }

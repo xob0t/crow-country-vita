@@ -79,7 +79,7 @@ namespace CrowCompat
             if (value != null) Set(value);
             logStart = reportStart = Counters();
             log = Array.IndexOf(args, "-crow-fsm-trim-log") >= 0;
-            if (log) Canvas.willRenderCanvases += Frame;
+            if (log) CrowEvents.Canvases("FsmTrim.Frame", Frame);
             Debug.Log("CROW_FSM_TRIM " + Describe());
         }
 

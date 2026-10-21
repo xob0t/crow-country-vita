@@ -73,7 +73,7 @@ namespace CrowCompat
             Far = CrowFlags.Number(args, "-crow-decor-far", Far);
             log = Array.IndexOf(args, "-crow-decor-log") >= 0;
             SceneManager.sceneUnloaded += scene => Views.Clear();
-            if (log) Canvas.willRenderCanvases += Views.Log;
+            if (log) CrowEvents.Canvases("Views.Log", Views.Log);
             string moverName = CrowFlags.Value(args, "-crow-find-movers");
             if (moverName != null)
             {
@@ -81,19 +81,19 @@ namespace CrowCompat
                 int at = Array.IndexOf(args, "-crow-find-movers");
                 if (at + 2 < args.Length) float.TryParse(args[at + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out after);
                 float due = -1f;
-                SceneManager.sceneLoaded += (scene, loadMode) =>
+                CrowEvents.Loaded("Decor.sceneLoaded", (scene, loadMode) =>
                 {
                     if (scene.name != "CrowGap" && scene.name != "CrowMara" && scene.name != "Title" && scene.name != "Logos") due = Time.realtimeSinceStartup + after;
-                };
-                Canvas.willRenderCanvases += () =>
+                });
+                CrowEvents.Canvases("Decor.willRenderCanvases", () =>
                 {
                     if (due < 0f || Time.realtimeSinceStartup < due) return;
                     due = -1f;
                     MotionReport.FindMovers(moverName);
-                };
+                });
             }
             if (Array.IndexOf(args, "-crow-player-tree") >= 0)
-                SceneManager.sceneLoaded += (scene, loadMode) =>
+                CrowEvents.Loaded("Decor.sceneLoaded 2", (scene, loadMode) =>
                 {
                     if (scene.name == "CrowGap" || scene.name == "CrowMara" || scene.name == "Title" || scene.name == "Logos") return;
                     GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
@@ -106,7 +106,7 @@ namespace CrowCompat
                     Merge.SplitMovers = true;
                     Debug.Log("CROW_PLAYER_TREE " + Merge.Split(player.scene, false));
                     Merge.SplitMovers = movers;
-                };
+                });
         }
 
         // -crow-player-tree: the player's hierarchy below its root, subtrees of 40 transforms or more to
@@ -533,7 +533,7 @@ namespace CrowCompat
         {
             every = seconds;
             next = Time.realtimeSinceStartup + seconds;
-            Application.onBeforeRender += Tick;
+            CrowEvents.BeforeRender("MotionReport.Tick", Tick);
             Debug.Log("CROW_MOTION on: every " + seconds + " s, " + Samples + " frames");
         }
 

@@ -46,11 +46,11 @@ namespace CrowCompat
             log = Array.IndexOf(args, "-crow-tween-log") >= 0;
             Detail = Array.IndexOf(args, "-crow-tween-detail") >= 0;
             census = CrowFlags.Number(args, "-crow-tween-census", -1f);
-            UnityEngine.SceneManagement.SceneManager.sceneLoaded += (scene, loadMode) =>
+            CrowEvents.Loaded("TweenProbe.sceneLoaded", (scene, loadMode) =>
             {
                 if (census > 0f) censusAt = Time.realtimeSinceStartup + 10f;
-            };
-            if (log || census > 0f) Canvas.willRenderCanvases += Tick;
+            });
+            if (log || census > 0f) CrowEvents.Canvases("TweenProbe.Tick", Tick);
         }
 
         // A -crow-cycle / -crow-fight-cycle / -crow-ab change; false when it isn't one of these.

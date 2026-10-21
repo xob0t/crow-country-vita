@@ -186,7 +186,7 @@ namespace CrowCompat
             if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
             phase = Phase.Loading;
-            SceneManager.sceneLoaded += (loaded, how) =>
+            CrowEvents.Loaded("Fight.sceneLoaded", (loaded, how) =>
             {
                 if (loaded.name == area.Scene && phase == Phase.Loading)
                 {
@@ -194,7 +194,7 @@ namespace CrowCompat
                     phase = Phase.Settle;
                     phaseStart = loadedAt;
                 }
-            };
+            });
             Debug.Log("CROW_FIGHT installed mode=" + mode + " area=" + area.Scene.Replace(' ', '_') + " seconds=" + F(seconds) +
                       " window=" + F(window) + " extra=" + extra + " fire=" + F(fireEvery));
         }

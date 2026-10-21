@@ -55,7 +55,7 @@ namespace CrowCompat
             string value = CrowFlags.Value(args, "-crow-fsm-compile");
             if (value != null) Set(value);
             log = CrowFlags.Has(args, "-crow-fsm-compile-log");
-            if (log) Canvas.willRenderCanvases += Frame;
+            if (log) CrowEvents.Canvases("FsmCompile.Frame", Frame);
             Debug.Log("CROW_FSM_COMPILE " + Describe());
         }
 

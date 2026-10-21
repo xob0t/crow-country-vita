@@ -106,8 +106,8 @@ namespace CrowCompat
             log = Array.IndexOf(args, "-crow-cuts-log") >= 0;
             if (Array.IndexOf(args, "-crow-input-bench") >= 0) InputBench.Install();
             SceneManager.sceneUnloaded += scene => FsmGate.Clear();
-            SceneManager.sceneLoaded += (scene, mode) => stainsAt = Time.realtimeSinceStartup + 2f;
-            Canvas.willRenderCanvases += Frame;
+            CrowEvents.Loaded("Cuts.sceneLoaded", (scene, mode) => stainsAt = Time.realtimeSinceStartup + 2f);
+            CrowEvents.Canvases("Cuts.Frame", Frame);
             Debug.Log("CROW_CUTS " + Describe());
         }
 
@@ -696,18 +696,18 @@ namespace CrowCompat
 
         internal static void Install()
         {
-            SceneManager.sceneLoaded += (scene, mode) =>
+            CrowEvents.Loaded("InputBench.sceneLoaded", (scene, mode) =>
             {
                 if (due == -1f && scene.name != "CrowGap" && scene.name != "CrowMara" && scene.name != "Title" && scene.name != "Logos")
                     due = Time.realtimeSinceStartup + 8f;
-            };
-            Canvas.willRenderCanvases += () =>
+            });
+            CrowEvents.Canvases("InputBench.willRenderCanvases", () =>
             {
                 if (due < 0f || Time.realtimeSinceStartup < due) return;
                 due = -2f;
                 Run();
                 RewiredProbe.Report();
-            };
+            });
         }
 
         static double Measure(Action action, int count)
