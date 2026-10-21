@@ -656,7 +656,7 @@ namespace CrowCompat
                     oldCameras++;
                     continue;
                 }
-                masks[camera] = camera.cullingMask;
+                masks[camera] = MenuCull.OwnMask(camera);  // a menu's culling is the menu's to drop (Cameras.cs)
                 camera.cullingMask = 0;
             }
         }
@@ -729,7 +729,7 @@ namespace CrowCompat
         // The area in (additive), before the other sceneLoaded handlers (hooked at startup).
         static void Arrived(Scene scene, LoadSceneMode mode)
         {
-            if (arriving == null || mode != LoadSceneMode.Additive || scene.name != arriving) return;
+            if (arriving == null || mode != LoadSceneMode.Additive || !Named(scene, arriving)) return;
             arriving = null;
             SceneManager.SetActiveScene(scene);
             Scene gap = SceneManager.GetSceneByName(Scene);
@@ -745,6 +745,17 @@ namespace CrowCompat
                 SceneManager.UnloadSceneAsync(gap);
             }
             Debug.Log("CROW_GAP " + scene.name + " in after " + clock.ElapsedMilliseconds + " ms (additive, " + moved + " objects its load made moved in from the gap)");
+        }
+
+        // A load names its scene as LoadScene takes it: by name ("Corridor S") or by path without "Assets/" and
+        // ".unity", as the saves keep it ("Scenes/Prefab/areas/Corridors/Save"); Scene.name is only the name. Until
+        // 21 Oct a save's load never matched: the gap stayed the active scene (its lighting settings: no fog) and
+        // stayed loaded until the next area change.
+        static bool Named(Scene scene, string name)
+        {
+            if (scene.name == name) return true;
+            string path = scene.path;
+            return path == name || path == "Assets/" + name + ".unity";
         }
     }
 
