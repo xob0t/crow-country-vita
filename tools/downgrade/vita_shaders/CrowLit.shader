@@ -55,6 +55,8 @@ Shader "CrowVita/Lit"
         // variant keeper), and a Legacy Diffuse material's own colour; -crow-lit game puts them back.
         [HideInInspector] _CrowLitFrom ("", Float) = 0
         [HideInInspector] _CrowLitColor ("", Color) = (1,1,1,1)
+        // The material's depth layer (asset_rules.DEPTH_LAYERS, PS Vita build): see CrowDepthLayerZ.
+        [HideInInspector] _CrowDepthLayer ("", Float) = 0
     }
 
     CGINCLUDE
@@ -116,6 +118,29 @@ Shader "CrowVita/Lit"
             half4 _CrowFill;          // a fill directional light: xyz the direction to it
             half4 _CrowFillColor;
 
+            // Depth layers (21 Oct): surfaces laid a fraction of a millimetre over others (an end cap
+            // 0.3 mm in front of Fairy Forest's pale wall, decals on floors and walls) fight on the PS
+            // Vita, whose depth test can't separate them where Windows does. A material with layer n
+            // has its depth moved toward the camera by n times 1.4624e-5 d^2 metres at distance d
+            // (5.85 mm at 20 m, one 16-bit depth step of the Main Camera's 1-24 m), worked out from the
+            // camera's own near and far planes so it is the same in metres for every camera: -1 puts a
+            // wall or floor behind what lies on it, +1 lifts a decal. Fog and shadows keep the true
+            // depth. _CrowDebug 1 (-crow-lit-debug 1) switches the layers off, for comparisons.
+            float _CrowDepthLayer;
+            float _CrowDebug;
+
+            float CrowDepthLayerZ(float w)
+            {
+                // Window depth changes by n f / (f - n) / d^2 a metre at distance d.
+                float b = _ProjectionParams.y * _ProjectionParams.z / (_ProjectionParams.z - _ProjectionParams.y);
+                float shift = (_CrowDebug == 1 ? 0 : _CrowDepthLayer) * 1.4624e-5 * b;
+                #if defined(UNITY_REVERSED_Z)
+                    return shift * w;           // depth z / w, 1 at the near plane
+                #else
+                    return -2.0 * shift * w;    // depth (z / w + 1) / 2, 0 at the near plane (PS Vita)
+                #endif
+            }
+
             struct VertexOutputCrow
             {
                 UNITY_POSITION(pos);
@@ -148,6 +173,7 @@ Shader "CrowVita/Lit"
                     o.eyeVec.w = saturate(_Glossiness + UNIFORM_REFLECTIVITY());
                 #endif
                 UNITY_TRANSFER_FOG(o, o.pos);
+                o.pos.z += CrowDepthLayerZ(o.pos.w);
                 return o;
             }
 

@@ -1580,9 +1580,39 @@ VITA_LIT_FROM = {
 }
 DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectrics, gamma space
 
+# Depth layers (21 Oct, vita_shaders/CrowLit.shader's CrowDepthLayerZ): CrowVita/Lit materials whose depth
+# the PS Vita build moves by a layer, 5.85 mm at 20 m: -1 away from the camera (walls and floors that
+# things lie on), +1 toward it (decals). The PS Vita's depth test can't separate surfaces laid less than
+# about a millimetre over others at the game's camera distances where Windows does (Fairy Forest's
+# Fairytale Town gate: a black end cap 0.3 mm in front of `white painted wall` showed the wall through it).
+# The list comes from a survey of every scene's near-coplanar overlapping faces (work/scratch/zfight2):
+# per material the layer that settles the most of the pairs under 1 mm (by area and colour contrast)
+# while turning the fewest pairs within a layer's reach the wrong way; a material is all or nothing, so a
+# few pairs remain (a material in front in one place and behind in another). Matched by material name
+# (each must match a material saved with CrowVita/Lit); CROW_DEPTH_LAYERS=off leaves them out.
+DEPTH_LAYERS = {
+    -1: [
+        'break room floor', 'cell floor 1', 'concrete floor 2', 'door metal 3', 'handgun ammo card 1',
+        'lab floor 1', 'leaf floor', 'main wall', 'mega byte magazine 2', 'metal trash can 2',
+        'parking concrete 1', 'road sign 1', 'shotgun case 2', 'shower 2', 'side wall 1', 'soda cup 2',
+        'soil', 'stone 1', 'toy shop carpet', 'water ripple', 'white painted wall',
+    ],
+    1: [
+        'concrete floor 12', 'concrete gradient', 'concrete gradient 1', 'grass 4', 'handgun ammo box',
+        'pond moulde 1', 'soil circle', 'text', 'window blood',
+    ],
+}
+
 
 def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
-    """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit."""
+    """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
+    with their DEPTH_LAYERS."""
+    import os
+
+    layers = {}
+    if os.environ.get('CROW_DEPTH_LAYERS', 'on') != 'off':
+        layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
+    layered = {}
     shaders = dict(VITA_LIT_FROM)
     sfb = exported / 'Assets' / 'Shader' / 'SFBStandard.shader.meta'
     if sfb.exists():
@@ -1610,13 +1640,20 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
             keywords = re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M)
             words = set(keywords.group(1).split()) | {'_GLOSSYREFLECTIONS_OFF', '_SPECULARHIGHLIGHTS_OFF'}
             text = text[: keywords.start(1)] + ' ' + ' '.join(sorted(words)) + text[keywords.end(1) :]
+        name = re.search(r'^  m_Name: ?(.*)$', text, re.M)
+        if name and name.group(1) in layers:
+            floats['_CrowDepthLayer'] = str(layers[name.group(1)])
+            layered[name.group(1)] = layered.get(name.group(1), 0) + 1
         text = set_properties(text, 'm_Floats', floats)
         text = set_properties(text, 'm_Colors', colors)
         result[relative] = text.encode('utf-8')
         counts[kind] += 1
+    missing = sorted(set(layers) - set(layered))
+    if missing:
+        sys.exit(f'DEPTH_LAYERS names no CrowVita/Lit material: {missing}')
     log(
         f'CrowVita/Lit saved into {sum(counts)} materials: {counts[1]} Standard, {counts[2]} SFBStandard, '
-        f'{counts[3]} Legacy Diffuse'
+        f'{counts[3]} Legacy Diffuse; depth layers in {sum(layered.values())} of them'
     )
     return result
 
