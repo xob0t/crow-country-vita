@@ -41,6 +41,15 @@ reboot, args) refuse while someone else holds the vita-device lock (lock.py): th
 `lock.py run vita-device ...` (CROW_LOCK) or with CROW_HOLDER=<the lock's holder name> after
 `lock.py take`. A free lock lets them run as before.
 
+sync, install and seed read the build folder under the vita-build lock (taken without waiting for
+pc-build), so a build or quickcode can't rewrite the files while they go out: before (21 Oct) a sync
+during a quickcode could send the new il2CppAssemblies.suprx with the old global-metadata.dat, or a
+module half copied, and the game crashed at launch. They wait up to --build-wait seconds (default
+900) for a build that holds it, then stop (exit 75). Inside `lock.py run vita-build ...` (CROW_LOCKS,
+also through a `lock.py run vita-device` in it) or with CROW_HOLDER naming the holder of a `lock.py
+take vita-build`, the build is the caller's and they don't wait. A job holding vita-device that waits
+here for a build that wants vita-device next waits until one of the two waits ends.
+
 An FTP transfer cut off mid-way (vita.py killed while it sends or reads a file) can leave the
 console's FTP server hung until the console reboots, so don't kill vita.py while it transfers. Ctrl+C
 or Ctrl+Break lets the file in progress finish and then stops; a second one ends the transfer at once
@@ -91,6 +100,7 @@ WORDS = {'do': None, 'args': None, 'shot': 1, 'files': 1}
 KEEP_AWAKE = 'nosleep on; screen on'
 KEEP_AWAKE_SECONDS = 10
 WAKE_SECONDS = 5  # how long wake waits for the screen to draw again after a "screen on"
+BUILD_WAIT_SECONDS = 900  # how long sync, install and seed wait for a build holding vita-build (reading)
 
 
 class Unreachable(OSError):
@@ -219,36 +229,37 @@ def shot(out: Path):
     print(f'saved {out}')
 
 
-def install(build: Path):
+def install(build: Path, build_wait=BUILD_WAIT_SECONDS):
     """Packages the build's VPK and streams it to vitacompanion's install command
     ("install - <size>", then the VPK; the Vita extracts it as it arrives), then records
     the build as synced."""
     require('install')
-    vpk = pipeline.package_vita(build)
-    size = vpk.stat().st_size
-    with (
-        socket.create_connection(pipeline.VITA_COMMANDS, timeout=30) as connection,
-        vpk.open('rb') as handle,
-        transferring(f'sending and installing {vpk.name}'),
-    ):
-        connection.sendall(f'install - {size}\n'.encode())
-        connection.settimeout(300)  # the Vita stops reading while it writes out large files
-        sent, started, shown = 0, time.time(), 0
-        while chunk := handle.read(1 << 20):
-            connection.sendall(chunk)
-            sent += len(chunk)
-            if sent - shown >= 100 << 20 or sent == size:
-                shown = sent
-                log(f'Sent {sent >> 20} of {size >> 20} MB ({sent / 2**20 / (time.time() - started):.1f} MB/s)')
-        connection.settimeout(1800)  # promoting a large package takes a while after the last byte
-        reply = b''
-        while not reply.endswith(b'\n') and (chunk := connection.recv(4096)):
-            reply += chunk
-    reply = reply.decode(errors='replace').strip()
-    print(reply)
-    if not reply.startswith('Installed'):
-        sys.exit(f'Installation failed: {reply}')
-    seed(build)
+    with reading(build, build_wait):
+        vpk = pipeline.package_vita(build)
+        size = vpk.stat().st_size
+        with (
+            socket.create_connection(pipeline.VITA_COMMANDS, timeout=30) as connection,
+            vpk.open('rb') as handle,
+            transferring(f'sending and installing {vpk.name}'),
+        ):
+            connection.sendall(f'install - {size}\n'.encode())
+            connection.settimeout(300)  # the Vita stops reading while it writes out large files
+            sent, started, shown = 0, time.time(), 0
+            while chunk := handle.read(1 << 20):
+                connection.sendall(chunk)
+                sent += len(chunk)
+                if sent - shown >= 100 << 20 or sent == size:
+                    shown = sent
+                    log(f'Sent {sent >> 20} of {size >> 20} MB ({sent / 2**20 / (time.time() - started):.1f} MB/s)')
+            connection.settimeout(1800)  # promoting a large package takes a while after the last byte
+            reply = b''
+            while not reply.endswith(b'\n') and (chunk := connection.recv(4096)):
+                reply += chunk
+        reply = reply.decode(errors='replace').strip()
+        print(reply)
+        if not reply.startswith('Installed'):
+            sys.exit(f'Installation failed: {reply}')
+        seed(build)
 
 
 @contextlib.contextmanager
@@ -360,8 +371,36 @@ def seed(build: Path):
     keep_symbols(build)
 
 
-def sync(build: Path):
+@contextlib.contextmanager
+def reading(build: Path, wait=BUILD_WAIT_SECONDS):
+    """Holds the vita-build lock while the build's files are read, unless the caller's job holds it
+    (lock.held_here, or CROW_HOLDER naming the holder of a take): see the module's description."""
+    text = lock.holder_of('vita-build')
+    mine = os.environ.get('CROW_HOLDER', '')
+    if 'vita-build' in lock.held_here() or (text and mine and lock.owner(mine) == lock.owner(text)):
+        yield
+        return
+    holder = f'vita.py {os.getpid()}: reading {build.name} for the console'
+    if lock.take('vita-build', holder, wait, process=True, alone=True) != 0:
+        print(
+            f'vita.py: a build still holds vita-build after {wait:.0f} s and may be writing {build}; '
+            'try again later (--build-wait SECONDS waits longer)',
+            file=sys.stderr,
+        )
+        sys.exit(lock.NOT_TAKEN)
+    try:
+        yield
+    finally:
+        lock.release('vita-build', holder)
+
+
+def sync(build: Path, build_wait=BUILD_WAIT_SECONDS):
     """Uploads the build's app files whose content changed since the last sync."""
+    with reading(build, build_wait):
+        sync_files(build)
+
+
+def sync_files(build: Path):
     synced = json.loads(MANIFEST.read_text()) if MANIFEST.exists() else {}
     connection = ftp()
     try:
@@ -803,6 +842,13 @@ def run_command():
     )
     parser.add_argument('--dump', type=Path, help='crashes: symbolize this local dump instead (no console needed)')
     parser.add_argument('--show', action='store_true', help='args: print the flags of the next launch, change nothing')
+    parser.add_argument(
+        '--build-wait',
+        type=float,
+        default=BUILD_WAIT_SECONDS,
+        metavar='SECONDS',
+        help=f'sync, run, install, seed: seconds to wait for a build holding vita-build (default {BUILD_WAIT_SECONDS})',
+    )
     # The options may come anywhere; everything else after the command is its words, in order (the
     # probe flags of args, the chain of do, the file of shot, the folder of files). The probe's flags
     # start with one dash; a word with two is an option this script doesn't have (it used to go into
@@ -827,13 +873,14 @@ def run_command():
     if args.command in ('quit', 'run'):
         print(quit_game())
     if args.command == 'seed':
-        seed(build)
+        with reading(build, args.build_wait):
+            seed(build)
     if args.command in ('sync', 'run'):
-        sync(build)
+        sync(build, args.build_wait)
     if args.command in ('launch', 'run'):
         print(launch_game())
     if args.command == 'install':
-        install(build)
+        install(build, args.build_wait)
     if args.command == 'do':
         print(command(' '.join(args.rest), timeout=30))
     if args.command == 'shot':

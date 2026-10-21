@@ -3,8 +3,10 @@ mouse from whoever uses the PC: Unity's players bring their window to the front 
 launcher asks, but a window on another desktop (CreateDesktop) cannot come in front of this one.
 The player runs windowed at 960x544 (-crow-windowed) and muted: -crow-mute, and Windows' per-app
 mute of its audio sessions for the whole run (mute_players.ps1). The project keeps
-runInBackground on. The player's log goes to <log> (through cmd's redirection,
-since a process on another desktop gets its standard handles from its command line).
+runInBackground on. The player's log goes to <log>: its standard output and error are a handle to
+the file it inherits (standard handles don't depend on the desktop). Until 21 Oct cmd's redirection
+did that, and cmd took >, |, &, ^ and % in the player's arguments for its own: `-crow-scene
+Pool>Roadside` ran Pool and wrote a file named Roadside.
 
     uv run tools/downgrade/run_player.py <exe> <log> [--timeout s] -- <player arguments...>
 
@@ -21,7 +23,6 @@ import os
 import shutil
 import subprocess
 import sys
-import time
 from pathlib import Path
 
 from common import split_at_dashes
@@ -57,12 +58,54 @@ class StartupInfo(ctypes.Structure):
     ]
 
 
+class StartupInfoEx(ctypes.Structure):
+    _fields_ = [('StartupInfo', StartupInfo), ('lpAttributeList', ctypes.c_void_p)]
+
+
 class ProcessInformation(ctypes.Structure):
     _fields_ = [('hProcess', wt.HANDLE), ('hThread', wt.HANDLE), ('dwProcessId', wt.DWORD), ('dwThreadId', wt.DWORD)]
 
 
+class SecurityAttributes(ctypes.Structure):
+    _fields_ = [('nLength', wt.DWORD), ('lpSecurityDescriptor', ctypes.c_void_p), ('bInheritHandle', wt.BOOL)]
+
+
+GENERIC_WRITE = 0x40000000
+FILE_SHARE_READ_WRITE = 0x3
+CREATE_ALWAYS = 2
+STARTF_USESTDHANDLES = 0x100
+EXTENDED_STARTUPINFO_PRESENT = 0x80000
+PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x20002
+INVALID_HANDLE = ctypes.c_void_p(-1).value
+
 user32.CreateDesktopW.restype = wt.HANDLE
 user32.CreateDesktopW.argtypes = [wt.LPCWSTR, wt.LPCWSTR, ctypes.c_void_p, wt.DWORD, wt.DWORD, ctypes.c_void_p]
+kernel32.CreateFileW.restype = wt.HANDLE
+kernel32.CreateFileW.argtypes = [
+    wt.LPCWSTR,
+    wt.DWORD,
+    wt.DWORD,
+    ctypes.POINTER(SecurityAttributes),
+    wt.DWORD,
+    wt.DWORD,
+    wt.HANDLE,
+]
+kernel32.InitializeProcThreadAttributeList.argtypes = [
+    ctypes.c_void_p,
+    wt.DWORD,
+    wt.DWORD,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+kernel32.UpdateProcThreadAttribute.argtypes = [
+    ctypes.c_void_p,
+    wt.DWORD,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_size_t,
+    ctypes.c_void_p,
+    ctypes.c_void_p,
+]
+kernel32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
 kernel32.CreateProcessW.argtypes = [
     wt.LPCWSTR,
     wt.LPWSTR,
@@ -72,7 +115,7 @@ kernel32.CreateProcessW.argtypes = [
     wt.DWORD,
     ctypes.c_void_p,
     wt.LPCWSTR,
-    ctypes.POINTER(StartupInfo),
+    ctypes.POINTER(StartupInfoEx),
     ctypes.POINTER(ProcessInformation),
 ]
 kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
@@ -83,13 +126,13 @@ kernel32.CloseHandle.argtypes = [wt.HANDLE]
 
 def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
     """Runs the player on DESKTOP; returns its exit code (1 if it was killed at the timeout).
-    on_start(pid), if given, is called with the player's process id once it runs (cmd starts it) and
-    may return a function to call when the run ends (fightbench.py's vitalike duty cycle)."""
+    on_start(pid), if given, is called with the player's process id once it runs and may return a
+    function to call when the run ends (fightbench.py's vitalike duty cycle)."""
     desktop = user32.CreateDesktopW(DESKTOP, None, None, 0, GENERIC_ALL, None)
     if not desktop:
         raise OSError(ctypes.get_last_error(), 'CreateDesktop failed')
     log.parent.mkdir(parents=True, exist_ok=True)
-    player = subprocess.list2cmdline(
+    command = subprocess.list2cmdline(
         [
             str(exe.resolve()),
             '-screen-fullscreen',
@@ -105,24 +148,51 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
             *arguments,
         ]
     )
-    command = f'cmd.exe /d /s /c "{player} > "{log.resolve()}" 2>&1"'
-    startup = StartupInfo()
-    startup.cb = ctypes.sizeof(StartupInfo)
-    startup.lpDesktop = DESKTOP
+    # The log, as cmd's > opened it (readable while the player writes it), for the player's standard
+    # output and error. The player inherits only this handle (the attribute list's handle list), not
+    # whatever another thread of the caller has open to inherit at that moment.
+    inherit = SecurityAttributes(ctypes.sizeof(SecurityAttributes), None, True)
+    output = kernel32.CreateFileW(
+        str(log.resolve()), GENERIC_WRITE, FILE_SHARE_READ_WRITE, ctypes.byref(inherit), CREATE_ALWAYS, 0, None
+    )
+    if output in (None, INVALID_HANDLE):
+        raise OSError(ctypes.get_last_error(), f'CreateFile failed for {log}')
+    size = ctypes.c_size_t()
+    kernel32.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(size))
+    attributes = ctypes.create_string_buffer(size.value)
+    handles = (wt.HANDLE * 1)(output)
     info = ProcessInformation()
-    if not kernel32.CreateProcessW(
-        None,
-        command,
-        None,
-        None,
-        False,
-        CREATE_NO_WINDOW,
-        None,
-        str(exe.parent),
-        ctypes.byref(startup),
-        ctypes.byref(info),
-    ):
-        raise OSError(ctypes.get_last_error(), 'CreateProcess failed')
+    try:
+        if not kernel32.InitializeProcThreadAttributeList(attributes, 1, 0, ctypes.byref(size)):
+            raise OSError(ctypes.get_last_error(), 'InitializeProcThreadAttributeList failed')
+        try:
+            if not kernel32.UpdateProcThreadAttribute(
+                attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, handles, ctypes.sizeof(handles), None, None
+            ):
+                raise OSError(ctypes.get_last_error(), 'UpdateProcThreadAttribute failed')
+            startup = StartupInfoEx()
+            startup.StartupInfo.cb = ctypes.sizeof(StartupInfoEx)
+            startup.StartupInfo.lpDesktop = DESKTOP
+            startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES
+            startup.StartupInfo.hStdOutput = startup.StartupInfo.hStdError = output
+            startup.lpAttributeList = ctypes.cast(attributes, ctypes.c_void_p)
+            if not kernel32.CreateProcessW(
+                None,
+                command,
+                None,
+                None,
+                True,
+                CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT,
+                None,
+                str(exe.parent),
+                ctypes.byref(startup),
+                ctypes.byref(info),
+            ):
+                raise OSError(ctypes.get_last_error(), 'CreateProcess failed')
+        finally:
+            kernel32.DeleteProcThreadAttributeList(attributes)
+    finally:
+        kernel32.CloseHandle(output)  # the player has its own
     stop = None
     # -crow-mute only holds the listener's volume, from CrowCompat's start on: Windows' per-app mute
     # covers everything the player outputs, for as long as this run (mute_players.ps1).
@@ -146,11 +216,10 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
     )
     try:
         if on_start is not None:
-            player_pid = child_process(info.dwProcessId, exe.name)
-            stop = on_start(player_pid) if player_pid else None
+            stop = on_start(info.dwProcessId)
         waited = kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF if timeout is None else int(timeout * 1000))
         if waited == WAIT_TIMEOUT:
-            # cmd and the player: the player is cmd's child; taskkill takes the tree.
+            # The player and anything it started (a crash handler).
             subprocess.run(['taskkill', '/T', '/F', '/PID', str(info.dwProcessId)], capture_output=True)
             return 1
         code = wt.DWORD()
@@ -162,43 +231,6 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
         muter.kill()
         kernel32.CloseHandle(info.hThread)
         kernel32.CloseHandle(info.hProcess)
-
-
-class ProcessEntry(ctypes.Structure):  # PROCESSENTRY32W
-    _fields_ = [
-        ('dwSize', wt.DWORD),
-        ('cntUsage', wt.DWORD),
-        ('th32ProcessID', wt.DWORD),
-        ('th32DefaultHeapID', ctypes.c_size_t),
-        ('th32ModuleID', wt.DWORD),
-        ('cntThreads', wt.DWORD),
-        ('th32ParentProcessID', wt.DWORD),
-        ('pcPriClassBase', wt.LONG),
-        ('dwFlags', wt.DWORD),
-        ('szExeFile', wt.WCHAR * 260),
-    ]
-
-
-def child_process(parent: int, name: str, wait=30.0):
-    """The id of the process called name that parent started (cmd's player), or None after wait seconds."""
-    kernel32.CreateToolhelp32Snapshot.restype = wt.HANDLE
-    kernel32.Process32FirstW.argtypes = [wt.HANDLE, ctypes.POINTER(ProcessEntry)]
-    kernel32.Process32NextW.argtypes = [wt.HANDLE, ctypes.POINTER(ProcessEntry)]
-    deadline = time.time() + wait
-    while time.time() < deadline:
-        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
-        entry = ProcessEntry()
-        entry.dwSize = ctypes.sizeof(ProcessEntry)
-        try:
-            more = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
-            while more:
-                if entry.th32ParentProcessID == parent and entry.szExeFile.lower() == name.lower():
-                    return entry.th32ProcessID
-                more = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
-        finally:
-            kernel32.CloseHandle(snapshot)
-        time.sleep(0.1)
-    return None
 
 
 # Steam's files, left out of every player copy: with them a test player once signed in to the user's

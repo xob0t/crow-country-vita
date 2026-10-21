@@ -12,6 +12,7 @@ from common import (
     NATIVE_ASSETS,
     WORK,
     YAML_FILES,
+    expect,
     folder_meta,
     game_data,
     guid_for,
@@ -115,6 +116,7 @@ def compat_component_overlay(exported: Path, overlay: dict, platform: str):
             replaced += count
             result[relative] = text.encode('utf-8')
     log(f'Replaced {replaced} components the {platform} player lacks with CrowCompat scripts')
+    expect(replaced, 4, f'{platform}: VideoPlayers replaced with CrowCompat scripts')
     return result
 
 
@@ -156,6 +158,7 @@ def scene_reference_overlay(exported: Path, overlay: dict):
             result[relative] = text.encode('utf-8')
             cut += count
     log(f'Cut {cut} references from {len(result)} assets to scene objects')
+    expect(cut, 70, "references to scene objects cut (I2 Localization's targets)")
     return result
 
 
@@ -193,6 +196,7 @@ def canvas_channel_overlay(exported: Path, overlay: dict):
             if new != text:
                 result[relative] = new.encode('utf-8')
     log(f'Canvases passing uv2 for UIPixelate: {changed} in {len(result)} files')
+    expect(changed, 14, 'canvases passing uv2 for UIPixelate')
     return result
 
 
@@ -280,6 +284,7 @@ def rewired_vita_overlay(exported: Path, overlay: dict, platform: str):
             if new is not None:
                 result[relative] = new.encode('utf-8')
     log(f'Rewired: PS Vita joystick maps (shoulder 1 on L and R) in {len(result)} files')
+    expect(len(result), 63, 'files with Rewired PS Vita joystick maps')
     return result
 
 
@@ -1286,6 +1291,7 @@ def i2_font_overlay(exported: Path, overlay: dict, excluded: set):
         )
         moved[I2_SOURCE] = (text[: block.start(1)] + kept + text[block.end(1) :]).encode('utf-8')
     log(f'I2 Localization: {len(dropped)} CJK font assets and materials load from Resources on demand')
+    expect(len(dropped), 41, 'I2 Localization CJK font assets and materials loaded on demand')
     return moved, gone
 
 

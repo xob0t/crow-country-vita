@@ -12,6 +12,7 @@ import re
 import subprocess
 import sys
 import time
+import types
 from pathlib import Path
 
 import progress
@@ -462,11 +463,67 @@ SCAN_CACHE = WORK / 'scan-cache'
 SCAN_THREADS = 16
 
 
+def code_fingerprint(function, seen=None):
+    """What a function computes, as text that is the same on every run: its bytecode and that of the
+    code it defines (lambdas, comprehensions), the names and constants they use, the values of plain
+    types (numbers, strings, patterns, collections of them) it reads from its module or its closure,
+    and the same of the tools' own functions it calls. Not what it reaches through other objects."""
+    seen = set() if seen is None else seen
+    if id(function) in seen:
+        return ''
+    seen.add(id(function))
+    parts, names = [], set()
+
+    def code(c):
+        parts.append(c.co_code.hex() + repr(c.co_names))
+        names.update(c.co_names)
+        for const in c.co_consts:
+            if isinstance(const, types.CodeType):
+                code(const)
+            else:
+                parts.append(plain(const) or type(const).__name__)
+
+    code(function.__code__)
+    values = []
+    for name, cell in zip(function.__code__.co_freevars, function.__closure__ or (), strict=True):
+        with contextlib.suppress(ValueError):  # a variable of the enclosing function not set yet
+            values.append((name, cell.cell_contents))
+    values += [(name, function.__globals__[name]) for name in sorted(names) if name in function.__globals__]
+    for name, value in values:
+        if isinstance(value, types.FunctionType) and Path(value.__code__.co_filename).parent == HERE:
+            parts.append(f'{name}=({code_fingerprint(value, seen)})')
+        elif (text := plain(value)) is not None:
+            parts.append(f'{name}={text}')
+    return ' '.join(parts)
+
+
+def plain(value):
+    """A value of a plain type as text that is the same on every run (sets sorted), or None."""
+    if value is None or isinstance(value, str | bytes | int | float | Path):
+        return repr(value)
+    if isinstance(value, re.Pattern):
+        return f're({value.pattern!r}, {value.flags})'
+    if isinstance(value, dict):
+        items = [(plain(key), plain(item)) for key, item in value.items()]
+        if any(key is None or item is None for key, item in items):
+            return None
+        return 'dict[' + ', '.join(sorted(f'{key}: {item}' for key, item in items)) + ']'
+    if isinstance(value, tuple | list | set | frozenset):
+        items = [plain(item) for item in value]
+        if None in items:
+            return None
+        return f'{type(value).__name__}[{", ".join(sorted(items) if isinstance(value, set | frozenset) else items)}]'
+    return None
+
+
 def scan(name: str, folder: Path, select, function, version=''):
     """{relative path: function(path)} for the files under folder whose relative path select() accepts.
     The results are kept in work/scan-cache/<name>.json under each file's size and modification time,
     so a rerun reads only the files that changed. function's result must be JSON; version names what
-    else it depends on (a change discards the cache)."""
+    else it depends on (a change discards the cache). So does a change to function itself or to what
+    code_fingerprint sees of it: before (21 Oct) an edited function, or a constant it reads such as
+    asset_rules.NAME_SEARCH_BYTES, went on with the results of the old one."""
+    version = f'{version} code {hashlib.sha256(code_fingerprint(function).encode()).hexdigest()[:16]}'
     cache_path = SCAN_CACHE / f'{name}.json'
     try:
         cache = json.loads(cache_path.read_text(encoding='utf-8'))
@@ -497,3 +554,15 @@ def scan(name: str, folder: Path, select, function, version=''):
         part.write_text(json.dumps({'version': version, 'files': fresh}), encoding='utf-8')
         part.replace(cache_path)  # whole, also with another run writing it at the same time
     return results
+
+
+def expect(count: int, minimum: int, what: str):
+    """Stop when a rule that must apply matched fewer than minimum (its count on the export it was
+    written for): a game update or another AssetRipper can turn it into a no-op that only logs 0, and
+    the console then shows the result (L and R doing nothing, a VideoPlayer hole that crashes the
+    player). Until 21 Oct these rules only logged their counts."""
+    if count < minimum:
+        sys.exit(
+            f'{what}: {count}, expected at least {minimum}. The export changed or the rule no longer matches '
+            'it; fix the rule, or lower its minimum where fewer is right.'
+        )

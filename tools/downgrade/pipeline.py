@@ -766,9 +766,14 @@ def editor_scripts():
 
 
 SYNC_RECORD = '.crow-sync.json'  # in the project's folder, outside Assets: the editor ignores it
+# Also there: the hashes of the rule sources (PROJECT_SOURCES) this project was assembled with, which
+# build saves for quickcode_check. Gone while assemble runs, so a project it didn't finish has none.
+PROJECT_INPUTS = '.crow-inputs.json'
 
 
 def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: str):
+    inputs = non_code_inputs(PROJECT_SOURCES)  # as this run reads them
+    (project / PROJECT_INPUTS).unlink(missing_ok=True)
     exported = rip_dir / 'ExportedProject'
     plugins, plugin_files, assemblies = assembly_overlay(exported, game, version, platform)
     assets, excluded = asset_overlay(exported, game, version, platform, assemblies)
@@ -791,6 +796,7 @@ def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: s
                 known.setdefault(part, {}),
             )
     record.write_text(json.dumps(known), encoding='utf-8')
+    (project / PROJECT_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
 
 
 # ---------------------------------------------------------------- build
@@ -821,6 +827,7 @@ def build(
     # take its staged assemblies for this build's (a leftover tempStrip ends its watch at once).
     shutil.rmtree(project / 'Temp', ignore_errors=True)
     warn_stale_plugins(project, version, platform)
+    inputs = build_inputs(project)
     variant = ('-il2cpp' if platform == 'windows' and backend == 'il2cpp' else '') + ('-scenes' if scenes else '')
     log_path = ARTIFACTS / f'build-{version}-{platform}{variant}.log'
     # The build entry point must match this script even if only the build stage reruns. Only the
@@ -873,8 +880,18 @@ def build(
     )
     if not written.exists() or written.stat().st_mtime < started:
         sys.exit(f'Unity reported success but did not write {written}')
-    if 'BuilderFailedException' in log_path.read_text(encoding='utf-8', errors='replace'):
+    log_text = log_path.read_text(encoding='utf-8', errors='replace')
+    if 'BuilderFailedException' in log_text:
         sys.exit(f'Unity reported success but IL2CPP failed; see {log_path}')
+    check_scene_steps(log_text, log_path)
+    # What quickcode checks against, right after the checks: before (21 Oct) it was written last, so a
+    # build that failed after them (a native plugin, Ctrl+C) left a code stage without it, which
+    # quickcode then took for one from before the check existed and skipped it.
+    if platform == 'vita' and not scenes:
+        keep_linker_inputs(log_path)
+        plugins = sorted((project / 'Assets' / 'Plugins').glob('*.dll'))
+        (CODE_STAGE / LAYOUT).write_text('\n'.join(serialized_layout(plugins, version)) + '\n', encoding='utf-8')
+        (CODE_STAGE / NON_CODE_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
     if platform == 'vita':
         native_plugins(output)
         boot_config(output)
@@ -882,11 +899,29 @@ def build(
         folder = output if platform == 'vita' else output.parent
         folder.with_name(folder.name + '.txt').write_text('\n'.join(scenes) + '\n', encoding='utf-8')
         log(f'TEST BUILD of the first scene and {", ".join(scenes)} in {folder}')
-    elif platform == 'vita':
-        keep_linker_inputs(log_path)
-        plugins = sorted((project / 'Assets' / 'Plugins').glob('*.dll'))
-        (CODE_STAGE / LAYOUT).write_text('\n'.join(serialized_layout(plugins, version)) + '\n', encoding='utf-8')
-        (CODE_STAGE / NON_CODE_INPUTS).write_text(json.dumps(non_code_inputs(), indent=1), encoding='utf-8')
+
+
+# The editor scripts' per-scene steps catch their exceptions, log them and go on, and Unity then
+# reports success: a merge or split that threw halfway leaves its scene as far as it got, and an
+# area whose MeshCombineStudio bake failed combines at run time again (Station Square -> Pool ran out
+# of memory that way). Their failure lines (MergeScenes.cs, PlayerMerge.cs: "<step> <scene> failed:
+# <exception>"; MeshCombineBake.cs, ProBuilderMeshes.cs: a summary with failed=N) fail the build.
+# CROW_ALLOW_SCENE_FAILURES=1 lets such a build through, with the warning, for experiments.
+SCENE_STEP_FAILED = re.compile(
+    r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE) .* failed: .*$|^DOWNGRADE_(?:MCS|PROBUILDER) .*\bfailed=[1-9].*$', re.M
+)
+
+
+def check_scene_steps(log_text: str, log_path: Path):
+    failed = [line[:SUMMARY_WIDTH] for line in SCENE_STEP_FAILED.findall(log_text)]
+    if not failed:
+        return
+    for line in failed[:20]:
+        log(f'  {line}')
+    message = f'{len(failed)} scene steps of the editor scripts failed (above; the first is in {log_path})'
+    if os.environ.get('CROW_ALLOW_SCENE_FAILURES') != '1':
+        sys.exit(f'{message}. The build is incomplete; CROW_ALLOW_SCENE_FAILURES=1 lets it through')
+    log(f'WARNING (CROW_ALLOW_SCENE_FAILURES=1): {message}')
 
 
 def log_build_steps(log_path: Path):
@@ -945,10 +980,16 @@ def warn_stale_plugins(project: Path, version: str, platform: str):
 
 # What quickcode compares with the last full PS Vita build, saved in the code stage by build: the
 # serialized layout of the build's assemblies (SerializedLayout.cs) and the hashes of the non-code
-# inputs of its project (NON_CODE_SOURCES, below the tools' folder).
+# inputs of its project (below the tools' folder): the rule sources as project read them
+# (PROJECT_SOURCES: the rules, common.py's asset lists, the PS Vita shaders vita_lit_overlay copies in,
+# the decompiler's patches) and the build script as build wrote it (BUILD_SOURCES). Before (21 Oct)
+# all of them were hashed when build ended, so a rule edited between project and build counted as
+# built, and the shaders and common.py weren't hashed at all.
 LAYOUT = 'serialized-layout.txt'
 NON_CODE_INPUTS = 'non-code-inputs.json'
-NON_CODE_SOURCES = ('*_rules.py', 'unity/*.cs', 'patches/*')
+PROJECT_SOURCES = ('*_rules.py', 'common.py', 'vita_shaders/*', 'patches/*')
+BUILD_SOURCES = ('unity/*.cs',)
+NON_CODE_SOURCES = PROJECT_SOURCES + BUILD_SOURCES
 
 
 def serialized_layout(dlls: list, version: str):
@@ -967,10 +1008,35 @@ def serialized_layout(dlls: list, version: str):
     return out.read_text(encoding='utf-8').splitlines()
 
 
-def non_code_inputs():
+def non_code_inputs(patterns=NON_CODE_SOURCES):
     """{file: SHA-256} of the tools' sources that shape the project's assets and the build script."""
-    files = sorted({path for pattern in NON_CODE_SOURCES for path in HERE.glob(pattern) if path.is_file()})
+    files = sorted({path for pattern in patterns for path in HERE.glob(pattern) if path.is_file()})
     return {path.relative_to(HERE).as_posix(): file_hash(path) for path in files}
+
+
+def build_inputs(project: Path):
+    """The non-code inputs of this build: the project's record of its rule sources, and the build
+    script's now (build writes it into the project). Warns when the rules changed since project ran:
+    the build has the project as it was."""
+    try:
+        inputs = json.loads((project / PROJECT_INPUTS).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        log(
+            f'WARNING: {project} has no {PROJECT_INPUTS} (assembled before 21 Oct, or project did not finish); '
+            "taking today's rule sources for the project's"
+        )
+        inputs = non_code_inputs(PROJECT_SOURCES)
+    changed = changed_inputs(inputs, non_code_inputs(PROJECT_SOURCES))
+    if changed:
+        log(
+            f'WARNING: {", ".join(changed)} changed since pipeline.py project assembled {project.name}; this build '
+            'has the project as it was: run project and build for the change'
+        )
+    return {**inputs, **non_code_inputs(BUILD_SOURCES)}
+
+
+def changed_inputs(before: dict, now: dict):
+    return sorted(name for name in before.keys() | now.keys() if before.get(name) != now.get(name))
 
 
 def quickcode_check(dlls: list, version: str, force: bool):
@@ -978,7 +1044,15 @@ def quickcode_check(dlls: list, version: str, force: bool):
     list other startup methods, which only a full build bakes into the player's data; warn when the
     asset rules or build script changed since that build, which quickcode doesn't apply."""
     if not (CODE_STAGE / LAYOUT).exists():
-        log(f'WARNING: the last full build saved no {LAYOUT} (built before quickcode checked it); not checked')
+        # build writes it right after its checks pass, and the editor's build deletes the stage first:
+        # the last full build failed or was stopped, and the build may not match its stage.
+        message = (
+            f'The last full PS Vita build saved no {LAYOUT} in {CODE_STAGE}: it failed or was stopped, so '
+            "quickcode can't check the serialized types against it. Run pipeline.py build --platform vita"
+        )
+        if not force:
+            sys.exit(message + ', or quickcode --force to go on unchecked.')
+        log('WARNING (--force): ' + message)
     else:
         before = (CODE_STAGE / LAYOUT).read_text(encoding='utf-8').splitlines()
         now = serialized_layout(dlls, version)
@@ -996,12 +1070,12 @@ def quickcode_check(dlls: list, version: str, force: bool):
             log('WARNING (--force): ' + message)
     if (CODE_STAGE / NON_CODE_INPUTS).exists():
         before = json.loads((CODE_STAGE / NON_CODE_INPUTS).read_text(encoding='utf-8'))
-        now = non_code_inputs()
-        changed = sorted(name for name in before.keys() | now.keys() if before.get(name) != now.get(name))
+        changed = changed_inputs(before, non_code_inputs())
         if changed:
             log(
                 f'WARNING: {", ".join(changed)} changed since the last full build; quickcode updates only the '
                 'code, so those changes need project and build'
+                + ('' if all(name in before for name in changed) else ' (a file it did not record counts as changed)')
             )
 
 
@@ -1011,7 +1085,14 @@ def quickcode_check(dlls: list, version: str, force: bool):
 # the build script (DowngradeBuild.SaveCodeStage) from the project's Temp folder, under their paths
 # there, and the linker's generated link XMLs (from the system's temp folder) in linker-xml.
 CODE_STAGE = WORK / 'vita-code-stage'
-LINKER_XML = re.compile(r'-x\s+"?([^"\s]+\.tmp)"?')
+# A link XML's argument, quoted or not: before (21 Oct) a quoted path with a space (a Windows account
+# named "John Smith") didn't match, and quickcode failed once the system's temp folder was cleaned.
+LINKER_XML = re.compile(r'-x\s+(?:"([^"]+\.tmp)"|([^"\s]+\.tmp))')
+
+
+def linker_xmls(arguments: str):
+    """The paths of the link XMLs in UnityLinker's argument string."""
+    return [quoted or bare for quoted, bare in LINKER_XML.findall(arguments)]
 
 
 def logged_arguments(log_text: str, tool: str):
@@ -1028,7 +1109,7 @@ def keep_linker_inputs(log_path: Path):
     arguments = logged_arguments(log_path.read_text(encoding='utf-8', errors='replace'), 'UnityLinker')
     folder = CODE_STAGE / 'linker-xml'
     folder.mkdir(parents=True, exist_ok=True)
-    for path in LINKER_XML.findall(arguments):
+    for path in linker_xmls(arguments):
         shutil.copy2(path, folder / Path(path).name)
 
 
@@ -1074,7 +1155,7 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
         if not (managed / dll.name).exists():
             sys.exit(f"{dll.name} is not among the last build's assemblies; this change needs a full build")
         shutil.copy2(dll, managed / dll.name)
-    for path in LINKER_XML.findall(linker_arguments):
+    for path in linker_xmls(linker_arguments):
         if not Path(path).exists():
             shutil.copy2(CODE_STAGE / 'linker-xml' / Path(path).name, path)
 
@@ -1121,11 +1202,23 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
         output / 'Media' / 'Modules' / 'il2CppAssemblies.suprx',
         output / 'SymbolFiles' / 'il2CppAssemblies.suprx',
     ):
-        shutil.copy2(module, target)
-    shutil.copy2(metadata, output / 'Media' / 'Metadata' / 'global-metadata.dat')
+        copy_whole(module, target)
+    copy_whole(metadata, output / 'Media' / 'Metadata' / 'global-metadata.dat')
     native_plugins(output)
     boot_config(output)
     log(f'Updated the code of {output} in {time.time() - started:.0f}s; vita.py sync uploads it')
+
+
+def copy_whole(source: Path, target: Path):
+    """Copy into <target>.part, then rename it over target: a quickcode stopped mid-copy leaves the
+    build's file whole (vita.py sync reads the build under the vita-build lock, see vita.py)."""
+    part = target.with_name(target.name + '.part')
+    try:
+        shutil.copy2(source, part)
+        os.replace(part, target)
+    except BaseException:
+        part.unlink(missing_ok=True)
+        raise
 
 
 # The PS Vita native plugins the player loads from Media/Plugins for [DllImport("<name>")]: the module

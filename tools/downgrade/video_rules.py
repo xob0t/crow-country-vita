@@ -16,7 +16,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from asset_rules import COMPAT_GUID, SCENE_REFERENCE_FOLDERS_SKIPPED, current_text, script_file_id
-from common import YAML_FILES, folder_meta, guid_for, listing, log, meta_guid, meta_of, scan
+from common import YAML_FILES, expect, folder_meta, guid_for, listing, log, meta_guid, meta_of, scan
 
 VIDEO_SUFFIXES = {'.webm', '.mp4', '.mov', '.ogv'}
 FOLDER = Path('Assets') / 'CrowVideo'
@@ -276,8 +276,7 @@ def video_overlay(exported: Path, overlay: dict, excluded: set, platform: str):
         for relative, stat in listing(assets).items()
         if stat is not None and relative.suffix.lower() in VIDEO_SUFFIXES
     )
-    if not videos:
-        return
+    expect(len(videos), 10, 'videos in the export')  # the health monitor's, Pool's, the ending's
     # name_overlay's moves of them ("<stem>/<original name>.webm" and its folder).
     for key in [
         k for k in overlay if k.suffix.lower() in VIDEO_SUFFIXES or Path(k.stem).suffix.lower() in VIDEO_SUFFIXES
@@ -327,3 +326,4 @@ def video_overlay(exported: Path, overlay: dict, excluded: set, platform: str):
             files += 1
             count += changed
     log(f'Videos: {len(videos)} clips as frame atlases ({frames} frames); {count} references in {files} files')
+    expect(count, 14, 'references to the videos made clip assets')

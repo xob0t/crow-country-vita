@@ -14,7 +14,8 @@ for the lock; the default, 0, fails at once and says who holds it and since when
 
 Only one pipeline.py runs at a time, whatever the platform: a build lock (vita-build, pc-build)
 counts as taken only while the other one is free; if the other appears right after, ours is
-released again and the wait goes on.
+released again and the wait goes on. vita.py's sync and install hold vita-build too while they read
+the PS Vita build (without waiting for pc-build), so no build rewrites the files they upload.
 
 `run` takes the lock, runs the command and releases the lock however the command ends; it exits
 with the command's code, 130 after Ctrl+C, or 75 if the lock was not taken in time. Ctrl+C reaches
@@ -23,7 +24,8 @@ an FTP transfer cut off mid-way hangs the console's FTP server); Ctrl+Break ends
 command and everything it starts run in a Windows job that ends with lock.py: if lock.py is killed
 (a shell or an agent's tool stopping it), the Unity editor it started doesn't go on building
 unsupervised, and the lock, which names lock.py's process, counts as free once that process is gone
-(take removes it). The command sees CROW_LOCK=<name>, which pipeline.py checks. For example:
+(take removes it). The command sees CROW_LOCK=<name>, which pipeline.py checks, and CROW_LOCKS, the
+names of all the runs it is in (vita.py sync checks for vita-build there). For example:
 
     uv run tools/downgrade/lock.py run pc-build "user: mono build" --wait 3600 -- \\
         bash -c "uv run tools/downgrade/pipeline.py project && uv run tools/downgrade/pipeline.py build"
@@ -62,21 +64,34 @@ def path(name):
     return WORK / f'{name}.lock'
 
 
+def text_of(name):
+    """The lock file's text, or None when it is free. UTF-8, as take writes it (the locale's code page
+    before 21 Oct: a holder with a non-ASCII name never matched in release). PermissionError: a lock
+    file being deleted (clear_stale) can't be opened for that moment."""
+    try:
+        return path(name).read_text(encoding='utf-8', errors='replace')
+    except (FileNotFoundError, PermissionError):
+        return None
+
+
+def first_line(text):
+    lines = (text or '').strip().splitlines()
+    return lines[0] if lines else None
+
+
 def holder_of(name):
     """The lock's first line ("<holder: purpose> HH:MM"), or None when it is free."""
-    try:
-        return path(name).read_text(errors='replace').strip().splitlines()[0]
-    except (FileNotFoundError, IndexError):
-        return None
+    return first_line(text_of(name))
+
+
+def pid_line(text):
+    found = re.search(r'^pid (\d+) (\d+)$', text or '', re.M)
+    return (int(found[1]), int(found[2])) if found else None
 
 
 def process_of(name):
     """(pid, start time) of the lock.py process holding the lock with run (its second line), or None."""
-    try:
-        found = re.search(r'^pid (\d+) (\d+)$', path(name).read_text(errors='replace'), re.M)
-    except FileNotFoundError:
-        return None
-    return (int(found[1]), int(found[2])) if found else None
+    return pid_line(text_of(name))
 
 
 def process_start(pid):
@@ -100,17 +115,77 @@ def process_start(pid):
         kernel32.CloseHandle(handle)
 
 
-def stale(name):
-    """Whether the lock names a run whose lock.py process has ended (killed before it could release
-    the lock). Its command ended with it (run's job)."""
-    holder = process_of(name)
+def stale_text(text):
+    """Whether a lock's text names a run whose lock.py process has ended (killed before it could
+    release the lock). Its command ended with it (run's job)."""
+    holder = pid_line(text)
     return holder is not None and process_start(holder[0]) != holder[1]
 
 
+def stale(name):
+    return stale_text(text_of(name))
+
+
+GENERIC_READ, DELETE = 0x80000000, 0x00010000
+SHARE_ALL = 0x7  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+SHARE_READ_DELETE = 0x5
+OPEN_EXISTING = 3
+FILE_DISPOSITION_INFO = 4  # FileDispositionInfo
+INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+
 def clear_stale(name):
-    if stale(name):
-        print(f'{name}: removing the lock of {holder_of(name)}, whose lock.py process has ended')
-        path(name).unlink(missing_ok=True)
+    """Remove the lock if it is stale. Only the file that was judged stale goes: it is opened, read and
+    judged through one handle, and deleted through a second one ReOpenFile makes from it (the same
+    file, whatever the name has become meanwhile). Before (21 Oct) it was read, then unlinked by name:
+    two waiters could both find the same stale lock, the first remove it and take the lock, and the
+    second then remove that new lock and take it too. The first handle shares everything, so a reader
+    (holder_of, an older lock.py) never fails on it; the second exists only for a stale lock."""
+    kernel32 = ctypes.windll.kernel32
+    kernel32.CreateFileW.restype = ctypes.c_void_p
+    uint, pointer = ctypes.c_uint32, ctypes.c_void_p
+    kernel32.CreateFileW.argtypes = [ctypes.c_wchar_p, uint, uint, pointer, uint, uint, pointer]
+    kernel32.ReOpenFile.restype = pointer
+    kernel32.ReOpenFile.argtypes = [pointer, uint, uint, uint]
+    kernel32.ReadFile.argtypes = [pointer, pointer, uint, pointer, pointer]
+    kernel32.SetFileInformationByHandle.argtypes = [pointer, ctypes.c_int, pointer, uint]
+    kernel32.CloseHandle.argtypes = [pointer]
+    handle = kernel32.CreateFileW(str(path(name)), GENERIC_READ, SHARE_ALL, None, OPEN_EXISTING, 0, None)
+    if handle in (None, INVALID_HANDLE):
+        return  # free, or being deleted
+    try:
+        buffer, size = ctypes.create_string_buffer(4096), ctypes.c_ulong()
+        if not kernel32.ReadFile(handle, buffer, len(buffer), ctypes.byref(size), None):
+            return
+        text = buffer.raw[: size.value].decode('utf-8', errors='replace').replace('\r\n', '\n')  # as read_text
+        if not stale_text(text):
+            return
+        # Refused while another job reads the file (it opens it without delete sharing): the next poll
+        # tries again.
+        deleting = kernel32.ReOpenFile(handle, GENERIC_READ | DELETE, SHARE_READ_DELETE, 0)
+        if deleting in (None, INVALID_HANDLE):
+            return
+        try:
+            delete = ctypes.c_ubyte(1)  # FILE_DISPOSITION_INFO.DeleteFile: the file goes when the handles close
+            if kernel32.SetFileInformationByHandle(deleting, FILE_DISPOSITION_INFO, ctypes.byref(delete), 1):
+                print(f'{name}: removed the lock of {first_line(text)}, whose lock.py process has ended', flush=True)
+        finally:
+            kernel32.CloseHandle(deleting)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def remove(lock):
+    """Delete our own lock file. Windows refuses while another job reads it (holder_of, for a moment):
+    try again for a second or two."""
+    for attempt in range(40):
+        try:
+            lock.unlink(missing_ok=True)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
 
 
 def other_build_locks(name):
@@ -132,10 +207,11 @@ def held_by(name):
     return f'{name} held by: {holding(name)}'
 
 
-def take(name, holder, wait, process=False):
-    """process: name this process in the lock (run), so a lock it can no longer release counts as free."""
+def take(name, holder, wait, process=False, alone=False):
+    """process: name this process in the lock (run), so a lock it can no longer release counts as free.
+    alone: don't wait for the other build lock (vita.py's sync, which only reads a build)."""
     lock = path(name)
-    others = other_build_locks(name)
+    others = [] if alone else other_build_locks(name)
     end = time.time() + wait
     own = f'pid {os.getpid()} {process_start(os.getpid())}\n' if process else ''
     waiting = False
@@ -146,7 +222,7 @@ def take(name, holder, wait, process=False):
         if busy is None:
             try:
                 fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
+            except (FileExistsError, PermissionError):  # PermissionError: the old one is being deleted
                 busy = name
             else:
                 os.write(fd, f'{holder} {time.strftime("%H:%M")}\n{own}'.encode())
@@ -154,7 +230,7 @@ def take(name, holder, wait, process=False):
                 busy = next((other for other in others if path(other).exists()), None)
                 if busy is None:
                     return 0
-                lock.unlink()  # the other build lock was taken in between: one pipeline at a time
+                remove(lock)  # the other build lock was taken in between: one pipeline at a time
         if time.time() >= end:
             print(held_by(busy), flush=True)
             return 1
@@ -198,8 +274,16 @@ def release(name, holder):
     if not owner(holder) or owner(text) != owner(holder):
         print(f'{name} is held by someone else: {text}')
         return 1
-    path(name).unlink()
+    remove(path(name))
     return 0
+
+
+def held_here():
+    """The locks the runs this process is in hold: CROW_LOCKS, which each run extends (`lock.py run
+    vita-build -- ... lock.py run vita-device -- vita.py sync` holds both), and CROW_LOCK, which an
+    older lock.py sets alone."""
+    names = [*os.environ.get('CROW_LOCKS', '').split(','), os.environ.get('CROW_LOCK', '')]
+    return [name for name in dict.fromkeys(names) if name]
 
 
 def run(name, holder, wait, command):
@@ -209,7 +293,8 @@ def run(name, holder, wait, command):
     if take(name, holder, wait, process=True) != 0:
         return NOT_TAKEN
     try:
-        return run_to_end(command, {**os.environ, 'CROW_LOCK': name})
+        locks = ','.join(dict.fromkeys([*held_here(), name]))
+        return run_to_end(command, {**os.environ, 'CROW_LOCK': name, 'CROW_LOCKS': locks})
     finally:
         release(name, holder)
 
@@ -274,6 +359,7 @@ def join_job_ending_with_this_process():
 
 
 def main(argv):
+    sys.stdout.reconfigure(errors='replace')  # a holder's name the console's code page lacks
     command = argv[argv.index('--') + 1 :] if '--' in argv else []
     argv = argv[: argv.index('--')] if '--' in argv else argv
     parser = argparse.ArgumentParser(
