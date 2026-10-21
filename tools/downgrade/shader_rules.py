@@ -261,6 +261,65 @@ def no_3d_samplers_on_psp2(text):
     return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S)
 
 
+# Linear fog. The decompiler writes the fog keyword as a shader_feature, so a build keeps the FOG_LINEAR
+# variant only where a material has the keyword on, which no material does: SFB/UnlitVertColourAlpha,
+# Unlit/TransparentColor, the legacy particles and ProBuilder's Standard Vertex Color drew with no fog on
+# every platform (the game's own build has the variant). FOG_LINEAR is a global keyword that Unity sets
+# from the scene's fog, so it becomes a multi_compile (the build still strips it where no scene uses linear
+# fog). The fog coordinate came out as DX11 computes it from the clip-space z (reversed z: from near at
+# the near plane to 0 at the far one): (1 - z / near) * far. On the PS Vita the clip-space z runs from
+# -near to far as in OpenGL, where that is below 0 past about three times the near plane, so a restored
+# variant would still draw no fog there. Each such line is rewritten to give UnityCG.cginc's
+# UNITY_Z_0_FAR_FROM_CLIPSPACE (copied, as these programs don't include UnityCG.cginc), so the next three
+# lines of the program, 1 - x, times far and max(x, 0), end at Unity's fog coordinate for the platform:
+# the same value as before on Direct3D, the clip-space z on the PS Vita and OpenGL (as Unity's own shaders
+# and CrowVita/Lit have it, which compat/Cameras.cs's NearPlane counts on).
+FOG_FEATURE = re.compile(r'^([ \t]*)#pragma shader_feature FOG_LINEAR[ \t]*$', re.M)
+FOG_COORDINATE = re.compile(r'^([ \t]*)(\w+\.[xyzw]) = ([\w.]+) / _ProjectionParams\.y;$')
+FOG_DEPTH = """#ifndef CROW_Z_0_FAR_FROM_CLIPSPACE
+#if defined(UNITY_REVERSED_Z) && UNITY_REVERSED_Z == 1
+#define CROW_Z_0_FAR_FROM_CLIPSPACE(coord) max(((1.0 - (coord) / _ProjectionParams.y) * _ProjectionParams.z), 0)
+#elif defined(UNITY_REVERSED_Z)
+#define CROW_Z_0_FAR_FROM_CLIPSPACE(coord) max(-(coord), 0)
+#else
+#define CROW_Z_0_FAR_FROM_CLIPSPACE(coord) (coord)
+#endif
+#endif"""
+
+
+def linear_fog(name, text):
+    """Returns the text with linear fog as above, how many FOG_LINEAR pragmas and fog coordinates changed."""
+    text, features = FOG_FEATURE.subn(r'\1#pragma multi_compile __ FOG_LINEAR', text)
+    lines = text.split('\n')
+    rewritten = 0
+    for index, line in enumerate(lines):
+        match = FOG_COORDINATE.match(line)
+        if not match:
+            continue
+        indent, target, depth = match[1], match[2], match[3]
+        # The decompiled sequence: x = z / near; y = 1.0 - x; y = y * far; y = max(y, 0.0); then y with
+        # unity_FogParams. A z / near the rule doesn't know stops the conversion.
+        after = '\n'.join(lines[index + 1 : index + 12])
+        step = re.search(rf'^\s*(\w+\.[xyzw]) = 1\.0 - {re.escape(target)};$', after, re.M)
+        far = step and re.search(rf'^\s*{re.escape(step[1])} = {re.escape(step[1])} \* _ProjectionParams\.z;$', after, re.M)
+        if not far or 'unity_FogParams' not in after:
+            sys.exit(f'{name}: the z / _ProjectionParams.y in line {index + 1} is not the fog sequence linear_fog knows')
+        lines[index] = f'{indent}{target} = 1.0 - CROW_Z_0_FAR_FROM_CLIPSPACE({depth}) * _ProjectionParams.w;'
+        rewritten += 1
+    text = '\n'.join(lines)
+    if '/ _ProjectionParams.y' in text:
+        sys.exit(f'{name}: a / _ProjectionParams.y that linear_fog did not rewrite')
+    if rewritten and not features:
+        sys.exit(f'{name}: fog coordinates without a FOG_LINEAR keyword')
+
+    def program(match):
+        if 'CROW_Z_0_FAR_FROM_CLIPSPACE(' not in match[2]:
+            return match[0]
+        return match[1] + FOG_DEPTH + '\n' + match[2]
+
+    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S), features, rewritten
+
+
 # Instructions the decompiler lost, per shader: (the decompiled text, with the instruction restored).
 # - SFB/CC02RedDitherPoster's fragment program indexes a 4x4 ordered dither table by
 #   (row << 2 & 12) + (column & 3), from texcoord1, the vertex program's uv times the source size
@@ -310,7 +369,7 @@ def shader_overlay(exported: Path, game: Path, version: str):
     decompiled = decompile_shaders(game)
     builtins = builtin_uniforms(version)
     conditional = conditional_uniforms(version)
-    overlay, missing = {}, []
+    overlay, missing, fog = {}, [], {}
     for path in (exported / 'Assets').rglob('*.shader'):
         text = path.read_text(encoding='utf-8', errors='replace')
         match = SHADER_NAME.match(text)
@@ -320,10 +379,14 @@ def shader_overlay(exported: Path, game: Path, version: str):
         if name not in decompiled:
             missing.append(name)
             continue
-        text = mask_logic(strip_builtin_declarations(fix_decompiler(name, decompiled[name]), builtins))
+        text, features, rewritten = linear_fog(name, fix_decompiler(name, decompiled[name]))
+        if features or rewritten:
+            fog[name] = f'{name} ({features} programs, {rewritten} fog coordinates)'
+        text = mask_logic(strip_builtin_declarations(text, builtins))
         text = declare_conditional_uniforms(guard_repeated_declarations(text), conditional)
         overlay[path.relative_to(exported)] = no_3d_samplers_on_psp2(text).encode()
     if missing:
         sys.exit(f'No decompiled source for the exported shaders {sorted(set(missing))}')
     log(f'Replaced {len(overlay)} dummy shaders')
+    log('Linear fog: ' + ', '.join(fog[name] for name in sorted(fog)))
     return overlay
