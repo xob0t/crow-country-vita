@@ -88,6 +88,7 @@ from common import (
     meta_of,
     mono_cecil,
     project_folder,
+    replace_path,
     rewritten_folder,
     run,
     stable_meta,
@@ -1228,16 +1229,25 @@ def copy_whole(files: dict):
     (vita.py sync reads the build under the vita-build lock, see vita.py). Before (21 Oct) each file was
     copied and renamed in turn, so one stopped after the module's rename left the new module with the
     old metadata, which crashes at launch. A .part a killed quickcode leaves behind is never sent
-    (vita_app_files); the next quickcode writes over it."""
+    (vita_app_files); the next quickcode writes over it. Each rename is tried again on PermissionError
+    (replace_path): before (22 Oct) Defender or the indexer reading a .part just closed could fail the
+    metadata's rename right after the module's, the same mismatch. If one still fails, say so."""
     parts = {target: target.with_name(target.name + '.part') for target in files}
+    renamed = []
     try:
         for target, source in files.items():
             shutil.copy2(source, parts[target])
         for target, part in parts.items():
-            os.replace(part, target)
+            replace_path(part, target)
+            renamed.append(target)
     except BaseException:
         for part in parts.values():
             part.unlink(missing_ok=True)
+        if renamed:
+            log(
+                f'ERROR: only {", ".join(t.name for t in renamed)} of {len(parts)} files updated: the build has '
+                'new and old code mixed, which crashes at launch; run quickcode again before vita.py sync'
+            )
         raise
 
 
@@ -1373,21 +1383,37 @@ def package_vita(build: Path) -> Path:
     return vpk
 
 
-def check_lock():
+def writes_vita_build(stage, platform):
+    """Whether the stage writes builds/crow-<version>-vita (or its VPK), which vita.py's sync, install and
+    seed read under vita-build as readers: a PS Vita build, package and quickcode (both PS Vita only)."""
+    return stage in ('package', 'quickcode') or (stage == 'build' and platform == 'vita')
+
+
+def check_lock(stage=None, platform='vita'):
     """Every stage writes in work/, builds/ or artifacts/, which other jobs share: one pipeline.py at a
     time, under lock.py run (which sets CROW_LOCKS). Without it, stop while another run holds a build
     lock, and warn otherwise (also for a lock taken without run, or by an older lock.py, whose holder
     can't be told from this process's parents). Every run this process is in counts (lock.held_here):
     before (21 Oct) only CROW_LOCK, the innermost run's, did, so `lock.py run vita-build -- lock.py run
-    vita-device -- ... pipeline.py` stopped on its own vita-build."""
+    vita-device -- ... pipeline.py` stopped on its own vita-build. A stage that writes the PS Vita build
+    (writes_vita_build) needs vita-build itself: pc-build doesn't wait for a sync's reader (lock.py), so
+    before (22 Oct) a PS Vita build or quickcode under pc-build could rewrite the files a sync was sending.
+    No stage (a script's own steps, such as a private quickcode into work/scratch): any build lock will do."""
     import lock
 
-    if set(lock.held_here()) & set(lock.BUILD_LOCKS):
+    needed = 'vita-build' if platform == 'vita' or writes_vita_build(stage, platform) else 'pc-build'
+    command = f'uv run tools/downgrade/lock.py run {needed} "<you>: <purpose>" --wait 1800 -- '
+    command += 'uv run tools/downgrade/pipeline.py ...'
+    here = set(lock.held_here())
+    if here & set(lock.BUILD_LOCKS):
+        if writes_vita_build(stage, platform) and 'vita-build' not in here:
+            sys.exit(
+                f'{stage} writes the PS Vita build, which vita.py sync reads alongside a pc-build run: '
+                f'run it under vita-build: {command}'
+            )
         return
     held = [name for name in lock.BUILD_LOCKS if lock.holder_of(name) and not lock.stale(name)]
     holders = ', '.join(f'{name} ({lock.holder_of(name)})' for name in held)
-    command = 'uv run tools/downgrade/lock.py run vita-build "<you>: <purpose>" --wait 1800 -- '
-    command += 'uv run tools/downgrade/pipeline.py ...'
     if any(lock.process_of(name) for name in held):
         sys.exit(f'Held by another run: {holders}. Wait for it: {command}')
     if held:
@@ -1422,7 +1448,7 @@ def main():
         '--force', action='store_true', help='quickcode: go on when the serialized types changed (see quick_code)'
     )
     args = parser.parse_args()
-    check_lock()
+    check_lock(args.stage, args.platform)
     if not args.version.startswith('2018.2.'):
         parser.error('the compatibility rules are written for Unity 2018.2')
     if not (game_data(args.game) / 'Managed' / 'Assembly-CSharp.dll').exists():

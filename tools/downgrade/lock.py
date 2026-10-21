@@ -14,13 +14,16 @@ for the lock; the default, 0, fails at once and says who holds it and since when
 
 Only one pipeline.py runs at a time, whatever the platform: a build lock (vita-build, pc-build)
 counts as taken only while the other one is free; if the other appears right after, ours is
-released again and the wait goes on. vita.py's sync, install and seed hold vita-build too while they
-read the PS Vita build, so no build rewrites the files they upload. They hold it as a reader (a
-"reader" line in the lock file): a reader and pc-build don't wait for each other, since a PC build
-never writes the PS Vita build; a vita-build taker (a build or quickcode) waits for the reader as for
-any holder, and wait vita-build too. Before (21 Oct) a sync or install held up every PC build for as
-long as it ran (an install's promote alone may take 30 minutes). An older lock.py takes a reader's
-lock for a build's, so it waits.
+released again and the wait goes on. vita.py's sync, install and seed (and run, before it quits the
+game) hold vita-build too while they read the PS Vita build, so no build rewrites the files they
+upload. They hold it as a reader (a "reader" line in the lock file): a reader and pc-build don't wait
+for each other, since a PC build never writes the PS Vita build; a vita-build taker (a build or
+quickcode) waits for the reader as for any holder, and wait vita-build too. So a job that writes the
+PS Vita build (pipeline.py build --platform vita, package, quickcode) runs under vita-build, never
+pc-build: pipeline.py stops otherwise (22 Oct). "Reader" is only about pc-build: two readers still
+exclude each other, as two holders of one lock do (a seed during a 30-minute install waits, then
+stops). Before (21 Oct) a sync or install held up every PC build for as long as it ran (an install's
+promote alone may take 30 minutes). An older lock.py takes a reader's lock for a build's, so it waits.
 
 `run` takes the lock, runs the command and releases the lock however the command ends; it exits
 with the command's code, 130 after Ctrl+C, or 75 if the lock was not taken in time. Ctrl+C reaches
@@ -29,11 +32,14 @@ an FTP transfer cut off mid-way hangs the console's FTP server); Ctrl+Break ends
 command and everything it starts run in a Windows job that ends with lock.py: if lock.py is killed
 (a shell or an agent's tool stopping it), the Unity editor it started doesn't go on building
 unsupervised, and the lock, which names lock.py's process, counts as free once that process is gone
-(take removes it). The command sees CROW_LOCK=<name>, which pipeline.py checks, and CROW_LOCKS, the
-names of all the runs it is in (vita.py sync checks for vita-build there). For example:
+(take removes it). The command sees CROW_LOCKS, the names of all the runs it is in (held_here), which
+pipeline.py, vita.py and fightbench.py check (a sync inside `lock.py run vita-build` is the build's
+own), and CROW_LOCK=<name>, the innermost run's, which build.py checks. For example, a Windows Mono
+player (pipeline.py's default platform is the PS Vita, whose stages run the same way under vita-build):
 
     uv run tools/downgrade/lock.py run pc-build "user: mono build" --wait 3600 -- \\
-        bash -c "uv run tools/downgrade/pipeline.py project && uv run tools/downgrade/pipeline.py build"
+        bash -c "uv run tools/downgrade/pipeline.py project --platform windows && \\
+                 uv run tools/downgrade/pipeline.py build --platform windows"
 
 The time spent waiting counts against whatever limits the caller's own run time: an agent's
 background command that is stopped at 2 hours stops lock.py and its command with it, wherever the

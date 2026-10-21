@@ -1588,18 +1588,24 @@ DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectric
 # The list comes from a survey of every scene's near-coplanar overlapping faces (work/scratch/zfight2):
 # per material the layer that settles the most of the pairs under 1 mm (by area and colour contrast)
 # while turning the fewest pairs within a layer's reach the wrong way; a material is all or nothing, so a
-# few pairs remain (a material in front in one place and behind in another). Matched by material name
-# (each must match a material saved with CrowVita/Lit); CROW_DEPTH_LAYERS=off leaves them out.
+# few pairs remain (a material in front in one place and behind in another). A layer only matters against
+# a surface that writes depth: two Fade or Transparent materials (_ZWrite 0) never depth-test each other,
+# so a pair of them is ordered by the renderers' back-to-front sort alone, as on Windows (22 Oct: Fairy
+# Pool's `pond moulde 1` and `water ripple` were in the list for nothing; the survey now leaves such pairs
+# out). Matched by material name (each must match a material saved with CrowVita/Lit). The game's
+# `-crow-lit-debug 1` switches the layers off at run time, for comparisons (22 Oct: there is no build
+# switch any more; CROW_DEPTH_LAYERS=off built without them and nothing recorded it, so a quickcode on
+# such a project didn't warn).
 DEPTH_LAYERS = {
     -1: [
         'break room floor', 'cell floor 1', 'concrete floor 2', 'door metal 3', 'handgun ammo card 1',
         'lab floor 1', 'leaf floor', 'main wall', 'mega byte magazine 2', 'metal trash can 2',
         'parking concrete 1', 'road sign 1', 'shotgun case 2', 'shower 2', 'side wall 1', 'soda cup 2',
-        'soil', 'stone 1', 'toy shop carpet', 'water ripple', 'white painted wall',
+        'soil', 'stone 1', 'toy shop carpet', 'white painted wall',
     ],
     1: [
         'concrete floor 12', 'concrete gradient', 'concrete gradient 1', 'grass 4', 'handgun ammo box',
-        'pond moulde 1', 'soil circle', 'text', 'window blood',
+        'soil circle', 'text', 'window blood',
     ],
 }
 
@@ -1607,11 +1613,7 @@ DEPTH_LAYERS = {
 def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
     """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
     with their DEPTH_LAYERS."""
-    import os
-
-    layers = {}
-    if os.environ.get('CROW_DEPTH_LAYERS', 'on') != 'off':
-        layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
+    layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
     layered = {}
     shaders = dict(VITA_LIT_FROM)
     sfb = exported / 'Assets' / 'Shader' / 'SFBStandard.shader.meta'

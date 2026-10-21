@@ -324,6 +324,20 @@ def remove_path(path: Path, function):
     return False
 
 
+def replace_path(source: Path, target: Path):
+    """os.replace, tried again on PermissionError as remove_path does: on Windows a file just written
+    (Defender or the indexer reading it) or a target open elsewhere without delete sharing refuses the
+    rename for a moment. Raises the last error when it never goes through."""
+    for attempt in range(REMOVE_ATTEMPTS):
+        try:
+            os.replace(source, target)
+            return
+        except PermissionError:
+            if attempt == REMOVE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.5)
+
+
 def github_source(repository, commit, digest, folder: Path):
     """A GitHub repository's files at a pinned commit, from its zip archive, into folder (replaced)."""
     import tempfile
