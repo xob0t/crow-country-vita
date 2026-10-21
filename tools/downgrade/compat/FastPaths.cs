@@ -50,7 +50,7 @@ namespace CrowCompat
             FastProperty.Check = property == "check";
             if (CrowFlags.Value(args, "-crow-lit-camera") == "game") VitaLit.CacheCamera = false;
             if (CrowFlags.Value(args, "-crow-fast-names") == "game") Names.On = false;
-            UnityEngine.SceneManagement.SceneManager.sceneUnloaded += scene => Names.Clear();
+            CrowEvents.Unloaded("FastPaths.sceneUnloaded", scene => Names.Clear());
         }
 
         // A -crow-cycle / -crow-ab change; false when it isn't one of these.

@@ -89,7 +89,7 @@ namespace CrowCompat
                 nextScan = Time.realtimeSinceStartup + 0.5f;
                 fullScan = true;
             });
-            SceneManager.sceneUnloaded += scene => Forget();
+            CrowEvents.Unloaded("FixedStep.sceneUnloaded", scene => Forget());
             CrowEvents.Canvases("FixedStep.Frame", Frame);
         }
 
@@ -196,7 +196,7 @@ namespace CrowCompat
                     foreach (GameObject root in scene.GetRootGameObjects())
                         foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true)) count += Adjust(body);
                 }
-                GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+                GameObject player = MaraScene.FindPlayer();
                 if (player != null)
                     foreach (GameObject root in player.scene.GetRootGameObjects())
                         foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true)) count += Adjust(body);

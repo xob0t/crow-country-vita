@@ -426,7 +426,7 @@ namespace CrowCompat
             if (mode == null || phase == Phase.Off || phase == Phase.Done) return;
             float now = Time.realtimeSinceStartup;
             // The frame's time by the wall clock: Unity clamps Time.unscaledDeltaTime to
-            // maximumDeltaTime too, which -crow-physics-cap lowers to one physics step.
+            // maximumDeltaTime too, which -crow-physics-cap sets to its cap (2/30 s on the PS Vita).
             frameMs = lastFrameAt >= 0f ? (now - lastFrameAt) * 1000f : Time.unscaledDeltaTime * 1000f;
             lastFrameAt = now;
             if (phase == Phase.Loading)
@@ -515,7 +515,7 @@ namespace CrowCompat
         static void Move(float[] place, float now)
         {
             moves.RemoveAt(0);
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             MonoBehaviour rig = player == null ? null : player.GetComponents<MonoBehaviour>().FirstOrDefault(b => b != null && b.GetType().Name == "CharacterAndCamera");
             if (rig == null || body == null) return;
             var marker = new GameObject("CrowFightSpot");
@@ -535,7 +535,7 @@ namespace CrowCompat
         static bool Setup()
         {
             Scene scene = SceneManager.GetSceneByName(area.Scene);
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             MonoBehaviour rig = player == null ? null : player.GetComponents<MonoBehaviour>().FirstOrDefault(b => b != null && b.GetType().Name == "CharacterAndCamera");
             if (!Reflect())
             {

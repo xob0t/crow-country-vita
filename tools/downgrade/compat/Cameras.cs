@@ -73,29 +73,32 @@ namespace CrowCompat
         static bool hooked;
         static float reportEvery = -1f, nextReport = -1f;
 
-        // Called from Draws.Install.
+        // Called from Quality.Install (after Draws' and Merge's). Each part under a Guard of its own (Diag.Guard),
+        // so the report (a probe) or one default that throws doesn't take the PS Vita defaults after it with it
+        // (one Guard for all before 21 Oct). The order is as before.
         public static void Install(string[] args)
         {
-            SysInfo();
+            Diag.Guard("Cameras.SysInfo", SysInfo);
             int index = Array.IndexOf(args, "-crow-camera-report");
             if (index >= 0)
-            {
-                float every;
-                reportEvery = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out every) ? every : 0f;
-                nextReport = 0f;
-                Hook();
-                Camera.onPreCull += Count;
-            }
+                Diag.Guard("Cameras.Report", () =>
+                {
+                    float every;
+                    reportEvery = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out every) ? every : 0f;
+                    nextReport = 0f;
+                    Hook();
+                    CrowEvents.PreCull("Cameras.Count", Count);
+                });
             string value = CrowFlags.Value(args, "-crow-rt-cameras") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
-            if (value != null) Set(value);
+            if (value != null) Diag.Guard("Cameras.RtCameras", () => Set(value));
             string menu = CrowFlags.Value(args, "-crow-menu-cull") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
-            if (menu != null) MenuCull.Set(menu == "on");
+            if (menu != null) Diag.Guard("MenuCull", () => MenuCull.Set(menu == "on"));
             string fog = CrowFlags.Value(args, "-crow-fog-far");
-            if (fog != null) FogFar(fog == "on");
+            if (fog != null) Diag.Guard("FogFar", () => FogFar(fog == "on"));
             string near = CrowFlags.Value(args, "-crow-near-plane") ?? (Application.platform == RuntimePlatform.PSP2 ? "1" : null);
             if (CrowFlags.Value(args, "-crow-near-fog") == "off") NearPlane.FogMap(false);
-            if (near != null) NearPlane.Set(near);
-            UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens parked
+            if (near != null) Diag.Guard("NearPlane", () => NearPlane.Set(near));
+            UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens and the rig's parked (each guarded there)
         }
 
         // -crow-fog-far: the main camera's far plane and background, and what they were.
@@ -207,7 +210,7 @@ namespace CrowCompat
                 rendered.Clear();
             });
             CrowEvents.BeforeRender("Cameras.Tick", Tick);
-            Camera.onPostRender += AfterRender;
+            CrowEvents.PostRender("Cameras.AfterRender", AfterRender);
         }
 
         // -crow-cycle's and -crow-ab's rtcams=<mode>.
@@ -510,7 +513,8 @@ namespace CrowCompat
     // enemies'), unseen=off|on (the level's enabled renderers that were not drawn switched off: what
     // culling them costs), ulights=off|on (the lights Unity still lights objects with, the directional
     // ones and VitaLit's key lights (culling mask 0) aside, switched off: the per-object light lists).
-    // Each logs what it switched (CROW_RENDER_COST).
+    // Each logs what it switched (CROW_RENDER_COST). (uiout=, the canvases' switched-off subtrees moved out
+    // with no EnemySplit routing, went on 21 Oct: UiPark.cs does that for good.)
     static class RenderCost
     {
         static readonly Dictionary<string, List<Behaviour>> offBehaviours = new Dictionary<string, List<Behaviour>>();
@@ -539,9 +543,6 @@ namespace CrowCompat
                         else if (value == "off" && canvas.renderMode == RenderMode.ScreenSpaceOverlay) Off(key, canvas);
                     }
                     break;
-                case "uiout":
-                    UiOut(value == "on");
-                    return true;
                 case "ulights":
                     Back(key);
                     if (value == "off")
@@ -639,55 +640,6 @@ namespace CrowCompat
             }
             Debug.Log("CROW_LEVEL_MATS drawn=" + n + " materials=" + byMaterial.Count + " " +
                       string.Join(" ", byMaterial.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
-        }
-
-        // uiout=on|off: the switched-off subtrees inside the enabled root canvases moved below an inactive
-        // root of their own (local poses kept), and back to their places: what a canvas's inactive
-        // RectTransforms cost its per-frame updates.
-        static readonly List<KeyValuePair<Transform, KeyValuePair<Transform, int>>> movedOut = new List<KeyValuePair<Transform, KeyValuePair<Transform, int>>>();
-        static GameObject outHolder;
-
-        static void UiOut(bool on)
-        {
-            for (int i = movedOut.Count - 1; i >= 0; i--)
-            {
-                Transform part = movedOut[i].Key, parent = movedOut[i].Value.Key;
-                if (part == null || parent == null) continue;
-                part.SetParent(parent, false);
-                part.SetSiblingIndex(movedOut[i].Value.Value);
-            }
-            int count = movedOut.Count, transforms = 0;
-            movedOut.Clear();
-            if (on)
-            {
-                if (outHolder == null)
-                {
-                    outHolder = new GameObject("CrowUiOut");
-                    outHolder.SetActive(false);
-                    UnityEngine.Object.DontDestroyOnLoad(outHolder);
-                }
-                var found = new List<Transform>();
-                foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
-                    if (canvas.enabled && canvas.isRootCanvas && canvas.renderMode == RenderMode.ScreenSpaceOverlay) Inactive(canvas.transform, found);
-                foreach (Transform part in found)
-                {
-                    movedOut.Add(new KeyValuePair<Transform, KeyValuePair<Transform, int>>(part, new KeyValuePair<Transform, int>(part.parent, part.GetSiblingIndex())));
-                    transforms += part.GetComponentsInChildren<Transform>(true).Length;
-                }
-                // Parents before children in the list, so putting back in reverse order restores sibling indices.
-                foreach (Transform part in found) part.SetParent(outHolder.transform, false);
-                count = movedOut.Count;
-            }
-            Debug.Log("CROW_RENDER_COST uiout=" + (on ? "on" : "off") + ": " + count + " subtrees" + (on ? ", " + transforms + " transforms" : " back"));
-        }
-
-        static void Inactive(Transform parent, List<Transform> found)
-        {
-            foreach (Transform child in parent)
-            {
-                if (!child.gameObject.activeSelf) found.Add(child);
-                else Inactive(child, found);
-            }
         }
 
         // canvases=report: each enabled root canvas, its place, mode and content, and in how many of the
@@ -903,14 +855,14 @@ namespace CrowCompat
                 UnityEngine.Rendering.GraphicsDeviceType device = SystemInfo.graphicsDeviceType;
                 glClip = device == UnityEngine.Rendering.GraphicsDeviceType.PlayStationVita || device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLCore ||
                          device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLES2 || device == UnityEngine.Rendering.GraphicsDeviceType.OpenGLES3;
-                Camera.onPreCull += PreCull;
-                Camera.onPostRender += PostRender;
-                SceneManager.sceneUnloaded += scene =>
+                CrowEvents.PreCull("NearPlane.PreCull", PreCull);
+                CrowEvents.PostRender("NearPlane.PostRender", PostRender);
+                CrowEvents.Unloaded("NearPlane.sceneUnloaded", scene =>
                 {
                     foreach (Camera gone in changed.Keys.Where(c => c == null).ToList()) changed.Remove(gone);
                     foreach (Camera gone in limits.Keys.Where(c => c == null).ToList()) limits.Remove(gone);
                     left.RemoveWhere(c => c == null);
-                };
+                });
             }
             // Every camera back to its own near plane, whatever comes next: PreCull starts again from the game's.
             // (Only for "game" before 21 Oct: 1 -> 0.5 m left the cameras at 1, and 1 -> 2 took 1 m for the game's

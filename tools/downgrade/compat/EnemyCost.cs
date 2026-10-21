@@ -78,7 +78,7 @@ namespace CrowCompat
                 Scene scene = SceneManager.GetSceneAt(i);
                 if (scene.isLoaded) count += Dynamic(scene.GetRootGameObjects());
             }
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             if (player != null) count += Dynamic(player.scene.GetRootGameObjects());
             int listeners = 0;
             foreach (AudioListener listener in UnityEngine.Object.FindObjectsOfType<AudioListener>())

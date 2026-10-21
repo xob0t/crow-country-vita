@@ -613,9 +613,7 @@ namespace CrowCompat
             bool classic = true;
             try
             {
-                Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
-                object globals = variables.GetProperty("GlobalVariables").GetValue(null, null);
-                object variable = variables.GetMethod("FindFsmBool", new[] { typeof(string) }).Invoke(globals, new object[] { "SETTINGSCombatControls" });
+                object variable = ByName.GlobalBool("SETTINGSCombatControls");
                 if (variable != null) classic = (bool)variable.GetType().GetProperty("Value").GetValue(variable, null);
             }
             catch (Exception)
@@ -766,17 +764,11 @@ namespace CrowCompat
             return type.GetProperty(name, BindingFlags.Public | BindingFlags.Static).GetValue(null, null);
         }
 
-        // The most derived public property of that name (Rewired's types redeclare some), or a field.
+        // The most derived public property of that name (Rewired's types redeclare some), or a field; a missing
+        // one throws (ByName, ProbeFiles.cs).
         static object Get(object target, string name)
         {
-            for (Type type = target.GetType(); type != null; type = type.BaseType)
-            {
-                PropertyInfo property = type.GetProperty(name, Instance | BindingFlags.DeclaredOnly);
-                if (property != null && property.GetIndexParameters().Length == 0) return property.GetValue(target, null);
-            }
-            FieldInfo field = target.GetType().GetField(name, Instance);
-            if (field == null) throw new MissingMemberException(target.GetType().FullName, name);
-            return field.GetValue(target);
+            return ByName.Get(target, name);
         }
 
         static object Call(object target, string name, int argument)

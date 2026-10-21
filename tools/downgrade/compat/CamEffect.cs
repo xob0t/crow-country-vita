@@ -132,7 +132,7 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneUnloaded += scene => ForgetDestroyed();
+                CrowEvents.Unloaded("CamEffect.sceneUnloaded", scene => ForgetDestroyed());
             }
             if (!Half) return;
             Type type = effect.GetType();

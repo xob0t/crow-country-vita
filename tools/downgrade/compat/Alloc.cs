@@ -195,7 +195,7 @@ namespace CrowCompat
             lastStamp = System.Diagnostics.Stopwatch.GetTimestamp();
             CrowEvents.Loaded("Alloc.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name == "CrowMara") return;  // the player's scene, loaded beside the title
+                if (scene.name == MaraScene.Scene) return;  // the player's scene, loaded beside the title
                 counting = false;
                 countFrom = Time.realtimeSinceStartup + 5f;
             });
@@ -675,7 +675,7 @@ namespace CrowCompat
             if (!hooked)
             {
                 hooked = true;
-                SceneManager.sceneUnloaded += scene => closures.Clear();
+                CrowEvents.Unloaded("SharedClosures.sceneUnloaded", scene => closures.Clear());
             }
             if (closures.Count >= 8192) closures.Clear();
             closures[((long)kind << 32) | (uint)unity.GetInstanceID()] = closure;

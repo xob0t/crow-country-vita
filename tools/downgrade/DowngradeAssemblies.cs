@@ -160,7 +160,6 @@ partial class DowngradeAssemblies
         new Pass("cuts", Scope.Game, CutsLightFlicker),
         new Pass("cuts", Scope.Game, CutsParticleBursts),
         new Pass("cuts", Scope.All, CutsRewired),
-        new Pass("rewiredsites", Scope.All, CutsRewiredSites),  // probing builds only: CROW_REWIRED_SITES=1
         // Pad.cs (PadUpdate after CutsRewired: its skip goes ahead of RewiredProbe.Begin)
         new Pass("pad", Scope.Game, PadQueries),
         new Pass("pad", Scope.Game, PadMaps),
@@ -439,7 +438,6 @@ partial class DowngradeAssemblies
         {
             if (pass.Scope == Scope.Game && !IsGameAssembly(module)) continue;
             if (pass.Group == "profile" && !Profiling) continue;
-            if (pass.Group == "rewiredsites" && Environment.GetEnvironmentVariable("CROW_REWIRED_SITES") != "1") continue;
             int sites = pass.Run(module);
             Count("pass " + pass.Name, sites);
             if (!lines.ContainsKey(pass.Group))

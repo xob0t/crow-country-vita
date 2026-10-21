@@ -105,7 +105,7 @@ namespace CrowCompat
             if ((value = CrowFlags.Value(args, "-crow-decor-visible")) != null) Change("decorvisible", value);
             log = Array.IndexOf(args, "-crow-cuts-log") >= 0;
             if (Array.IndexOf(args, "-crow-input-bench") >= 0) InputBench.Install();
-            SceneManager.sceneUnloaded += scene => FsmGate.Clear();
+            CrowEvents.Unloaded("Cuts.sceneUnloaded", scene => FsmGate.Clear());
             CrowEvents.Loaded("Cuts.sceneLoaded", (scene, mode) => stainsAt = Time.realtimeSinceStartup + 2f);
             CrowEvents.Canvases("Cuts.Frame", Frame);
             Debug.Log("CROW_CUTS " + Describe());
@@ -238,9 +238,7 @@ namespace CrowCompat
             bool on = value.Substring(colon + 1) == "true";
             try
             {
-                Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
-                object globals = variables.GetProperty("GlobalVariables").GetValue(null, null);
-                object variable = variables.GetMethod("FindFsmBool", new[] { typeof(string) }).Invoke(globals, new object[] { name });
+                object variable = ByName.GlobalBool(name);
                 variable.GetType().GetProperty("Value").SetValue(variable, on, null);
                 Debug.Log("CROW_CUTS pmglobal " + name + "=" + on);
             }
@@ -282,7 +280,7 @@ namespace CrowCompat
             stainParents.RemoveAll(t => t == null);
             if (stainParents.Count == 0)
             {
-                GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+                GameObject player = MaraScene.FindPlayer();
                 if (player == null) return;
                 foreach (GameObject root in player.scene.GetRootGameObjects())
                     foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
@@ -698,7 +696,7 @@ namespace CrowCompat
         {
             CrowEvents.Loaded("InputBench.sceneLoaded", (scene, mode) =>
             {
-                if (due == -1f && scene.name != "CrowGap" && scene.name != "CrowMara" && scene.name != "Title" && scene.name != "Logos")
+                if (due == -1f && Scenes.IsArea(scene))
                     due = Time.realtimeSinceStartup + 8f;
             });
             CrowEvents.Canvases("InputBench.willRenderCanvases", () =>
@@ -753,58 +751,27 @@ namespace CrowCompat
         static long began, ticks;
         static int calls;
 
+        // Rewired's InputManager updates (rewriter CutsRewired). While the pad reader serves (the PS Vita's
+        // default, Pad.cs) PadUpdate returns ahead of Begin, so this reads about 0 there: Rewired's time
+        // matters only with -crow-pad rewired|compare. (Mark and Sites, the probing builds' per-call-site
+        // booking of Rewired's update, rewriter CutsRewiredSites, went on 21 Oct: they were keyed on
+        // Rewired's obfuscated method names, and the pad reader skips that update on the PS Vita.)
         public static void Begin()
         {
-            began = last = System.Diagnostics.Stopwatch.GetTimestamp();
+            began = System.Diagnostics.Stopwatch.GetTimestamp();
         }
 
         public static void End()
         {
-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            ticks += now - began;
+            ticks += System.Diagnostics.Stopwatch.GetTimestamp() - began;
             calls++;
-            if (siteNames != null) siteTicks[0] += now - last;  // after the last mark
-        }
-
-        // Probing builds (rewriter CutsRewiredSites): the time since the last mark, booked to a call site.
-        static long last;
-        static long[] siteTicks;
-        static string[] siteNames;
-
-        public static void Mark(int site, string name)
-        {
-            long now = System.Diagnostics.Stopwatch.GetTimestamp();
-            if (siteNames == null)
-            {
-                siteNames = new string[4002];
-                siteTicks = new long[4002];
-                siteNames[0] = "tail";
-            }
-            site++;
-            siteTicks[site] += now - last;
-            if (siteNames[site] == null) siteNames[site] = name;
-            last = now;
-        }
-
-        static string Sites(int frames)
-        {
-            if (siteNames == null || frames <= 0) return "";
-            var order = new List<int>();
-            for (int i = 0; i < siteTicks.Length; i++)
-                if (siteTicks[i] > 0) order.Add(i);
-            order.Sort((a, b) => siteTicks[b].CompareTo(siteTicks[a]));
-            var line = new StringBuilder(" sites:");
-            for (int i = 0; i < order.Count && i < 25; i++)
-                line.Append(' ').Append(siteNames[order[i]]).Append('=').Append((siteTicks[order[i]] * 1e6 / System.Diagnostics.Stopwatch.Frequency / frames).ToString("0", CultureInfo.InvariantCulture));
-            Array.Clear(siteTicks, 0, siteTicks.Length);
-            return line.ToString();
         }
 
         // The InputManager's time per frame since the last call.
         internal static string Time(int frames)
         {
             string line = "rewired us/frame=" + (frames <= 0 ? 0 : ticks * 1e6 / System.Diagnostics.Stopwatch.Frequency / frames).ToString("0", CultureInfo.InvariantCulture) +
-                          " calls/frame=" + (frames <= 0 ? 0 : (float)calls / frames).ToString("0.0", CultureInfo.InvariantCulture) + Sites(frames);
+                          " calls/frame=" + (frames <= 0 ? 0 : (float)calls / frames).ToString("0.0", CultureInfo.InvariantCulture);
             ticks = 0;
             calls = 0;
             return line;
@@ -860,31 +827,15 @@ namespace CrowCompat
                 Debug.Log("CROW_CUTS rewired joysticks failed: " + exception);
             }
         }
-        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
-
-        // The most derived public property (or field) of that name: Rewired's types redeclare some.
-        static System.Reflection.PropertyInfo Property(object target, string name)
-        {
-            for (Type type = target.GetType(); type != null; type = type.BaseType)
-            {
-                System.Reflection.PropertyInfo property = type.GetProperty(name, Any | System.Reflection.BindingFlags.DeclaredOnly);
-                if (property != null) return property;
-            }
-            return null;
-        }
-
+        // The most derived public property (or field) of that name, null when there is none (ByName, ProbeFiles.cs).
         static object Get(object target, string name)
         {
-            if (target == null) return null;
-            System.Reflection.PropertyInfo property = Property(target, name);
-            if (property != null) return property.GetValue(target, null);
-            System.Reflection.FieldInfo field = target.GetType().GetField(name, Any);
-            return field == null ? null : field.GetValue(target);
+            return ByName.GetOrNull(target, name);
         }
 
         static void Set(object target, string name, bool value)
         {
-            Property(target, name).SetValue(target, value, null);
+            ByName.Property(target, name).SetValue(target, value, null);
         }
 
         static object Static(string name)

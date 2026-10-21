@@ -276,6 +276,7 @@ COMPAT_SOURCES = [
             'MapPan',
             'Clock',
             'Audio',
+            'AudioProbe',
             'Alloc',
             'IdleAudio',
             'VitaLit',

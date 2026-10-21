@@ -334,4 +334,53 @@ namespace CrowCompat
             return text != null && int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : fallback;
         }
     }
+
+    // Members of objects CrowCompat doesn't reference (Rewired's, PlayMaker's) read by name, through reflection.
+    // One copy since 21 Oct: the pad reader's (Pad.cs) and RewiredProbe's (Cuts.cs) had drifted apart (one passed
+    // over indexers, the other took a null target). Diag's -crow-input reader keeps its own: it also reads
+    // non-public members, and writes the error in its log line in place of a value.
+    static class ByName
+    {
+        const System.Reflection.BindingFlags Public = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
+
+        // The most derived public instance property of that name that takes no index (Rewired's types redeclare some).
+        internal static System.Reflection.PropertyInfo Property(object target, string name)
+        {
+            for (Type type = target.GetType(); type != null; type = type.BaseType)
+            {
+                System.Reflection.PropertyInfo property = type.GetProperty(name, Public | System.Reflection.BindingFlags.DeclaredOnly);
+                if (property != null && property.GetIndexParameters().Length == 0) return property;
+            }
+            return null;
+        }
+
+        // That property's value, else the public field's; no such member throws (the pad reader's tables need each one).
+        internal static object Get(object target, string name)
+        {
+            System.Reflection.PropertyInfo property = Property(target, name);
+            if (property != null) return property.GetValue(target, null);
+            System.Reflection.FieldInfo field = target.GetType().GetField(name, Public);
+            if (field == null) throw new MissingMemberException(target.GetType().FullName, name);
+            return field.GetValue(target);
+        }
+
+        // The same, but null for a null target or no such member (the probes' reports).
+        internal static object GetOrNull(object target, string name)
+        {
+            if (target == null) return null;
+            System.Reflection.PropertyInfo property = Property(target, name);
+            if (property != null) return property.GetValue(target, null);
+            System.Reflection.FieldInfo field = target.GetType().GetField(name, Public);
+            return field == null ? null : field.GetValue(target);
+        }
+
+        // PlayMaker's global bool of that name (FsmVariables.GlobalVariables.FindFsmBool): its FsmBool, null when the
+        // game has no such global; without PlayMaker it throws.
+        internal static object GlobalBool(string name)
+        {
+            Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
+            object globals = variables.GetProperty("GlobalVariables").GetValue(null, null);
+            return variables.GetMethod("FindFsmBool", new[] { typeof(string) }).Invoke(globals, new object[] { name });
+        }
+    }
 }

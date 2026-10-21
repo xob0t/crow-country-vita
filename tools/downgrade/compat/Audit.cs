@@ -69,8 +69,8 @@ namespace CrowCompat
                 if (!Fight.On && after >= 0f) nextAudit = loadedAt + after;
                 if (!Fight.On && captureAfter >= 0f && captured == 0) nextCapture = loadedAt + captureAfter;
             });
-            Camera.onPreCull += OnPreCull;
-            Camera.onPostRender += OnPostRender;
+            CrowEvents.PreCull("Audit.OnPreCull", OnPreCull);
+            CrowEvents.PostRender("Audit.OnPostRender", OnPostRender);
             CrowEvents.BeforeRender("Audit.Tick", Tick);
             Debug.Log("CROW_AUDIT on: after " + after + " s, every " + every + " s, " + frames + " frames; renderdoc " + captureAfter);
         }
@@ -266,7 +266,7 @@ namespace CrowCompat
 
         static bool IsPlayer(Transform t)
         {
-            return t.gameObject.scene.name == "DontDestroyOnLoad" || t.gameObject.scene.name == "CrowMara";
+            return t.gameObject.scene.name == "DontDestroyOnLoad" || t.gameObject.scene.name == MaraScene.Scene;
         }
 
         static void Measure()

@@ -56,7 +56,7 @@ namespace CrowCompat
             Hook();
             CrowEvents.Loaded("PhysCost.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name != "CrowMara") censusAt = Time.realtimeSinceStartup + censusAfter;
+                if (scene.name != MaraScene.Scene) censusAt = Time.realtimeSinceStartup + censusAfter;
             });
         }
 
@@ -275,7 +275,7 @@ namespace CrowCompat
 
         internal static string OwnerOf(Transform t)
         {
-            if (player == null) player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            if (player == null) player = MaraScene.FindPlayer();
             return OwnerOfKnown(t);
         }
 
@@ -291,7 +291,7 @@ namespace CrowCompat
 
         static void Begin()
         {
-            player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            player = MaraScene.FindPlayer();
             entries = new List<Entry>();
             foreach (Collider collider in UnityEngine.Object.FindObjectsOfType<Collider>())
             {

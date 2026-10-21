@@ -196,7 +196,7 @@ namespace CrowCompat
                 if (paren > 0) type = type.Substring(0, paren);
                 return new[] { "Enemy_" + type.Replace(' ', '_'), enemy.GetInstanceID().ToString(), gameObject.name.Replace(' ', '_') + ":" + detail.Replace(' ', '_') };
             }
-            string owner = root.name == "CharacterCameraPrefab(Clone)" ? "player" : "root:" + root.name;
+            string owner = root.name == MaraScene.PlayerName ? "player" : "root:" + root.name;
             return new[] { owner.Replace(' ', '_'), root.GetInstanceID().ToString(), gameObject.name.Replace(' ', '_') + ":" + detail.Replace(' ', '_') };
         }
 

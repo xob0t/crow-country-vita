@@ -38,8 +38,9 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             string value = CrowFlags.Value(args, "-crow-ui-park") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
-            if (value != null) Set(value);
-            RigPark.Install(args);
+            // Each under a Guard of its own (Diag.Guard, 21 Oct): one failing leaves the other.
+            if (value != null) Diag.Guard("UiPark", () => Set(value));
+            Diag.Guard("RigPark", () => RigPark.Install(args));
         }
 
         internal static bool Change(string key, string value)
@@ -272,7 +273,7 @@ namespace CrowCompat
         static Transform Rig()
         {
             if (rigFound != null) return rigFound;
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             Transform rig = player == null ? null : player.transform.Find("camera follow player");
             if (rig == null)
             {

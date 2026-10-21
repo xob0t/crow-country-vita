@@ -177,6 +177,7 @@ namespace CrowCompat
         // something else uses them, so -crow-lit game wants a build made with CROW_LIT_BAKE=off.
         static void Restore()
         {
+            bakedBuild = false;  // the materials put back are on their shaders: the next vita pass looks again
             if (lit == null) return;
             int restored = 0, missing = 0;
             int from = Shader.PropertyToID("_CrowLitFrom"), own = Shader.PropertyToID("_CrowLitColor");
@@ -222,6 +223,23 @@ namespace CrowCompat
         // them so): the later passes, for what the game creates or loads late, are then left out
         // (what it loads is saved so too).
         static bool baked;
+        // Since 21 Oct, once a first pass has found that, the first passes after later loads leave the
+        // material scan out too: Resources.FindObjectsOfTypeAll<Material> makes a managed object, held
+        // by one of IL2CPP's pinned GC handles (Memory.cs, GcHandles), for every material in memory, and
+        // in such a build it found none to swap (every logged pass on the PS Vita: "0 materials to
+        // CrowVita/Lit", 139 to 419 saved so). Haunted Hilltop's first frame took handle 65,537 there,
+        // which made the handle table grow, and crash, on 21 Oct. A renderer's material found on Standard
+        // after all (the renderer pass below sees each one's first material) brings the scan back
+        // at once; Restore (lit=game) clears it.
+        static bool bakedBuild;
+        // The layer mask of the renderer pass by the scenes loaded and the CrowVita/Lit renderers' count
+        // (and lightmapped count): a GameObject's layer is read through a managed GameObject, held by a
+        // pinned GC handle until the GameObject is destroyed, one per renderer (Pool 2,244).
+        // Passes 2 to 4, and a later visit to the same area with the same counts, take the mask the
+        // earlier pass worked out instead (Pool's was 41 in every logged pass).
+        static readonly Dictionary<string, int> layersBy = new Dictionary<string, int>();
+        static readonly List<Renderer> litRendererList = new List<Renderer>();
+        static readonly Material[] NoMaterials = new Material[0];
 
         static void Tick()
         {
@@ -271,8 +289,8 @@ namespace CrowCompat
             var clock = System.Diagnostics.Stopwatch.StartNew();
             int count = 0, changedQueue = 0, transparent = 0, cutout = 0, saved = 0;
             int from = Shader.PropertyToID("_CrowLitFrom");
-            bool first = swapPasses == 1;
-            foreach (Material material in Resources.FindObjectsOfTypeAll<Material>())
+            bool first = swapPasses == 1, scanned = !bakedBuild;
+            foreach (Material material in scanned ? Resources.FindObjectsOfTypeAll<Material>() : NoMaterials)
             {
                 Shader shader = material.shader;
                 if (shader == null) continue;
@@ -305,25 +323,62 @@ namespace CrowCompat
                 count++;
             }
             // The layers most CrowVita/Lit renderers are on (each with a tenth of them or more).
-            var perLayer = new int[32];
             int litRenderers = 0, lightmapped = 0;
+            bool onStandard = false;
+            litRendererList.Clear();
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 Material material = renderer.sharedMaterial;
-                if (material == null || material.shader != VitaLit.lit) continue;
-                perLayer[renderer.gameObject.layer]++;
+                if (material == null) continue;
+                Shader shader = material.shader;
+                if (shader != VitaLit.lit)
+                {
+                    if (!scanned && shader != null && shader == standard) onStandard = true;
+                    continue;
+                }
+                litRendererList.Add(renderer);
                 litRenderers++;
                 if (renderer.lightmapIndex >= 0 && renderer.lightmapIndex < 0xFFFE) lightmapped++;
             }
-            majorLayers = 0;
-            for (int layer = 0; layer < 32; layer++)
-                if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
-            if (first) baked = saved > 0;
+            if (onStandard)
+            {
+                // Not every material saved so after all: this pass again with the material scan.
+                litRendererList.Clear();
+                bakedBuild = false;
+                Debug.Log("CROW_LIT a renderer's material is on Standard: the material scan is back");
+                Swap();
+                return;
+            }
+            var key = new System.Text.StringBuilder();
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (scene.isLoaded) key.Append(scene.name).Append('|');
+            }
+            key.Append(litRenderers).Append('|').Append(lightmapped);
+            string layersKey = key.ToString();
+            bool layersKept = layersBy.TryGetValue(layersKey, out majorLayers);
+            if (!layersKept)
+            {
+                var perLayer = new int[32];
+                foreach (Renderer renderer in litRendererList) perLayer[renderer.gameObject.layer]++;
+                majorLayers = 0;
+                for (int layer = 0; layer < 32; layer++)
+                    if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
+                if (layersBy.Count > 256) layersBy.Clear();
+                layersBy[layersKey] = majorLayers;
+            }
+            litRendererList.Clear();
+            if (first)
+            {
+                baked = bakedBuild || saved > 0;
+                bakedBuild = baked;
+            }
             if (log)
                 Debug.Log("CROW_LIT " + count + " materials to CrowVita/Lit (" + transparent + " transparent, " + cutout + " cutout, " + changedQueue +
-                          " render queues kept), " + saved + " saved so by the build; " + litRenderers + " renderers, " + lightmapped + " lightmapped (" +
-                          LightmapSettings.lightmaps.Length + " lightmaps); layers " + majorLayers.ToString("X") + "; pass " + swapPasses + " in " +
-                          clock.ElapsedMilliseconds + " ms");
+                          " render queues kept), " + (scanned ? saved + " saved so by the build" : "material scan left out (saved so by the build)") + "; " +
+                          litRenderers + " renderers, " + lightmapped + " lightmapped (" + LightmapSettings.lightmaps.Length + " lightmaps); layers " +
+                          majorLayers.ToString("X") + (layersKept ? " (as before)" : "") + "; pass " + swapPasses + " in " + clock.ElapsedMilliseconds + " ms");
         }
 
         // Legacy Shaders/Diffuse (texture times colour, Lambert; 48 untextured materials, white, red,

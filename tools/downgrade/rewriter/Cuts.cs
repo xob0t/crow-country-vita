@@ -20,52 +20,11 @@ using Mono.Cecil.Cil;
 //     GetJoystickButtonValueByJoystickId false for such a joystick; ThreadSafeUnityInput.Mouse.Update returns at once while
 //     Cuts.RewiredNoMouse; InputManager_Base's Update, FixedUpdate and LateUpdate start with
 //     RewiredProbe.Begin() and call RewiredProbe.End() before each return (their time, for -crow-cuts-log).
-//   CutsRewiredSites (probing builds only: CROW_REWIRED_SITES=1): after every call in ReInput's three update
-//     methods and in the Rewired_Core methods they call, RewiredProbe.Mark(site, "<caller>><callee>"), which
-//     books the time since the last mark to the site (-crow-cuts-log: the costliest sites).
+//   (CutsRewiredSites, the probing builds' RewiredProbe.Mark after every call in Rewired's update, keyed on its
+//     obfuscated method names, went on 21 Oct: the pad reader skips that update on the PS Vita.)
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {
-    // Runs only with CROW_REWIRED_SITES=1 (Rewrite skips its group otherwise).
-    static int CutsRewiredSites(ModuleDefinition module)
-    {
-        TypeDefinition input = module.GetType("Rewired.ReInput");
-        if (input == null) return 0;
-        var roots = input.Methods.Where(m => m.HasBody && (m.Name == "DDMCXcvwbqGIHLxaOdfxBmmekcEj" || m.Name == "DDhdniZCeehTddXfycZkIQXlgjzHA" ||
-                                                          m.Name == "vImavScxcQKaPpkIMLZCjlRbnIUR")).ToList();
-        // and, a level deeper, the costliest of what they call (the PS Vita's first probe): the input source's
-        // update and the players' updates
-        foreach (TypeDefinition type in AllTypes(module.Types))
-            foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
-                if ((type.Name == "PlatformInputManager" && method.Name == "Update") ||
-                    (type.Name == "vmnshPWJBtuXCwizMdMOJnwKismG" && (method.Name == "zFJQNuSBgLLQMvgmDkKhbtHYyWQC" || method.Name == "ErNIGrnQQpuNIHUKezBmIEhNdrte" ||
-                                                                       method.Name == "sPIugBgROohCzCYZQLAcxtVZspWg")))
-                    roots.Add(method);
-        var methods = new System.Collections.Generic.List<MethodDefinition>(roots);
-        foreach (MethodDefinition root in roots)
-            foreach (Instruction call in root.Body.Instructions.Where(i => i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt))
-            {
-                MethodDefinition callee = ((MethodReference)call.Operand).Resolve();
-                if (callee != null && callee.HasBody && callee.Module == module && !methods.Contains(callee)) methods.Add(callee);
-            }
-        MethodReference mark = CompatMethod(module, "RewiredProbe", "Mark");
-        int site = 0;
-        foreach (MethodDefinition method in methods)
-        {
-            ILProcessor il = method.Body.GetILProcessor();
-            foreach (Instruction call in method.Body.Instructions.Where(i => (i.OpCode == OpCodes.Call || i.OpCode == OpCodes.Callvirt) &&
-                         (i.Previous == null || i.Previous.OpCode != OpCodes.Tail)).ToArray())
-            {
-                var called = (MethodReference)call.Operand;
-                string name = method.Name.Substring(0, System.Math.Min(6, method.Name.Length)) + ">" + called.DeclaringType.Name.Substring(0, System.Math.Min(12, called.DeclaringType.Name.Length)) +
-                              "." + called.Name.Substring(0, System.Math.Min(14, called.Name.Length));
-                InsertAfter(il, call, Instruction.Create(OpCodes.Ldc_I4, site++), Instruction.Create(OpCodes.Ldstr, name), Instruction.Create(OpCodes.Call, mark));
-                if (site >= 4000) return site;
-            }
-        }
-        return site;
-    }
-
     static int FsmGateHooks(ModuleDefinition module)
     {
         TypeDefinition fsm = GameType(module, "HutongGames.PlayMaker.Fsm");

@@ -72,7 +72,7 @@ namespace CrowCompat
             FarDivisor = Divisor(CrowFlags.Number(args, "-crow-decor-far-rate", FarDivisor));
             Far = CrowFlags.Number(args, "-crow-decor-far", Far);
             log = Array.IndexOf(args, "-crow-decor-log") >= 0;
-            SceneManager.sceneUnloaded += scene => Views.Clear();
+            CrowEvents.Unloaded("Decor.sceneUnloaded", scene => Views.Clear());
             if (log) CrowEvents.Canvases("Views.Log", Views.Log);
             string moverName = CrowFlags.Value(args, "-crow-find-movers");
             if (moverName != null)
@@ -83,7 +83,7 @@ namespace CrowCompat
                 float due = -1f;
                 CrowEvents.Loaded("Decor.sceneLoaded", (scene, loadMode) =>
                 {
-                    if (scene.name != "CrowGap" && scene.name != "CrowMara" && scene.name != "Title" && scene.name != "Logos") due = Time.realtimeSinceStartup + after;
+                    if (Scenes.IsArea(scene)) due = Time.realtimeSinceStartup + after;
                 });
                 CrowEvents.Canvases("Decor.willRenderCanvases", () =>
                 {
@@ -95,8 +95,8 @@ namespace CrowCompat
             if (Array.IndexOf(args, "-crow-player-tree") >= 0)
                 CrowEvents.Loaded("Decor.sceneLoaded 2", (scene, loadMode) =>
                 {
-                    if (scene.name == "CrowGap" || scene.name == "CrowMara" || scene.name == "Title" || scene.name == "Logos") return;
-                    GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+                    if (!Scenes.IsArea(scene)) return;
+                    GameObject player = MaraScene.FindPlayer();
                     if (player == null) return;
                     var line = new StringBuilder("CROW_PLAYER_TREE ").Append(player.transform.root.hierarchyCount);
                     Tree(player.transform.root, 0, 10, line);

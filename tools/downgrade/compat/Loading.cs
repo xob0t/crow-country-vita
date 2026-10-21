@@ -15,8 +15,9 @@ using Debug = UnityEngine.Debug;
 //                           loads or unloads (with the step and the time into the frame it happens
 //                           at: before it are the read and the objects' Awake and OnEnable), and a
 //                           CROW_LOADDONE line when the frames after a load are short again (the
-//                           load's long frames summed). Replaces the player loop, as
-//                           -crow-loop-profile does: use one of the two.
+//                           load's long frames summed). It runs on LoopProfile's markers (Quality.cs),
+//                           beside -crow-loop-profile or alone (until 21 Oct it was left out when that
+//                           was given, from when each replaced the player loop: fightbench always gives it).
 //   -crow-mcs-time          time MeshCombineStudio's run-time combining: each MeshCombiner that would
 //                           combine in its Start combines when its scene has loaded, under a
 //                           stopwatch, instead (CROW_MCS lines, per combiner and per scene).
@@ -32,29 +33,32 @@ namespace CrowCompat
     public static class Loading
     {
         // From Diag.Install (a RuntimeInitializeOnLoadMethod: the build lists those, so quickcode can't add one).
+        // Each module under a Guard of its own (Diag.Guard), so a probe that throws as it installs doesn't take
+        // the PS Vita defaults after it with it (the player's scene, the title's prefetch, the gap; one Guard for
+        // all before 21 Oct). The order is as before.
         internal static void Install()
         {
             string[] args = ProbeFiles.Args;
             int trace = Array.IndexOf(args, "-crow-load-trace");
-            if (trace >= 0 && !args.Contains("-crow-loop-profile"))
+            if (trace >= 0)
             {
                 float ms = 0f;
                 bool given = trace + 1 < args.Length && float.TryParse(args[trace + 1], System.Globalization.NumberStyles.Float,
                     System.Globalization.CultureInfo.InvariantCulture, out ms);
-                Trace.Install(given ? ms : 200f);
+                Diag.Guard("Trace", () => Trace.Install(given ? ms : 200f));
             }
-            if (args.Contains("-crow-mcs-time")) CombineTimer.Install();
-            if (args.Contains("-crow-load-stats")) LoadStats.Install();
+            if (args.Contains("-crow-mcs-time")) Diag.Guard("CombineTimer", CombineTimer.Install);
+            if (args.Contains("-crow-load-stats")) Diag.Guard("LoadStats", LoadStats.Install);
             string read = CrowFlags.Value(args, "-crow-read-test");
-            if (read != null) ReadTest(read);
+            if (read != null) Diag.Guard("ReadTest", () => ReadTest(read));
             if (args.Contains("-crow-load-cpu"))
             {
                 if (args.Contains("-crow-audio")) Debug.Log("CROW_LOADCPU off: -crow-audio reads the threads' shares (one reader at a time)");
-                else LoadCpu.Install(CrowFlags.Int(args, "-crow-load-cpu", 250));
+                else Diag.Guard("LoadCpu", () => LoadCpu.Install(CrowFlags.Int(args, "-crow-load-cpu", 250)));
             }
-            MaraScene.Install();
-            ScenePrefetch.Install(args);
-            SceneGap.Install(args);
+            Diag.Guard("MaraScene", MaraScene.Install);
+            Diag.Guard("ScenePrefetch", () => ScenePrefetch.Install(args));
+            Diag.Guard("SceneGap", () => SceneGap.Install(args));
         }
 
         static class Trace
@@ -76,7 +80,7 @@ namespace CrowCompat
                 ticks = new long[labels.Count];
                 LoopProfile.OnMark += Mark;
                 CrowEvents.Loaded("Trace.sceneLoaded", (scene, mode) => Event("loaded " + scene.name + " (" + mode + ")"));
-                SceneManager.sceneUnloaded += scene => Event("unloaded " + scene.name);
+                CrowEvents.Unloaded("Trace.sceneUnloaded", scene => Event("unloaded " + scene.name));
                 SceneManager.activeSceneChanged += (from, to) => Event("active " + to.name);
                 Debug.Log("CROW_LOAD trace on: frames of " + ms + " ms or more, " + labels.Count + " markers");
             }
@@ -322,6 +326,17 @@ namespace CrowCompat
     public static class MaraScene
     {
         public const string Scene = "CrowMara", Key = "CharacterCameraPrefab";
+        // The player's instance by name: the build (DowngradeBuild) names the instance it saves in CrowMara as
+        // Instantiate names a clone, so builds with and without the scene find it alike.
+        public const string PlayerName = Key + "(Clone)";
+
+        // The player's instance while it is active (GameObject.Find: null while it is held inactive before the
+        // first area takes it, or switched off by CharacterAndCamera's Deactivate). One lookup since 21 Oct
+        // (thirteen in ten modules before); the modules that test a root's name (StartsWith(Key)) still do.
+        internal static GameObject FindPlayer()
+        {
+            return GameObject.Find(PlayerName);
+        }
         static bool available, requested, taken;
         static GameObject ready;
 
@@ -413,6 +428,22 @@ namespace CrowCompat
         }
     }
 
+    // The scenes that aren't areas: the logos, the title, the player's scene (MaraScene, loaded beside the
+    // title) and the scene gap's empty scene (SceneGap); every other scene counts as an area. One list since
+    // 21 Oct: twelve sceneLoaded handlers in eight modules kept their own, and two had drifted (ReverbNull's
+    // and Cycle's left out CrowGap; the same there, as the gap is made by CreateScene, which raises no
+    // sceneLoaded). PhysCost's census skips only CrowMara (it also runs on the title), as before.
+    public static class Scenes
+    {
+        public const string Logos = "Logos", Title = "Title";
+
+        internal static bool IsArea(Scene scene)
+        {
+            string name = scene.name;
+            return name != Logos && name != Title && name != MaraScene.Scene && name != SceneGap.Scene;
+        }
+    }
+
     // The title, read while the logos play. The logos scene's FSM loads the title with PlayMaker's
     // LoadScene action, a synchronous load: on the PS Vita the loading thread then spent 11 s reading
     // the title (176 FSMs, their actions made on that thread as each FSM is read) while the logos
@@ -497,7 +528,7 @@ namespace CrowCompat
     // memory free after the load this way, 5 MB without. Costs about 3 s on the PS Vita (2.4 s of
     // unused-asset pass, 0.6 s of collection). The player (DontDestroyOnLoad) stays. On the PS Vita
     // unless -crow-no-gap; on other players with -crow-gap. CROW_GAP lines time the steps.
-    // From the gap the area loads additively (-crow-gap-single: as a single-mode load, as before). A
+    // From the gap the area loads additively, not as a single-mode load (as before 16 Oct). A
     // single-mode load runs Resources.UnloadUnusedAssets and a collection again once the area is in
     // (on the PS Vita 3.2-3.7 s at the end of the load's frame, after sceneLoaded): a second pass over
     // every object, with nothing left to free after the gap's, at the load's peak of memory (both PS
@@ -506,18 +537,19 @@ namespace CrowCompat
     // in the first sceneLoaded handler, before the game's; what its Awake and OnEnable made went into
     // the gap, which was active then, and moves into the area before the gap is unloaded. The areas
     // have no lightmaps or light probes, which an additive load would treat otherwise.
-    // Before the old scenes go, the gap drains the renderer (-crow-gap-drain on, the default; off as
-    // before): the player's camera draws nothing (culling mask 0) and the old scenes' own cameras and
-    // canvases are switched off for two frames, then the main thread waits for the render thread to
-    // run out of commands (GetNativeTexturePtr syncs with it), and only then the unloads start; the
-    // mask comes back once the old assets are gone. The user's game
+    // Before the old scenes go, the gap drains the renderer: the player's camera draws nothing (culling
+    // mask 0) and the old scenes' own cameras and canvases are switched off for two frames, then the
+    // main thread waits for the render thread to run out of commands (GetNativeTexturePtr syncs with
+    // it), and only then the unloads start; the mask comes back once the old assets are gone. The user's game
     // crashed on the render thread (GfxDeviceGXM::DrawBuffers in SetTextures, from the device worker's
     // queue) while the main thread was destroying Roadside's objects in UnloadSceneOperation, with
     // graphics jobs on: the worker was still drawing the frame before with what the unload freed.
+    // (-crow-gap-single, the single-mode load from the gap, and -crow-gap-drain off, the undrained unload,
+    // reproduced those two crashes and nothing else; they went on 21 Oct.)
     public static class SceneGap
     {
         public const string Scene = "CrowGap";
-        static bool installed, on, additive;
+        static bool installed, on;
         static string target, arriving;
         static int pending;
         static readonly Stopwatch clock = new Stopwatch();
@@ -525,8 +557,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            additive = !args.Contains("-crow-gap-single");
-            if (additive) CrowEvents.Loaded("SceneGap.Arrived", Arrived);
+            CrowEvents.Loaded("SceneGap.Arrived", Arrived);
         }
 
         static bool On
@@ -561,24 +592,8 @@ namespace CrowCompat
             clock.Reset();
             clock.Start();
             Loading.LoadCpu.Begin();  // -crow-load-cpu
-            if (Drain)
-            {
-                StartDrain();
-                return true;
-            }
-            UnloadOld();
+            StartDrain();
             return true;
-        }
-
-        // -crow-gap-drain: see above.
-        static bool? drain;
-        static bool Drain
-        {
-            get
-            {
-                if (drain == null) drain = CrowFlags.Value(ProbeFiles.Args, "-crow-gap-drain") != "off";
-                return drain.Value;
-            }
         }
 
         static readonly Dictionary<Camera, int> masks = new Dictionary<Camera, int>();
@@ -693,12 +708,7 @@ namespace CrowCompat
             string name = target;
             target = null;
             Debug.Log("CROW_GAP assets unloaded after " + assets + " ms, collected after " + clock.ElapsedMilliseconds + " ms; loading " + name +
-                      (additive ? " additively" : ""));
-            if (!additive)
-            {
-                SceneManager.LoadScene(name, LoadSceneMode.Single);
-                return;
-            }
+                      " additively");
             before.Clear();
             Scene gap = SceneManager.GetSceneByName(Scene);
             if (gap.IsValid())

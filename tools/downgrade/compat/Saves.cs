@@ -61,9 +61,16 @@ namespace CrowCompat
         // The PS Vita's IL2CPP leaves GetSystemTimeAsFileTime unimplemented (libil2cpp os/PSP2/Time.cpp),
         // so both said 1 January 1601 there, and every save slot showed "1/1/1601". A file's
         // modification time is right on the console (sceIoGetstat, UTC), so the clock is a file
-        // written once in the saves folder plus a stopwatch since. The console's time zone is out of
+        // written in the saves folder plus a stopwatch since. The console's time zone is out of
         // reach, so Now is UTC too (with Kind Utc: CrowCountrySave's ToFileTimeUtc keeps it as it is).
         // Other players read the system clock as before.
+        // The stopwatch is the process's time (IL2CPP's PSP2 GetTicks100NanosecondsMonotonic is
+        // sceKernelGetProcessTime), which stands still while the console sleeps, so until 21 Oct a
+        // save after a night's sleep was dated the evening before. The file is written again on a
+        // call ReadEvery or more after the last (calls are rare: the log's start, each save, the
+        // Driving Intro's year), and when the file's time is ahead of the clock by over 2 s the clock
+        // moves on to it. It only moves forward, so the slots' times keep their order (Continue
+        // takes the latest).
         public static DateTime Now()
         {
 #if CROW_VITA
@@ -86,7 +93,19 @@ namespace CrowCompat
         static readonly object clockGate = new object();
         static System.Diagnostics.Stopwatch sinceStart;
         static DateTime start;
-        static bool clockFailed;
+        static TimeSpan lastRead;
+        static bool clockFailed, rereadFailed;
+        // At most one file write per 10 s of the process's time, should a caller ever ask every frame.
+        static readonly TimeSpan ReadEvery = TimeSpan.FromSeconds(10), Slack = TimeSpan.FromSeconds(2);
+
+        // The console's clock (UTC), from a file's modification time.
+        static DateTime FileTime()
+        {
+            Directory.CreateDirectory(VitaFolder);
+            string file = VitaFolder + "/clock";
+            File.WriteAllBytes(file, new byte[1]);
+            return DateTime.SpecifyKind(File.GetLastWriteTimeUtc(file), DateTimeKind.Utc);
+        }
 
         static DateTime VitaUtcNow()
         {
@@ -96,11 +115,9 @@ namespace CrowCompat
                 {
                     try
                     {
-                        Directory.CreateDirectory(VitaFolder);
-                        string file = VitaFolder + "/clock";
-                        File.WriteAllBytes(file, new byte[1]);
-                        start = DateTime.SpecifyKind(File.GetLastWriteTimeUtc(file), DateTimeKind.Utc);
+                        start = FileTime();
                         sinceStart = System.Diagnostics.Stopwatch.StartNew();
+                        lastRead = TimeSpan.Zero;
                     }
                     catch (Exception e)
                     {
@@ -108,7 +125,28 @@ namespace CrowCompat
                         Debug.Log("CROW_CLOCK no file time for the date (" + e.GetType().Name + ": " + e.Message + ")");
                     }
                 }
-                return sinceStart == null ? DateTime.UtcNow : start + sinceStart.Elapsed;
+                if (sinceStart == null) return DateTime.UtcNow;
+                TimeSpan elapsed = sinceStart.Elapsed;
+                if (elapsed - lastRead >= ReadEvery)
+                {
+                    lastRead = elapsed;
+                    try
+                    {
+                        TimeSpan behind = FileTime() - (start + elapsed);
+                        if (behind > Slack)
+                        {
+                            start += behind;  // the console slept: the stopwatch left that time out
+                            Debug.Log("CROW_CLOCK " + behind.TotalSeconds.ToString("F0") + " s the stopwatch missed (the console slept): clock moved on");
+                        }
+                    }
+                    catch (Exception e)
+                    {
+                        // The stopwatch's time stands; the next call after ReadEvery tries again.
+                        if (!rereadFailed) Debug.Log("CROW_CLOCK file time failed (" + e.GetType().Name + ": " + e.Message + "): the stopwatch's time");
+                        rereadFailed = true;
+                    }
+                }
+                return start + sinceStart.Elapsed;
             }
         }
 #endif

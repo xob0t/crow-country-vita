@@ -7,6 +7,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.Profiling;
 using UnityEngine.SceneManagement;
+using GCHandle = System.Runtime.InteropServices.GCHandle;
 
 // The memory probe, for the PS Vita's budget (512 MB shared by the CPU and GPU, +109 MB expansion):
 //   -crow-memory <s>        every s seconds, and 5 s after each scene load, a MEMORY line: Unity's
@@ -20,7 +21,6 @@ using UnityEngine.SceneManagement;
 //                           counts, the clip's samples as HEVAG), readable meshes and textures, loaded
 //                           clips per load type; and MEMTOP lines with the largest textures and meshes.
 //   -crow-memory-fsm        with it, a MEMFSM line: PlayMaker's FSMs, states, loaded actions, parameters.
-//   -crow-memory-census     with it, MEMCENSUS lines: managed memory by the Unity object or static that holds it.
 //   -crow-memory-unload     before each MEMTYPES pass, Resources.UnloadUnusedAssets and a GC, so the
 //                           pass counts what stays loaded.
 //   -crow-memory-watch [ms] a thread of its own samples memory every ms (default 250), also through
@@ -39,6 +39,11 @@ using UnityEngine.SceneManagement;
 //   -crow-gc-max <MB>       also never past this size: the heap collects instead of growing (an area's
 //                           load leaves garbage the heap grows into, and the heap never shrinks).
 //   -crow-no-phycont-heap   keep the GC heap out of the PHYCONT memory (see PhyContPool).
+//   -crow-gc-handles <n>    IL2CPP's table of GC handles the engine uses grown to n slots at the start (PS
+//                           Vita default 131072; 0: as IL2CPP has it, the default on other players). See GcHandles
+//                           (and -crow-gc-handles-table).
+//   -crow-gc-handles-count [s]  s seconds (default 2) after each scene load, the GC handles in use per table
+//                           (CROW_GC handles). A probe: it reads every slot of the tables.
 // MeshRelease, below, frees what MeshCombineStudio keeps after combining (on the PS Vita).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
@@ -48,7 +53,7 @@ namespace CrowCompat
         const float MB = 1048576f;
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
         static float every;
-        static bool types, typesEvery, unload, fsmCensus, managedCensus;
+        static bool types, typesEvery, unload, fsmCensus;
         static Type vitaDiagnostics;
         float started, lastBeat, typesAt = -1f;
 
@@ -75,7 +80,6 @@ namespace CrowCompat
             typesEvery = args.Contains("-crow-memory-types-every");
             unload = args.Contains("-crow-memory-unload");
             fsmCensus = args.Contains("-crow-memory-fsm");
-            managedCensus = args.Contains("-crow-memory-census");
             if (Application.platform == RuntimePlatform.PSP2)
                 vitaDiagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
             var probe = new GameObject("CrowMemory");
@@ -194,7 +198,11 @@ namespace CrowCompat
 
         static void GcSettings(string[] args)
         {
-            if (Application.platform != RuntimePlatform.PSP2) return;
+            if (Application.platform != RuntimePlatform.PSP2)
+            {
+                GcHandles.Install(args);  // other players: only with -crow-gc-handles / -crow-gc-handles-count
+                return;
+            }
             int retries = CrowFlags.Int(args, "-crow-gc-retries", VitaRetries), divisor = CrowFlags.Int(args, "-crow-gc-divisor", VitaDivisor);
             string pool = PhyContPool(args);
             try
@@ -205,6 +213,8 @@ namespace CrowCompat
                 maxHeap = CrowFlags.Int(args, "-crow-gc-max", 0) * 1048576L;
                 Debug.Log("CROW_GC max_retries=" + (ulong)GC_get_max_retries() + " free_space_divisor=" + (ulong)GC_get_free_space_divisor() +
                           " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve + " maxMB=" + maxHeap / 1048576L);
+                // The handle table's growth while the heap can still grow: before the governor can hold it.
+                GcHandles.Install(args);
                 if (reserve > 0) Governor(reserve);
             }
             catch (Exception e)
@@ -429,112 +439,6 @@ namespace CrowCompat
             }
         }
 
-        // -crow-memory-census: with the MEMTYPES pass, MEMCENSUS lines: the managed memory reachable
-        // from each Unity object (MonoBehaviours and ScriptableObjects, by class) and from each class's
-        // static fields, walking fields by reflection, each object counted once (for the first root that
-        // reaches it). Sizes are estimates for the running player's pointer size. Slow, and it allocates
-        // a set of every object it visits: for Windows players.
-        sealed class Identity : IEqualityComparer<object>
-        {
-            public new bool Equals(object a, object b) { return ReferenceEquals(a, b); }
-            public int GetHashCode(object o) { return System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(o); }
-        }
-
-        static readonly Dictionary<Type, FieldInfo[]> censusFields = new Dictionary<Type, FieldInfo[]>();
-
-        static FieldInfo[] InstanceFields(Type type)
-        {
-            FieldInfo[] fields;
-            if (censusFields.TryGetValue(type, out fields)) return fields;
-            var list = new List<FieldInfo>();
-            for (Type t = type; t != null && t != typeof(object); t = t.BaseType)
-                list.AddRange(t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly)
-                    .Where(f => !f.FieldType.IsPrimitive && !f.FieldType.IsEnum && !f.FieldType.IsPointer));
-            return censusFields[type] = list.ToArray();
-        }
-
-        static int PrimitiveSize(Type type)
-        {
-            if (type == typeof(byte) || type == typeof(bool) || type == typeof(sbyte)) return 1;
-            if (type == typeof(short) || type == typeof(ushort) || type == typeof(char)) return 2;
-            if (type == typeof(long) || type == typeof(ulong) || type == typeof(double)) return 8;
-            if (type.IsPrimitive || type.IsEnum) return 4;
-            return -1;
-        }
-
-        static long Walk(object root, HashSet<object> seen)
-        {
-            long total = 0;
-            var stack = new Stack<object>();
-            stack.Push(root);
-            int pointer = IntPtr.Size;
-            while (stack.Count > 0)
-            {
-                object o = stack.Pop();
-                if (o == null) continue;
-                Type type = o.GetType();
-                if (!type.IsValueType && !seen.Add(o)) continue;
-                if (o is Type || o is MemberInfo || o is Delegate || o is System.Reflection.Assembly) continue;
-                var text = o as string;
-                if (text != null) { total += 20 + 2 * text.Length; continue; }
-                var array = o as Array;
-                if (array != null)
-                {
-                    Type element = type.GetElementType();
-                    int size = PrimitiveSize(element);
-                    if (size > 0) { total += 32 + (long)size * array.Length; continue; }
-                    total += 32 + (long)pointer * array.Length;
-                    foreach (object item in array) if (item != null && !(item is UnityEngine.Object)) stack.Push(item);
-                    continue;
-                }
-                if (!type.IsValueType) total += 2 * pointer;
-                foreach (FieldInfo field in InstanceFields(type))
-                {
-                    object value;
-                    try { value = field.GetValue(o); } catch (Exception) { continue; }
-                    total += field.FieldType.IsValueType ? 0 : pointer;
-                    if (value == null || value is UnityEngine.Object) continue;
-                    stack.Push(value);
-                }
-                if (!type.IsValueType) total += InstanceFields(type).Length == 0 ? pointer : 0;
-            }
-            return total;
-        }
-
-        static void ManagedCensus()
-        {
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            var seen = new HashSet<object>(new Identity());
-            var groups = new Dictionary<string, long>();
-            Action<string, object> add = (name, root) =>
-            {
-                long bytes = Walk(root, seen);
-                long sum;
-                groups.TryGetValue(name, out sum);
-                groups[name] = sum + bytes;
-            };
-            foreach (Type type in AppDomain.CurrentDomain.GetAssemblies().SelectMany(a => { try { return a.GetTypes(); } catch (Exception) { return new Type[0]; } }))
-            {
-                if (type.IsGenericTypeDefinition) continue;
-                FieldInfo[] statics;
-                try { statics = type.GetFields(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly); }
-                catch (Exception) { continue; }
-                foreach (FieldInfo field in statics)
-                {
-                    if (field.FieldType.IsPrimitive || field.IsLiteral) continue;
-                    object value;
-                    try { value = field.GetValue(null); } catch (Exception) { continue; }
-                    if (value != null && !(value is UnityEngine.Object)) add("static " + type.FullName, value);
-                }
-            }
-            foreach (UnityEngine.Object asset in Resources.FindObjectsOfTypeAll<MonoBehaviour>().Cast<UnityEngine.Object>().Concat(Resources.FindObjectsOfTypeAll<ScriptableObject>().Cast<UnityEngine.Object>()))
-                add(asset.GetType().FullName, asset);
-            long all = groups.Values.Sum();
-            Debug.Log("MEMCENSUS total=" + F(all / MB) + "MB objects=" + seen.Count + " ms=" + clock.ElapsedMilliseconds);
-            foreach (KeyValuePair<string, long> pair in groups.OrderByDescending(p => p.Value).Take(30))
-                Debug.Log("MEMCENSUS " + F(pair.Value / MB) + " " + pair.Key);
-        }
-
         // -crow-memory-fsm: with the MEMTYPES pass, a MEMFSM line: PlayMaker FSMs loaded (also inactive),
         // their states, the states whose actions are loaded and those actions, and the item counts of
         // the states' ActionData lists (each serialized action parameter is an object or string there,
@@ -607,7 +511,6 @@ namespace CrowCompat
                 Debug.Log(FsmCensus());
                 if (unload) GC.Collect();
             }
-            if (managedCensus) ManagedCensus();
             var tallies = new Dictionary<string, Tally>();
             var textures = new List<KeyValuePair<long, string>>();
             foreach (Texture texture in Resources.FindObjectsOfTypeAll<Texture>())
@@ -663,6 +566,175 @@ namespace CrowCompat
             Debug.Log(line.ToString());
             Debug.Log("MEMTOP textures " + string.Join(" | ", textures.OrderByDescending(p => p.Key).Take(12).Select(p => F(p.Key / MB) + " " + p.Value).ToArray()));
             Debug.Log("MEMTOP meshes " + string.Join(" | ", meshes.OrderByDescending(p => p.Key).Take(8).Select(p => F(p.Key / MB) + " " + p.Value).ToArray()));
+        }
+    }
+
+    // IL2CPP's tables of GC handles (libil2cpp gc/GCHandle.cpp, 2018.2.19f1): weak, weak tracking, normal and pinned,
+    // a handle being (slot << 3) | (table + 1). The engine holds the managed object of every engine object scripts
+    // have reached (each MonoBehaviour, and a GameObject, Transform, Renderer, Material... once a script has asked for
+    // it: FindObjectsOfType, .gameObject, .transform) by a PINNED handle until the engine object is destroyed: in the
+    // Windows IL2CPP player (21 Oct, -crow-gc-handles-count) the pinned table held 527 handles at the start, 15,666 on
+    // the title, 57,000-63,000 in Station Square, Ocean Kingdom, Fairy Forest and Pool and 79,600-80,900 in Haunted
+    // Hilltop (the same on every visit), the normal table none. The normal and pinned tables start at 32 slots and
+    // double when every slot is taken, and never shrink: a new entries array twice the size from the GC heap
+    // (GarbageCollector::AllocateFixed, GC_MALLOC_UNCOLLECTABLE, which every collection scans),
+    // the old one copied in and freed, and a bitmap of a bit a slot (malloc). alloc_handle doesn't check that the new
+    // array came: on 21 Oct the first frame after Haunted Hilltop's load (29,908 GameObjects, 14,325 behaviours, 8,612
+    // mesh renderers) took handle 65,537 (VitaLit's material pass), the 512 KB array for 131,072 slots couldn't be had
+    // with the governor holding the GC heap at 75.3 MB, and the copy into NULL crashed the game (a data abort in
+    // memcpy). Grow takes handles on one byte array at the start, while the heap can still grow, until the table has
+    // doubled to the size asked for, then frees them all: the table keeps its size, so the game's own handles can't
+    // make it grow below that. 131,072 slots cost 512 KB of the GC heap and 16 KB of main memory for good, 1.6 times
+    // Haunted Hilltop's 81,000; 262,144 would be 512 KB more, scanned by every collection.
+    //   -crow-gc-handles <n>    the table grown to n slots (a power of two; the PS Vita's default 131072, logged as
+    //                           CROW_GC handles: <table> table ...); 0 leaves it to IL2CPP (the default elsewhere).
+    //   -crow-gc-handles-table pinned|normal  the table Grow grows (default pinned, the engine's).
+    //   -crow-gc-handles-count [s]  s seconds (default 2) after each scene load, and at the start, a CROW_GC
+    //                           handles line: per table (pinned, normal, weak) the handles in use, the highest slot in
+    //                           use and the table's size as far as seen. libil2cpp has no count, so each slot is read
+    //                           (GCHandle.Target of the handle made from its number: GetTarget returns the entry when
+    //                           the slot's bit is set, null otherwise and past the table's end), twice the size seen
+    //                           (at least 131,072 slots, and on while the upper half read has handles): a probe, off
+    //                           by default. IL2CPP players (Mono refuses a free slot's handle: it says so).
+    // -crow-ab / -crow-cycle take gchandles=<n> (grows the table then) and gchandles=count (a count line then).
+    static class GcHandles
+    {
+        const int VitaSlots = 131072, MaxSlots = 1 << 20;
+        const int Weak = 1, Normal = 3, Pinned = 4;  // a handle's low 3 bits: its table + 1
+        static readonly byte[] anchor = new byte[1];  // pinnable (GCHandle.Alloc checks)
+        static int grown = Pinned;
+        static readonly Dictionary<int, int> sizes = new Dictionary<int, int>();  // per table: the power of two above the highest slot seen
+        static float countAfter = -1f, countAt = -1f;
+
+        // From Memory.GcSettings, at the start (on the PS Vita before the governor starts).
+        internal static void Install(string[] args)
+        {
+            try
+            {
+                if (CrowFlags.Value(args, "-crow-gc-handles-table") == "normal") grown = Normal;
+                Grow(CrowFlags.Int(args, "-crow-gc-handles", Application.platform == RuntimePlatform.PSP2 ? VitaSlots : 0));
+                if (!CrowFlags.Has(args, "-crow-gc-handles-count")) return;
+                string after = CrowFlags.Optional(args, "-crow-gc-handles-count");
+                float seconds;
+                countAfter = after != null && float.TryParse(after, NumberStyles.Float, CultureInfo.InvariantCulture, out seconds) && seconds >= 0f ? seconds : 2f;
+                Count("start");
+                CrowEvents.Loaded("GcHandles.sceneLoaded", (scene, mode) => countAt = Time.realtimeSinceStartup + countAfter);
+                CrowEvents.BeforeRender("GcHandles.Tick", () =>
+                {
+                    if (countAt < 0f || Time.realtimeSinceStartup < countAt) return;
+                    countAt = -1f;
+                    Count("loaded");
+                });
+            }
+            catch (Exception e)
+            {
+                Debug.Log("CROW_GC handles failed: " + e.GetType().Name + " " + e.Message);
+            }
+        }
+
+        internal static bool Change(string key, string value)
+        {
+            if (key != "gchandles") return false;
+            int slots;
+            if (value == "count") Count("asked");
+            else if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out slots)) Grow(slots);
+            else Debug.Log("CROW_GC handles: no change " + value);
+            return true;
+        }
+
+        static string Name(int table)
+        {
+            return table == Pinned ? "pinned" : table == Normal ? "normal" : "weak";
+        }
+
+        static int Size(int table)
+        {
+            int size;
+            return sizes.TryGetValue(table, out size) ? size : 0;
+        }
+
+        static void Seen(int table, int slot)
+        {
+            int size = 32;
+            while (size <= slot && size < MaxSlots * 2) size <<= 1;
+            if (slot >= 0 && size > Size(table)) sizes[table] = size;
+        }
+
+        // Handles on one object until one lands in the upper half of the size asked for (the table has doubled to it,
+        // or was that big), then all freed. At most half the slots and one: 65,537 handles and a 256 KB array of them
+        // for 131,072 (2-4 ms in the Windows IL2CPP player).
+        static void Grow(int slots)
+        {
+            if (slots <= 0) return;
+            int wanted = 32;
+            while (wanted < slots && wanted < MaxSlots) wanted <<= 1;
+            string name = Name(grown);
+            if (Size(grown) >= wanted)
+            {
+                Debug.Log("CROW_GC handles: the " + name + " table has " + Size(grown) + " slots already (asked " + wanted + ")");
+                return;
+            }
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var taken = new GCHandle[wanted / 2 + 1];
+            var type = grown == Pinned ? System.Runtime.InteropServices.GCHandleType.Pinned : System.Runtime.InteropServices.GCHandleType.Normal;
+            int count = 0, highest = -1;
+            try
+            {
+                while (count < taken.Length)
+                {
+                    GCHandle handle = GCHandle.Alloc(anchor, type);
+                    taken[count++] = handle;
+                    int slot = (int)(GCHandle.ToIntPtr(handle).ToInt64() >> 3);
+                    if (slot > highest) highest = slot;
+                    if (slot >= wanted / 2) break;
+                }
+            }
+            catch (Exception e)
+            {
+                Debug.Log("CROW_GC handles: growing stopped after " + count + " handles: " + e.GetType().Name + " " + e.Message);
+            }
+            finally
+            {
+                for (int i = 0; i < count; i++) taken[i].Free();
+            }
+            Seen(grown, highest);
+            Debug.Log("CROW_GC handles: " + name + " table " + (highest >= wanted / 2 ? "of " + Size(grown) + " slots" : "not grown, highest slot " + highest) +
+                      " (asked " + wanted + "): " + count + " handles taken and freed in " + clock.ElapsedMilliseconds + " ms");
+        }
+
+        // The handles in use per table, slot by slot (-crow-gc-handles-count).
+        static void Count(string why)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var line = new StringBuilder("CROW_GC handles ").Append(why).Append(" scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
+            long read = 0;
+            foreach (int table in new[] { Pinned, Normal, Weak })
+            {
+                int limit = Math.Min(Math.Max(Size(table), 65536) * 2, MaxSlots * 2);
+                int used = 0, highest = -1, slot = 0;
+                try
+                {
+                    for (; slot < limit; slot++)
+                    {
+                        if (GCHandle.FromIntPtr(new IntPtr((slot << 3) | table)).Target != null)
+                        {
+                            used++;
+                            highest = slot;
+                        }
+                        // Handles in the upper half: the table may have doubled past what was read; read on.
+                        if (slot == limit - 1 && highest >= limit / 2 && limit < MaxSlots * 2) limit *= 2;
+                    }
+                }
+                catch (Exception e)
+                {
+                    Debug.Log("CROW_GC handles: no count on this player (" + Name(table) + " slot " + slot + ": " + e.GetType().Name + " " + e.Message + ")");
+                    return;
+                }
+                Seen(table, highest);
+                read += limit;
+                line.Append(' ').Append(Name(table)).Append(": used=").Append(used).Append(" highest=").Append(highest).Append(" table=").Append(Size(table));
+            }
+            Debug.Log(line.Append(" (").Append(read).Append(" slots read in ").Append(clock.ElapsedMilliseconds).Append(" ms)").ToString());
         }
     }
 

@@ -191,7 +191,7 @@ namespace CrowCompat
             if (mode == null) return;
             CrowEvents.Loaded("Merge.sceneLoaded", (scene, loadMode) =>
             {
-                if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
+                if (!Scenes.IsArea(scene)) return;
                 Set(mode, scene);
             });
         }
@@ -202,7 +202,7 @@ namespace CrowCompat
             for (int i = 0; i < SceneManager.sceneCount; i++)
             {
                 Scene scene = SceneManager.GetSceneAt(i);
-                if (scene.isLoaded && scene.name != "CrowMara" && scene.name != "DontDestroyOnLoad") Set(value, scene);
+                if (scene.isLoaded && scene.name != MaraScene.Scene && scene.name != "DontDestroyOnLoad") Set(value, scene);
             }
         }
 

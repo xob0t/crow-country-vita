@@ -37,14 +37,19 @@ namespace CrowCompat
         static string casterRule;
         static float lastCasters = -10f;
 
+        // From Quality.Install: Install, then Merge's and Cameras', then InstallReport (Install installed those two
+        // in between until 21 Oct; the order is the same).
         public static void Install(string[] args)
         {
-            every = CrowFlags.Number(args, "-crow-draw-report", -1f);
             string casters = CrowFlags.Value(args, "-crow-casters");
             if (casters != null) Casters(casters);
             else if (Application.platform == RuntimePlatform.PSP2) Casters("player");
-            Diag.Guard("Merge", () => Merge.Install(args));
-            Diag.Guard("Cameras", () => Cameras.Install(args));  // Cameras.cs: -crow-rt-cameras, -crow-camera-report
+        }
+
+        // -crow-draw-report.
+        public static void InstallReport(string[] args)
+        {
+            every = CrowFlags.Number(args, "-crow-draw-report", -1f);
             if (every <= 0f) return;
             CrowEvents.Loaded("Draws.sceneLoaded", (scene, mode) => detail = true);
             CrowEvents.BeforeRender("Draws.Tick", Tick);
@@ -80,7 +85,7 @@ namespace CrowCompat
             {
                 castersHooked = true;
                 CrowEvents.Loaded("Draws.sceneLoaded 2", (scene, mode) => lastCasters = -10f);
-                SceneManager.sceneUnloaded += scene => Forget();
+                CrowEvents.Unloaded("Draws.sceneUnloaded", scene => Forget());
                 CrowEvents.BeforeRender("Draws.CasterTick", CasterTick);
             }
             CasterTick();
@@ -112,6 +117,7 @@ namespace CrowCompat
             if (casterRule == null || now - lastCasters < 10f) return;
             lastCasters = now;
             int changed = 0, casters = 0;
+            if (casterRule == "player" || casterRule.StartsWith("player:")) PlayerRenderers();
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
@@ -126,14 +132,15 @@ namespace CrowCompat
                 else renderer.shadowCastingMode = ShadowCastingMode.Off;
                 changed++;
             }
+            playerRenderers.Clear();  // not held between passes
             if (changed > 0) Debug.Log("CROW_DRAWS casters " + casterRule + ": " + changed + " of " + casters + " off");
         }
 
         // Whether a hierarchy root is the player prefab, by its name, read once per root (a name read
-        // is a new string, and CasterTick asks for every caster every 10 s).
-        static readonly Dictionary<Transform, bool> playerRoots = new Dictionary<Transform, bool>();
+        // is a new string, and CasterTick looks at every root every 10 s).
+        static readonly Dictionary<GameObject, bool> playerRoots = new Dictionary<GameObject, bool>();
 
-        static bool PlayerRoot(Transform root)
+        static bool PlayerRoot(GameObject root)
         {
             bool player;
             if (playerRoots.TryGetValue(root, out player)) return player;
@@ -141,11 +148,55 @@ namespace CrowCompat
             return playerRoots[root] = root.name.StartsWith("CharacterCameraPrefab");
         }
 
+        // The player rules' renderers: those under a root named so (PlayerRoot), in a loaded scene or in
+        // DontDestroyOnLoad (the player's), on active GameObjects (FindObjectsOfType lists no others), made again
+        // at each pass, so they follow the player's hierarchy as it is then: PlayerSplit's UI Canvases and RigPark's
+        // CrowRigPark are roots of other names, as before. Until 21 Oct each caster's transform.root was asked,
+        // which made a managed Transform, held by one of IL2CPP's pinned GC handles until the transform is
+        // destroyed (Memory.cs, GcHandles), for every caster (Haunted Hilltop 5,067; with VitaLit's layer change
+        // 700-800 fewer handles there in the Windows IL2CPP player, so most of them had one anyway); the areas
+        // have one or two roots, and the renderers found here are casters' too, which FindObjectsOfType makes anyway.
+        static readonly HashSet<Renderer> playerRenderers = new HashSet<Renderer>();
+        static readonly List<GameObject> roots = new List<GameObject>();
+        static readonly List<Renderer> found = new List<Renderer>();
+        static Scene kept;  // DontDestroyOnLoad's scene, which SceneManager doesn't list
+
+        static void PlayerRenderers()
+        {
+            playerRenderers.Clear();
+            if (!kept.IsValid())
+            {
+                var probe = new GameObject("CrowDrawsScene");
+                UnityEngine.Object.DontDestroyOnLoad(probe);
+                kept = probe.scene;
+                UnityEngine.Object.DestroyImmediate(probe);
+            }
+            for (int i = -1; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = i < 0 ? kept : SceneManager.GetSceneAt(i);
+                if (!scene.IsValid() || (i >= 0 && !scene.isLoaded)) continue;  // a scene still loading has no player roots
+                scene.GetRootGameObjects(roots);
+                foreach (GameObject root in roots)
+                {
+                    if (!PlayerRoot(root)) continue;
+                    root.GetComponentsInChildren(false, found);
+                    foreach (Renderer renderer in found) playerRenderers.Add(renderer);
+                }
+            }
+            roots.Clear();
+            found.Clear();
+        }
+
         static bool CasterOff(Renderer renderer, string rule)
         {
             if (rule == "off") return true;
-            // player: only the player's own parts (Mara, under CharacterCameraPrefab) keep their shadows.
-            if (rule == "player") return !PlayerRoot(renderer.transform.root);
+            // player: only the player's own parts (Mara, under CharacterCameraPrefab) keep their shadows. The
+            // scenes without the player prefab in play (no MaraLoader: Ladder, Driving Intro, Ending Sequence,
+            // Results, CrowQuest Unlock; their Mara is a model of the scene's own) get every shadow off
+            // (Ladder: "casters player: 43 of 43 off"). Left so: at the PS Vita's 12 m shadow distance most of
+            // them would draw none anyway (Ladder's camera is 15.3 m from the climber; the Driving Intro's and
+            // the Ending's start 18.7 and 12.3 m from their scene's origin).
+            if (rule == "player") return !playerRenderers.Contains(renderer);
             Bounds bounds = renderer.bounds;
             Vector3 size = bounds.size;
             // player:<m>: the player's parts of m metres (bounds diagonal) or more (Mara has 39 casters:
@@ -153,7 +204,7 @@ namespace CrowCompat
             if (rule.StartsWith("player:"))
             {
                 float least;
-                return !PlayerRoot(renderer.transform.root) ||
+                return !playerRenderers.Contains(renderer) ||
                        (float.TryParse(rule.Substring(7), NumberStyles.Float, CultureInfo.InvariantCulture, out least) && size.magnitude < least);
             }
             if (rule == "flat") return Flat(size);

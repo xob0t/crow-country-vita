@@ -10,8 +10,9 @@ using UnityEngine.SceneManagement;
 // Lighting and shadow settings, for trying the PS Vita's cheaper ones on any player. The game uses
 // one quality level (4 pixel lights, soft and hard shadows at High resolution, 50 m shadow
 // distance); in Station Square that is about 300 base draws, 250-270 additive light draws and one
-// shadow-casting directional light a frame (Diag's heartbeat). Each flag overrides one setting, at
-// start and after every scene load:
+// shadow-casting directional light a frame (the heartbeat's estimate then; it and -crow-light-report,
+// which modelled the additive passes, went on 21 Oct: VitaLit's one-pass lighting has none). Each
+// flag overrides one setting, at start and after every scene load:
 //   -crow-pixel-lights <n>          lights per object drawn per pixel (the others per vertex)
 //   -crow-shadows off|hard|all      no shadows, hard shadows only, or the game's soft and hard
 //   -crow-shadow-distance <m>       how far from the camera shadows are drawn
@@ -35,8 +36,6 @@ using UnityEngine.SceneManagement;
 //                                   at that moment (vita.py crashes --pull --thread <name>)
 //   -crow-gfx-workers <p>:<cpus>|game  Unity's job workers' priority and CPUs (PS Vita default 64:1; see
 //                                   GfxThreads); the cycles take workers= and gfxthread=
-//   -crow-light-report <s>        every s seconds, the forward renderer's light passes as Unity
-//                                   assigns them, per light (CROW_LIGHTS, CROW_LIGHT; see LightReport)
 //   -crow-ab <s> <path> <changes>   s seconds after a scene load, stop time, save <path>-a.png, apply
 //                                   the changes (comma-separated: pixel=<n>,
 //                                   shadows=off|hard|all, distance=<m>, resolution=<0-3>, and
@@ -68,9 +67,10 @@ namespace CrowCompat
             string[] args = ProbeFiles.Args;
             float profile = CrowFlags.Number(args, "-crow-loop-profile", -1);
             if (profile > 0) Diag.Guard("LoopProfile", () => LoopProfile.Install(profile));
-            float report = CrowFlags.Number(args, "-crow-light-report", -1);
-            if (report > 0) Diag.Guard("LightReport", () => LightReport.Install(report));
-            Diag.Guard("Draws", () => Draws.Install(args));
+            Diag.Guard("Draws", () => Draws.Install(args));  // -crow-casters
+            Diag.Guard("Merge", () => Merge.Install(args));  // Merge.cs, PlayerMerge.cs
+            Diag.Guard("Cameras", () => Cameras.Install(args));  // Cameras.cs: -crow-rt-cameras, -crow-menu-cull, -crow-near-plane, UiPark
+            Diag.Guard("DrawReport", () => Draws.InstallReport(args));  // -crow-draw-report
             Diag.Guard("Perf", () => Perf.Install(args));
             Diag.Guard("VitaLit", () => VitaLit.Install(args));
             int ab = Array.IndexOf(args, "-crow-ab");
@@ -86,7 +86,8 @@ namespace CrowCompat
             if (Application.platform == RuntimePlatform.PSP2)
             {
                 // The PS Vita's shadows: hard, Low resolution, 12 m, and (Draws.cs) only the player's
-                // parts cast them. The shadow pass's GPU cost is mostly fixed: in Roadside with one-pass
+                // parts cast them (none in the scenes without the player prefab: Ladder, the Driving
+                // Intro, the Ending; see Draws.CasterOff). The shadow pass's GPU cost is mostly fixed: in Roadside with one-pass
                 // lighting (VitaLit.cs) the game's soft Medium 50 m shadows take a frame from 33.4 to
                 // 38 ms, these 33.3 (30 fps), with Mara's shadow kept.
                 if (shadows == null) shadows = "hard";
@@ -105,7 +106,7 @@ namespace CrowCompat
         {
             GfxThreads.Change, Perf.Change, EnemyCost.Change, FixedStep.Change, FastPaths.Change, Decor.Change, SharedClosures.Change,
             FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change, Pad.Change,
-            Clock.Change, TweenProbe.Change
+            Clock.Change, TweenProbe.Change, GcHandles.Change
         };
 
         // Applies a change list (-crow-ab, -crow-cycle, -crow-fight-cycle).
@@ -373,9 +374,9 @@ namespace CrowCompat
             totals = new long[labels.Count];
             PlayerLoop.SetPlayerLoop(root);
             if (Array.IndexOf(ProbeFiles.Args, "-crow-frame-probe") >= 0) FrameProbe.Start();
-            Camera.onPreCull += camera => CameraMark(camera, 0);
-            Camera.onPreRender += camera => CameraMark(camera, 1);
-            Camera.onPostRender += camera => CameraMark(camera, 2);
+            CrowEvents.PreCull("LoopProfile.onPreCull", camera => CameraMark(camera, 0));
+            CrowEvents.PreRender("LoopProfile.onPreRender", camera => CameraMark(camera, 1));
+            CrowEvents.PostRender("LoopProfile.onPostRender", camera => CameraMark(camera, 2));
             Debug.Log("CROW_LOOP installed " + labels.Count + " markers");
         }
 
@@ -887,188 +888,6 @@ namespace CrowCompat
             lock (gate) if (result >= 0 && !original.ContainsKey(uid)) original[uid] = old;
             Debug.Log("CROW_GFX_THREADS " + name + " " + value + " (was priority 0x" + old[0].ToString("x") + " cpus 0x" + old[1].ToString("x") + ")" +
                       (result < 0 ? " failed 0x" + result.ToString("X8") : ""));
-        }
-    }
-
-    // -crow-light-report: the forward renderer's passes, worked out as Unity assigns lights to each
-    // visible renderer: lights whose culling mask has its layer and whose range (and spot cone) reach
-    // its bounds; Important ones first, then by brightness at its centre; the first
-    // max(pixelLightCount, Important ones) are drawn per pixel, the brightest directional one among
-    // them in the base pass, every other one in an additive pass per material. The rest go to the
-    // base pass's 4 vertex lights (point lights) and spherical harmonics. Only materials whose shader
-    // has a ForwardAdd pass count (Standard, SFBStandard and their kind).
-    // CROW_LIGHTS: the totals, with the additive draws at 1-4 pixel lights; CROW_LIGHT: per light,
-    // the additive draws it causes and how many renderers it reaches, the costliest first.
-    static class LightReport
-    {
-        static float every, lastReport;
-        static bool detail;
-
-        public static void Install(float seconds)
-        {
-            every = seconds;
-            CrowEvents.Loaded("LightReport.sceneLoaded", (scene, mode) => detail = true);
-            CrowEvents.BeforeRender("LightReport.Tick", Tick);
-        }
-
-        static void Tick()
-        {
-            float now = Time.realtimeSinceStartup;
-            if (now - lastReport < every) return;
-            lastReport = now;
-            try
-            {
-                Report(detail);
-                detail = false;
-            }
-            catch (Exception exception)
-            {
-                Debug.Log("CROW_LIGHTS failed: " + exception);
-            }
-        }
-
-        static readonly string[] litShaders = { "SFBStandard", "Standard", "Standard (Specular setup)", "ProBuilder/Standard Vertex Color", "Particles/Standard Surface", "Autodesk Interactive" };
-
-        static bool HasAddPass(Material material)
-        {
-            if (material == null || material.shader == null) return false;
-            string name = material.shader.name;
-            return Array.IndexOf(litShaders, name) >= 0 || (name.StartsWith("Legacy Shaders/") && !name.Contains("Particles") && !name.Contains("Unlit"));
-        }
-
-        static float Luminance(Color c)
-        {
-            return c.r * 0.3f + c.g * 0.59f + c.b * 0.11f;
-        }
-
-        class Stat
-        {
-            public Light light;
-            public int reached, add, pixel;
-        }
-
-        static void Report(bool perLight)
-        {
-            var lights = UnityEngine.Object.FindObjectsOfType<Light>()
-                .Where(l => l.isActiveAndEnabled && l.intensity > 0f && l.type != LightType.Area)
-                .Select(l => new Stat { light = l }).ToList();
-            int pixelCount = QualitySettings.pixelLightCount;
-            int renderers = 0, litMaterials = 0, unlitMaterials = 0, baseDraws = 0, vertexLit = 0;
-            var addAt = new int[5];
-            var shaders = new Dictionary<string, int>();
-            var reaching = new List<KeyValuePair<Stat, float>>();
-            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-            {
-                if (!renderer.enabled || !renderer.isVisible) continue;
-                if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
-                renderers++;
-                int lit = 0;
-                foreach (Material material in renderer.sharedMaterials)
-                {
-                    baseDraws++;
-                    if (HasAddPass(material)) lit++;
-                    else unlitMaterials++;
-                    if (perLight && material != null && material.shader != null)
-                    {
-                        int count;
-                        shaders.TryGetValue(material.shader.name, out count);
-                        shaders[material.shader.name] = count + 1;
-                    }
-                }
-                litMaterials += lit;
-                if (lit == 0) continue;
-                Bounds bounds = renderer.bounds;
-                int layer = 1 << renderer.gameObject.layer;
-                reaching.Clear();
-                foreach (Stat stat in lights)
-                {
-                    Light light = stat.light;
-                    if ((light.cullingMask & layer) == 0) continue;
-                    float score = light.intensity * Luminance(light.color);
-                    if (light.type != LightType.Directional)
-                    {
-                        Vector3 position = light.transform.position;
-                        float squared = bounds.SqrDistance(position);
-                        if (squared > light.range * light.range) continue;
-                        if (light.type == LightType.Spot)
-                        {
-                            Vector3 to = bounds.center - position;
-                            float distance = to.magnitude, radius = bounds.extents.magnitude;
-                            if (distance > radius)
-                            {
-                                float slack = Mathf.Asin(Mathf.Clamp01(radius / distance)) * Mathf.Rad2Deg;
-                                if (Vector3.Angle(light.transform.forward, to) - slack > light.spotAngle * 0.5f) continue;
-                            }
-                        }
-                        float centre = (bounds.center - position).sqrMagnitude / (light.range * light.range);
-                        score /= 1f + 25f * centre;
-                    }
-                    if (light.renderMode == LightRenderMode.ForcePixel) score += 1e6f;
-                    if (light.renderMode == LightRenderMode.ForceVertex) score -= 1e6f;
-                    stat.reached++;
-                    reaching.Add(new KeyValuePair<Stat, float>(stat, score));
-                }
-                reaching.Sort((a, b) => b.Value.CompareTo(a.Value));
-                int important = reaching.Count(p => p.Key.light.renderMode == LightRenderMode.ForcePixel);
-                for (int count = 1; count <= 4; count++)
-                {
-                    int pixel = Pixel(reaching, count, important);
-                    addAt[count] += lit * Math.Max(0, pixel - (HasDirectional(reaching, pixel) ? 1 : 0));
-                }
-                int pixels = Pixel(reaching, pixelCount, important);
-                bool main = HasDirectional(reaching, pixels);
-                Light mainLight = null;
-                for (int i = 0; i < pixels && main; i++)
-                    if (reaching[i].Key.light.type == LightType.Directional)
-                    {
-                        mainLight = reaching[i].Key.light;
-                        break;
-                    }
-                for (int i = 0; i < pixels; i++)
-                {
-                    reaching[i].Key.pixel++;
-                    if (reaching[i].Key.light != mainLight) reaching[i].Key.add += lit;
-                }
-                if (reaching.Count > pixels) vertexLit++;
-            }
-            var line = new StringBuilder("CROW_LIGHTS scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
-            line.Append(" pixelLights=").Append(pixelCount).Append(" lights=").Append(lights.Count);
-            line.Append(" renderers=").Append(renderers).Append(" baseDraws=").Append(baseDraws);
-            line.Append(" litMaterials=").Append(litMaterials).Append(" unlitMaterials=").Append(unlitMaterials);
-            line.Append(" add=").Append(lights.Sum(s => s.add));
-            for (int count = 1; count <= 4; count++) line.Append(" add@").Append(count).Append('=').Append(addAt[count]);
-            line.Append(" withVertexLights=").Append(vertexLit);
-            line.Append(" shadowDistance=").Append(QualitySettings.shadowDistance).Append(" shadows=").Append(QualitySettings.shadows);
-            Debug.Log(line.ToString());
-            if (!perLight) return;
-            Debug.Log("CROW_LIGHTS shaders " + string.Join(" ", shaders.OrderByDescending(p => p.Value).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
-            foreach (Stat stat in lights.OrderByDescending(s => s.add).ThenByDescending(s => s.reached).Take(30))
-            {
-                Light light = stat.light;
-                var text = new StringBuilder("CROW_LIGHT add=").Append(stat.add).Append(" pixel=").Append(stat.pixel).Append(" reached=").Append(stat.reached);
-                text.Append(' ').Append(light.type).Append(" mode=").Append(light.renderMode).Append(" shadows=").Append(light.shadows);
-                text.Append(" range=").Append(light.range.ToString("F1")).Append(" intensity=").Append(light.intensity.ToString("F2"));
-                text.Append(" color=").Append(ColorUtility.ToHtmlStringRGB(light.color)).Append(" path=").Append(Path(light.transform).Replace(' ', '_'));
-                Debug.Log(text.ToString());
-            }
-        }
-
-        static int Pixel(List<KeyValuePair<Stat, float>> reaching, int count, int important)
-        {
-            int perPixel = reaching.Count(p => p.Key.light.renderMode != LightRenderMode.ForceVertex);
-            return Math.Min(perPixel, Math.Max(count, important));
-        }
-
-        static bool HasDirectional(List<KeyValuePair<Stat, float>> reaching, int pixel)
-        {
-            for (int i = 0; i < pixel; i++)
-                if (reaching[i].Key.light.type == LightType.Directional) return true;
-            return false;
-        }
-
-        static string Path(Transform transform)
-        {
-            return transform.parent == null ? transform.name : Path(transform.parent) + "/" + transform.name;
         }
     }
 }

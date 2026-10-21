@@ -82,7 +82,7 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             EnemyRebuild.Install(args);
-            SceneManager.sceneUnloaded += scene => Purge();
+            CrowEvents.Unloaded("EnemySplit.sceneUnloaded", scene => Purge());
             check = EnemyRebuild.CheckDebris;
         }
 

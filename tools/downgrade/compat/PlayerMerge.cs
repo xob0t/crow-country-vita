@@ -50,7 +50,7 @@ namespace CrowCompat
             if (playerReportAfter < 0f) return;
             CrowEvents.Loaded("PlayerMerge.report.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
+                if (!Scenes.IsArea(scene)) return;
                 playerReportAt = Time.realtimeSinceStartup + playerReportAfter;
             });
             CrowEvents.BeforeRender("PlayerMerge.report.onBeforeRender", () =>
@@ -578,7 +578,7 @@ namespace CrowCompat
             if (dry != null)
                 CrowEvents.Loaded("PlayerMerge.dry.sceneLoaded", (scene, mode) =>
                 {
-                    if (scene.name != "CrowMara") return;
+                    if (scene.name != MaraScene.Scene) return;
                     try
                     {
                         var lines = new List<string>();
@@ -595,7 +595,7 @@ namespace CrowCompat
             playerMode = value;
             CrowEvents.Loaded("PlayerMerge.switch.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name == "CrowMara" || (scene.name != "Logos" && scene.name != "Title" && scene.name != "CrowGap")) Debug.Log(SetPlayer(playerMode));
+                if (scene.name == MaraScene.Scene || Scenes.IsArea(scene)) Debug.Log(SetPlayer(playerMode));
             });
         }
 
@@ -621,7 +621,7 @@ namespace CrowCompat
 
         static Transform PlayerRoot()
         {
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             return player == null ? null : player.transform.root;
         }
 
@@ -810,7 +810,7 @@ namespace CrowCompat
             if (at + 3 < args.Length && int.TryParse(args[at + 3], out count)) times = count;
             CrowEvents.Loaded("PlayerShots.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
+                if (!Scenes.IsArea(scene)) return;
                 area = scene.name.Replace(' ', '_');
                 taken = 0;
                 next = Time.realtimeSinceStartup + every;
@@ -930,7 +930,7 @@ namespace CrowCompat
 
         static void Shoot()
         {
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");
+            GameObject player = MaraScene.FindPlayer();
             if (player == null) return;
             Transform body = player.transform.Find("character RIGIDBODY");
             if (body == null) body = player.transform;

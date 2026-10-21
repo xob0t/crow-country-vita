@@ -30,7 +30,6 @@ namespace CrowCompat
             "                         Rewired's active joystick elements and player 0's active actions\n" +
             "-crow-stall-dump <s>     crash the player when a frame has taken s seconds, for a core dump with the main thread's stack\n" +
             "-crow-stall-after <t>    with -crow-stall-dump, only frames that start t seconds or more after startup (skips earlier stalls)\n" +
-            "-crow-dump-text <s>      s seconds after the last scene load, log each TextMeshPro text with its font and mesh\n" +
             "-crow-language <name>    keep I2 Localization on this language (English, French, Japanese, Korean, \"Chinese (Simplified)\", ...)\n" +
             "-crow-find <regex> <s>   s seconds after each scene load, log every renderer (active or not) whose hierarchy path matches\n" +
             "                         the regex: active, enabled, isVisible, bounds, mesh, materials and shaders (CROW_FIND), for\n" +
@@ -44,12 +43,11 @@ namespace CrowCompat
         static float heartbeat, quitAfter = -1f, shotAfter = -1f;
         static string shotPath;
         static bool noVsync, mute, input;
-        static float dumpTextAfter = -1f;
         static System.Text.RegularExpressions.Regex findPattern;
         static float findAfter = -1f;
         static Vector3 teleportTo;
         static float teleportAfter = -1f;
-        static string textShader, language;
+        static string language;
         static PropertyInfo currentLanguage;
         static float lastLanguageCheck = -10f;
         static float stallDump = -1f, stallAfter;
@@ -60,8 +58,8 @@ namespace CrowCompat
         float started, lastBeat, lastLoad, worst;
         int frames, collections;
         double frameSum;
-        bool shotTaken, sceneRequested, textDumped, waitLogged, found, teleported;
-        float lastShaderSwap, lastInputReport = -10f;
+        bool shotTaken, sceneRequested, waitLogged, found, teleported;
+        float lastInputReport = -10f;
 
         // CrowCompat's start: every module's defaults (the PS Vita's among them) and flags, then the probe's
         // own. Each module on its own: one that throws (a flag it can't read) is logged and the rest go on.
@@ -105,7 +103,6 @@ namespace CrowCompat
             mute = args.Contains("-crow-mute");
             input = args.Contains("-crow-input");
             if (mute) AudioListener.volume = 0f;
-            dumpTextAfter = CrowFlags.Number(args, "-crow-dump-text", -1f);
             string find = CrowFlags.Value(args, "-crow-find");
             if (find != null)
             {
@@ -135,7 +132,6 @@ namespace CrowCompat
                     System.Globalization.CultureInfo.InvariantCulture, out seconds) ? seconds : 3f;
             }
             language = CrowFlags.Value(args, "-crow-language");
-            textShader = CrowFlags.Value(args, "-crow-text-shader");
             stallDump = CrowFlags.Number(args, "-crow-stall-dump", -1f);
             stallAfter = CrowFlags.Number(args, "-crow-stall-after", 0f);
             if (stallDump > 0f) new System.Threading.Thread(WatchForStall) { IsBackground = true, Name = "CrowStallWatch" }.Start();
@@ -193,7 +189,6 @@ namespace CrowCompat
             {
                 lastLoad = Time.realtimeSinceStartup;
                 shotTaken = false;
-                textDumped = false;
                 found = false;
                 teleported = false;
                 Debug.Log("CROW_DIAG scene loaded " + scene.name + " (" + mode + ") at " + lastLoad.ToString("F2") + " s");
@@ -283,12 +278,6 @@ namespace CrowCompat
                 ScreenCapture.CaptureScreenshot(shotPath);
                 Debug.Log("CROW_DIAG screenshot " + shotPath);
             }
-            if (dumpTextAfter >= 0f && !textDumped && now - lastLoad >= dumpTextAfter)
-            {
-                textDumped = true;
-                DumpText();
-                DumpCanvas();
-            }
             if (findPattern != null && !found && now - lastLoad >= findAfter)
             {
                 found = true;
@@ -303,11 +292,6 @@ namespace CrowCompat
             {
                 lastLanguageCheck = now;
                 KeepLanguage();
-            }
-            if (textShader != null && now - lastShaderSwap >= 1f)
-            {
-                lastShaderSwap = now;
-                SwapTextShader(textShader);
             }
             if (quitAfter >= 0f && now - started >= quitAfter)
             {
@@ -367,211 +351,6 @@ namespace CrowCompat
             Debug.Log("CROW_FIND " + count + " renderers match " + findPattern);
         }
 
-        // -crow-dump-text: each TextMeshPro text in the loaded scenes, with its font asset's tables and
-        // what TMP generated for it (read by reflection: CrowCompat doesn't reference TMP).
-        static void DumpText()
-        {
-            Type textType = Type.GetType("TMPro.TMP_Text, Unity.TextMeshPro");
-            if (textType == null)
-            {
-                Debug.Log("CROW_TEXT no TMPro.TMP_Text type");
-                return;
-            }
-            var all = Resources.FindObjectsOfTypeAll(textType).Cast<Component>().Where(c => c.gameObject.scene.IsValid()).ToArray();
-            Debug.Log("CROW_TEXT " + all.Length + " texts");
-            LogMissingCharacters(all);
-            foreach (Component text in all.OrderByDescending(c => c.gameObject.activeInHierarchy).Take(40))
-            {
-                object font = Get(text, "font");
-                object material = Get(text, "fontSharedMaterial") as Material;
-                object info = Get(text, "textInfo");
-                var mesh = Get(text, "mesh") as Mesh;
-                var line = new StringBuilder("CROW_TEXT ");
-                line.Append(Path(text.transform)).Append(" active=").Append(text.gameObject.activeInHierarchy);
-                line.Append(" world=").Append(text.transform.position.ToString("F1")).Append(" scale=").Append(text.transform.lossyScale.ToString("F3"));
-                line.Append(" rotation=").Append(text.transform.rotation.eulerAngles.ToString("F0"));
-                var box = text.transform as RectTransform;
-                if (box != null) line.Append(" rect=").Append(box.rect.ToString("F1"));
-                line.Append(" enabled=").Append(((Behaviour)text).enabled);
-                line.Append(" text='").Append((Get(text, "text") as string ?? "").Replace('\n', '|')).Append('\'');
-                line.Append(" font=").Append(font == null ? "null" : ((UnityEngine.Object)font).name);
-                if (font != null)
-                {
-                    line.Append(" glyphs=").Append(Count(Get(font, "glyphTable"))).Append(" chars=").Append(Count(Get(font, "characterTable")));
-                    line.Append(" atlas=").Append(Get(font, "atlasTexture") is Texture ? ((Texture)Get(font, "atlasTexture")).width + "x" + ((Texture)Get(font, "atlasTexture")).height : "null");
-                    object face = Get(font, "faceInfo");
-                    line.Append(" pointSize=").Append(face == null ? "?" : Get(face, "pointSize"));
-                    line.Append(" lineHeight=").Append(face == null ? "?" : Get(face, "lineHeight"));
-                }
-                line.Append(" shader=").Append(material == null ? "null" : ((Material)material).shader.name + (((Material)material).shader.isSupported ? "" : " (unsupported)"));
-                line.Append(" characters=").Append(info == null ? "?" : Get(info, "characterCount"));
-                line.Append(" vertices=").Append(mesh == null ? "?" : mesh.vertexCount.ToString());
-                if (mesh != null && mesh.vertexCount > 0)
-                {
-                    line.Append(" bounds=").Append(mesh.bounds.ToString("F2"));
-                    Color32[] colors = mesh.colors32;
-                    if (colors.Length > 0) line.Append(" vertexColor=").Append(colors[0]);
-                    var uv1 = new List<Vector2>();
-                    mesh.GetUVs(1, uv1);
-                    if (uv1.Count > 0) line.Append(" uv1=").Append(uv1[0].ToString("F3"));
-                }
-                var glyphs = font == null ? null : Get(font, "glyphTable") as System.Collections.IList;
-                if (glyphs != null && glyphs.Count > 40)
-                {
-                    object glyph = glyphs[40];
-                    line.Append(" glyph40=[index ").Append(Get(glyph, "index")).Append(" scale ").Append(Get(glyph, "scale"));
-                    object metrics = Get(glyph, "metrics");
-                    line.Append(" w ").Append(Get(metrics, "width")).Append(" h ").Append(Get(metrics, "height"));
-                    line.Append(" adv ").Append(Get(metrics, "horizontalAdvance"));
-                    object rect = Get(glyph, "glyphRect");
-                    line.Append(" rect ").Append(Get(rect, "x")).Append(',').Append(Get(rect, "y")).Append(' ')
-                        .Append(Get(rect, "width")).Append('x').Append(Get(rect, "height")).Append(']');
-                }
-                line.Append(" size=").Append(Get(text, "fontSize")).Append(" color=").Append(Get(text, "color"));
-                var canvasRenderer = text.GetComponent<CanvasRenderer>();
-                if (canvasRenderer != null)
-                {
-                    line.Append(" cr=[materials ").Append(canvasRenderer.materialCount);
-                    Material drawn = canvasRenderer.materialCount > 0 ? canvasRenderer.GetMaterial(0) : null;
-                    line.Append(" material ").Append(drawn == null ? "null" : drawn.name + "/" + drawn.shader.name);
-                    line.Append(" cull ").Append(canvasRenderer.cull).Append(" alpha ").Append(canvasRenderer.GetAlpha())
-                        .Append(" color ").Append(canvasRenderer.GetColor());
-                    float groups = 1f;
-                    foreach (CanvasGroup group in text.GetComponentsInParent<CanvasGroup>(true)) groups *= group.alpha;
-                    line.Append(" groups ").Append(groups).Append(" absoluteDepth ").Append(canvasRenderer.absoluteDepth);
-                    line.Append(" hasMoved ").Append(canvasRenderer.hasMoved).Append(']');
-                    if (drawn != null)
-                    {
-                        line.Append(" props=[");
-                        foreach (string name in new[] { "_GradientScale", "_ScaleRatioA", "_ScaleRatioB", "_ScaleRatioC", "_FaceDilate", "_WeightNormal",
-                                     "_WeightBold", "_TextureWidth", "_TextureHeight", "_ScaleX", "_ScaleY", "_PerspectiveFilter", "_Sharpness",
-                                     "_OutlineWidth", "_OutlineSoftness", "_VertexOffsetX", "_VertexOffsetY", "_MaskSoftnessX", "_StencilComp" })
-                            if (drawn.HasProperty(name)) line.Append(name).Append('=').Append(drawn.GetFloat(name)).Append(' ');
-                        foreach (string name in new[] { "_FaceColor", "_OutlineColor" })
-                            if (drawn.HasProperty(name)) line.Append(name).Append('=').Append(drawn.GetColor(name)).Append(' ');
-                        if (drawn.HasProperty("_ClipRect")) line.Append("_ClipRect=").Append(drawn.GetVector("_ClipRect")).Append(' ');
-                        line.Append("keywords=").Append(string.Join(",", drawn.shaderKeywords)).Append(" tex=")
-                            .Append(drawn.mainTexture == null ? "null" : drawn.mainTexture.name + " " + drawn.mainTexture.width + "x" + drawn.mainTexture.height)
-                            .Append(" texformat=").Append(drawn.mainTexture is Texture2D ? ((Texture2D)drawn.mainTexture).format.ToString() : "?").Append(']');
-                    }
-                }
-                Canvas canvas = text.GetComponentInParent<Canvas>();
-                if (canvas != null)
-                    line.Append(" canvas=[").Append(canvas.name).Append(' ').Append(canvas.renderMode).Append(" order ").Append(canvas.sortingOrder)
-                        .Append(" camera ").Append(canvas.worldCamera == null ? "null" : canvas.worldCamera.name)
-                        .Append(" channels ").Append(canvas.additionalShaderChannels).Append(']');
-                Debug.Log(line.ToString());
-            }
-        }
-
-        // With -crow-dump-text: each text whose characters its font asset, the font's fallbacks and TMP's
-        // default font (and its fallbacks) lack: TMP draws those as the missing glyph, or nothing.
-        static void LogMissingCharacters(Component[] texts)
-        {
-            Type settings = Type.GetType("TMPro.TMP_Settings, Unity.TextMeshPro");
-            object defaultFont = null;
-            try
-            {
-                PropertyInfo property = settings == null ? null : settings.GetProperty("defaultFontAsset", BindingFlags.Static | BindingFlags.Public);
-                defaultFont = property == null ? null : property.GetValue(null, null);
-            }
-            catch (Exception) { }
-            int withMissing = 0;
-            foreach (Component text in texts)
-            {
-                object font = Get(text, "font");
-                string content = Get(text, "text") as string;
-                if (font == null || string.IsNullOrEmpty(content)) continue;
-                var fonts = new List<object>();
-                AddFontChain(font, fonts);
-                if (defaultFont != null) AddFontChain(defaultFont, fonts);
-                var missing = new List<char>();
-                bool inTag = false;
-                foreach (char c in content)
-                {
-                    if (c == '<') inTag = true;
-                    if (inTag)
-                    {
-                        if (c == '>') inTag = false;
-                        continue;
-                    }
-                    if (c < 0x20 || c == 0xA0 || char.IsSurrogate(c) || missing.Contains(c)) continue;
-                    if (!fonts.Any(f => { var table = Get(f, "characterLookupTable") as System.Collections.IDictionary; return table != null && table.Contains((uint)c); }))
-                        missing.Add(c);
-                }
-                if (missing.Count == 0) continue;
-                withMissing++;
-                Debug.Log("CROW_TEXT_MISSING " + Path(text.transform) + " active=" + text.gameObject.activeInHierarchy + " font=" + ((UnityEngine.Object)font).name +
-                          " missing=" + string.Join(" ", missing.Select(c => c + "(U+" + ((int)c).ToString("X4") + ")").ToArray()));
-            }
-            Debug.Log("CROW_TEXT_MISSING " + withMissing + " of " + texts.Length + " texts lack characters");
-        }
-
-        static void AddFontChain(object font, List<object> fonts)
-        {
-            if (font == null || fonts.Contains(font)) return;
-            fonts.Add(font);
-            var fallbacks = Get(font, "fallbackFontAssetTable") as System.Collections.IEnumerable;
-            if (fallbacks != null)
-                foreach (object fallback in fallbacks)
-                    if (fallback != null && !fallback.Equals(null)) AddFontChain(fallback, fonts);
-        }
-
-        // With -crow-dump-text: every active canvas element in draw order, to find what covers a text.
-        static void DumpCanvas()
-        {
-            var renderers = Resources.FindObjectsOfTypeAll<CanvasRenderer>()
-                .Where(r => r.gameObject.scene.IsValid() && r.gameObject.activeInHierarchy)
-                .OrderBy(r => r.absoluteDepth).ToArray();
-            Debug.Log("CROW_CANVAS " + renderers.Length + " active elements");
-            foreach (CanvasRenderer renderer in renderers)
-            {
-                var line = new StringBuilder("CROW_CANVAS depth ").Append(renderer.absoluteDepth).Append(' ').Append(Path(renderer.transform));
-                Behaviour graphic = renderer.GetComponents<Behaviour>().FirstOrDefault(b => b != null && b.GetType().GetProperty("mainTexture") != null);
-                line.Append(" graphic=").Append(graphic == null ? "none" : graphic.GetType().Name + (graphic.enabled ? "" : " (disabled)"));
-                if (graphic != null)
-                {
-                    line.Append(" color=").Append(Get(graphic, "color"));
-                    var texture = Get(graphic, "mainTexture") as Texture;
-                    line.Append(" texture=").Append(texture == null ? "null" : texture.name);
-                    var drawn = renderer.materialCount > 0 ? renderer.GetMaterial(0) : null;
-                    line.Append(" material=").Append(drawn == null ? "null" : drawn.name + "/" + drawn.shader.name);
-                }
-                var box = renderer.transform as RectTransform;
-                if (box != null)
-                {
-                    var corners = new Vector3[4];
-                    box.GetWorldCorners(corners);
-                    line.Append(" screen=").Append(corners[0].ToString("F0")).Append('-').Append(corners[2].ToString("F0"));
-                }
-                line.Append(" cull ").Append(renderer.cull).Append(" alpha ").Append(renderer.GetAlpha());
-                float groups = 1f;
-                foreach (CanvasGroup group in renderer.GetComponentsInParent<CanvasGroup>(true)) groups *= group.alpha;
-                line.Append(" groups ").Append(groups);
-                Debug.Log(line.ToString());
-            }
-        }
-
-        // -crow-text-shader <name>: every TextMeshPro text's material drawn with that shader instead,
-        // to tell a shader that draws nothing from text that has no geometry.
-        static void SwapTextShader(string name)
-        {
-            Shader shader = Shader.Find(name);
-            Type textType = Type.GetType("TMPro.TMP_Text, Unity.TextMeshPro");
-            if (shader == null || textType == null) return;
-            foreach (UnityEngine.Object text in Resources.FindObjectsOfTypeAll(textType))
-            {
-                var material = Get(text, "fontSharedMaterial") as Material;
-                if (material != null && material.shader != shader) material.shader = shader;
-                var canvasRenderer = ((Component)text).GetComponent<CanvasRenderer>();
-                for (int i = 0; canvasRenderer != null && i < canvasRenderer.materialCount; i++)
-                {
-                    Material drawn = canvasRenderer.GetMaterial(i);
-                    if (drawn != null && drawn.shader != shader) drawn.shader = shader;
-                }
-            }
-        }
-
         // -crow-language: the game sets I2's language from its settings save at startup, so this sets
         // LocalizationManager.CurrentLanguage (by reflection) whenever it differs, every half second.
         static void KeepLanguage()
@@ -621,11 +400,6 @@ namespace CrowCompat
         {
             var collection = list as System.Collections.ICollection;
             return collection == null ? "null" : collection.Count.ToString();
-        }
-
-        static string Path(Transform transform)
-        {
-            return transform.parent == null ? transform.name : Path(transform.parent) + "/" + transform.name;
         }
 
         // -crow-input: Unity's joystick buttons (any joystick, then joysticks 1-2) as they go down,
@@ -901,46 +675,21 @@ namespace CrowCompat
             int gc = GC.CollectionCount(0);
             int visible = 0, renderers = 0, lit = 0;
             var lights = new Dictionary<LightType, int>();
-            var active = new List<Light>();
             foreach (Light light in FindObjectsOfType<Light>())
             {
                 if (!light.enabled || light.intensity <= 0f || !light.gameObject.activeInHierarchy) continue;
-                active.Add(light);
                 lit++;
                 int count;
                 lights.TryGetValue(light.type, out count);
                 lights[light.type] = count + 1;
             }
-            // Estimated draw calls, before the engine's batching: each visible renderer's materials
-            // in the base pass, and an additive pass per point or spot light whose range reaches its
-            // bounds, up to the quality level's pixel lights (the brightest directional light is in
-            // the base pass).
-            int drawBase = 0, drawAdd = 0, pixelLights = QualitySettings.pixelLightCount;
+            // The draw estimate (drawBase, drawAdd) and the shadowed lights by type went on 21 Oct: it counted
+            // an additive pass per point light in reach whatever the shader, and VitaLit's one pass has none.
             foreach (Renderer renderer in FindObjectsOfType<Renderer>())
             {
                 if (!renderer.enabled) continue;
                 renderers++;
-                if (!renderer.isVisible) continue;
-                visible++;
-                int materials = renderer.sharedMaterials.Length;
-                drawBase += materials;
-                if (renderer is ParticleSystemRenderer || renderer is SpriteRenderer) continue;
-                Bounds bounds = renderer.bounds;
-                int reaching = 0;
-                foreach (Light light in active)
-                {
-                    if (light.type == LightType.Directional) continue;
-                    if (bounds.SqrDistance(light.transform.position) <= light.range * light.range) reaching++;
-                }
-                drawAdd += Math.Min(reaching, pixelLights) * materials;
-            }
-            var shadowed = new Dictionary<LightType, int>();
-            foreach (Light light in active)
-            {
-                if (light.shadows == LightShadows.None) continue;
-                int count;
-                shadowed.TryGetValue(light.type, out count);
-                shadowed[light.type] = count + 1;
+                if (renderer.isVisible) visible++;
             }
             var line = new StringBuilder("HEARTBEAT");
             line.Append(" t=").Append((now - started).ToString("F1"));
@@ -953,8 +702,6 @@ namespace CrowCompat
             line.Append(" renderers=").Append(renderers).Append(" visible=").Append(visible);
             line.Append(" lights=").Append(lit);
             foreach (KeyValuePair<LightType, int> pair in lights) line.Append(' ').Append(pair.Key).Append('=').Append(pair.Value);
-            line.Append(" drawBase=").Append(drawBase).Append(" drawAdd=").Append(drawAdd);
-            foreach (KeyValuePair<LightType, int> pair in shadowed) line.Append(" shadow").Append(pair.Key).Append('=').Append(pair.Value);
             Debug.Log(line.ToString());
             lastBeat = now;
             frames = 0;
@@ -965,15 +712,19 @@ namespace CrowCompat
     }
 
     // The engine events CrowCompat's modules hang their work on: Canvas.willRenderCanvases (every frame),
-    // Application.onBeforeRender (every frame) and SceneManager.sceneLoaded (every load). Each is one multicast
-    // delegate that Unity 2018.2 invokes with no try/catch, so a handler that throws skips every handler after
-    // it, for that frame or that load: 26 CrowCompat handlers share willRenderCanvases, MaraScene's Poll and
-    // ScenePrefetch's Request among them; the gap's drain is the last onBeforeRender handler (hooked at the first
-    // area change), and SceneGap.Arrived (the area made active: its fog) comes after Quality's, Perf's and VitaLit's load handlers.
+    // Application.onBeforeRender (every frame), SceneManager.sceneLoaded and sceneUnloaded (every load and
+    // unload), and the cameras' Camera.onPreCull, onPreRender and onPostRender (every camera's render). Each is
+    // one multicast delegate that Unity 2018.2 invokes with no try/catch, so a handler that throws skips every
+    // handler after it, for that frame, load or render: 26 CrowCompat handlers share willRenderCanvases, MaraScene's
+    // Poll and ScenePrefetch's Request among them; the gap's drain is the last onBeforeRender handler (hooked at the
+    // first area change); SceneGap.Arrived (the area made active: its fog) comes after Quality's, Perf's and VitaLit's
+    // load handlers; NearPlane's fog put back and Cameras.AfterRender (the skipped render-texture cameras on again)
+    // share onPostRender; EnemySplit.Purge shares sceneUnloaded with up to ten others.
     // One module failing every frame would hold the player on a black screen with an exception a frame in the log.
-    // So every module subscribes here: each handler runs in its own try/catch, a failure is logged with the
+    // So every module subscribes to those here: each handler runs in its own try/catch, a failure is logged with the
     // handler's name (CROW_HOOK_FAIL: the first with its stack, then a count every 1000th) and the handlers after
-    // it run. Each is subscribed where it was, so the order is the same (21 Oct).
+    // it run. Each is subscribed where it was, so the order is the same (21 Oct; the camera callbacks and
+    // sceneUnloaded since the second round that day). Left raw: activeSceneChanged (the load trace's one handler).
     public static class CrowEvents
     {
         static readonly Dictionary<string, int> failures = new Dictionary<string, int>();
@@ -1026,6 +777,51 @@ namespace CrowCompat
                 try
                 {
                     handler(scene, mode);
+                }
+                catch (Exception exception)
+                {
+                    Fail(name, exception);
+                }
+            };
+        }
+
+        internal static void Unloaded(string name, Action<Scene> handler)
+        {
+            SceneManager.sceneUnloaded += scene =>
+            {
+                try
+                {
+                    handler(scene);
+                }
+                catch (Exception exception)
+                {
+                    Fail(name, exception);
+                }
+            };
+        }
+
+        internal static void PreCull(string name, Camera.CameraCallback handler)
+        {
+            Camera.onPreCull += Guarded(name, handler);
+        }
+
+        internal static void PreRender(string name, Camera.CameraCallback handler)
+        {
+            Camera.onPreRender += Guarded(name, handler);
+        }
+
+        internal static void PostRender(string name, Camera.CameraCallback handler)
+        {
+            Camera.onPostRender += Guarded(name, handler);
+        }
+
+        static Camera.CameraCallback Guarded(string name, Camera.CameraCallback handler)
+        {
+            return camera =>
+            {
+                try
+                {
+                    handler(camera);
                 }
                 catch (Exception exception)
                 {

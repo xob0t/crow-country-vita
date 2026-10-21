@@ -196,7 +196,7 @@ namespace CrowCompat
             EnemyShots.Install(args);
             CrowEvents.Loaded("EnemyRebuild.sceneLoaded", (scene, mode) =>
             {
-                if (scene.name == "Logos" || scene.name == "Title" || scene.name == "CrowMara" || scene.name == "CrowGap") return;
+                if (!Scenes.IsArea(scene)) return;
                 string atlas = atlasOn ? "" : SetAtlas(false, scene);
                 string flatten = flattenOn ? "" : SetFlatten(false, scene);
                 if (log || !atlasOn || !flattenOn)
@@ -411,7 +411,7 @@ namespace CrowCompat
         {
             var hidden = new List<Renderer>();
             var roots = new List<Transform>();
-            GameObject player = GameObject.Find("CharacterCameraPrefab(Clone)");  // in DontDestroyOnLoad's scene
+            GameObject player = MaraScene.FindPlayer();  // in DontDestroyOnLoad's scene
             if (player != null) roots.Add(player.transform);
             if (Fight.PlayerBody != null) roots.Add(Fight.PlayerBody.transform.root);
             foreach (Transform root in roots.Distinct())
