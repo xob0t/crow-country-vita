@@ -19,6 +19,9 @@ partial class DowngradeAssemblies
     static int RouteObjectNames(ModuleDefinition module)
     {
         TypeDefinition names = compat["CrowCompat.Names"];
+        // Reads and writes are rules of their own, registered before the scan: one with no site fails the run.
+        Count("object names get_name", 0);
+        Count("object names set_name", 0);
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
             foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
@@ -145,6 +148,8 @@ partial class DowngradeAssemblies
         MethodDefinition boxed = property.Methods.Single(m => m.Name == "CrowSetMember");
         MethodDefinition setValue = property.Methods.Single(m => m.Name == "SetValue" && m.Parameters.Count == 0 && m.HasBody);
         var helpers = new System.Collections.Generic.Dictionary<string, MethodDefinition>();
+        // Each row is a rule (SetValue has one set of each type), registered before the scan: one with no site fails the run.
+        foreach (string[] row in TypedSets) Count("typed property set " + row[0], 0);
         int count = 0;
         foreach (Instruction call in setValue.Body.Instructions.Where(i => i.OpCode == OpCodes.Call && i.Operand == boxed).ToArray())
         {
@@ -163,7 +168,7 @@ partial class DowngradeAssemblies
             box.OpCode = OpCodes.Nop;
             box.Operand = null;
             call.Operand = helper;
-            Count("typed property sets", 1);
+            Count("typed property set " + typed[0], 1);
             count++;
         }
         return count;

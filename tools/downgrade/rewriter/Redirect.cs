@@ -222,8 +222,11 @@ partial class DowngradeAssemblies
     static int RedirectMembers(ModuleDefinition module)
     {
         // Sites of each rule but the shims, for the NO MATCH check: Type.GetType, Screen calls,
-        // BinaryFormatter, save paths, the clock.
-        var sites = new int[5];
+        // BinaryFormatter, CrowCountrySave's "Saves" literals, the clock, persistentDataPath. The two save
+        // path rules count apart: I2 Localization, SmoothSave and three screenshot actions call
+        // persistentDataPath too, so its sites would hide a miss in CrowCountrySave (saves written to
+        // the read-only app folder on the PS Vita).
+        var sites = new int[6];
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
         foreach (MethodDefinition method in type.Methods)
@@ -234,10 +237,11 @@ partial class DowngradeAssemblies
                 var field = instruction.Operand as FieldReference;
                 if (field != null && IsMissing(field)) problems.Add(module.Name + ": field " + field.FullName);
                 // Save paths: CrowCountrySave's relative "Saves" folder, and persistentDataPath, which
-                // the PS Vita player leaves empty. See CrowCompat Saves.
+                // the PS Vita player leaves empty. See CrowCompat Saves. OuterType: the literals may sit in
+                // one of the class's lambdas or iterators.
                 var literal = instruction.Operand as string;
                 if (instruction.OpCode == OpCodes.Ldstr && (literal == "Saves" || literal == "Saves/") &&
-                    type.FullName == "com.sfbgames.playmaker.CrowCountrySave")
+                    OuterType(type).FullName == "com.sfbgames.playmaker.CrowCountrySave")
                 {
                     string name = literal == "Saves" ? "Folder" : "Prefix";
                     instruction.OpCode = OpCodes.Call;
@@ -251,7 +255,7 @@ partial class DowngradeAssemblies
                 if (called.DeclaringType.FullName == "UnityEngine.Application" && called.Name == "get_persistentDataPath")
                 {
                     instruction.Operand = module.ImportReference(compat["CrowCompat.Saves"].Methods.First(m => m.Name == "PersistentDataPath"));
-                    sites[3]++;
+                    sites[5]++;
                     count++;
                     continue;
                 }
@@ -307,6 +311,15 @@ partial class DowngradeAssemblies
                 var generic = called as GenericInstanceMethod;
                 MethodReference element = generic != null ? generic.ElementMethod : called;
                 if (!IsMissing(element)) continue;
+                // A shim replaces a call: an ldftn or ldvirtftn made a call would be invalid IL, and so
+                // would a call after constrained., which only prefixes callvirt.
+                if ((instruction.OpCode != OpCodes.Call && instruction.OpCode != OpCodes.Callvirt && instruction.OpCode != OpCodes.Newobj) ||
+                    (instruction.Previous != null && instruction.Previous.OpCode == OpCodes.Constrained))
+                {
+                    problems.Add(module.Name + ": " + (instruction.Previous != null && instruction.Previous.OpCode == OpCodes.Constrained ? "constrained. " : "") +
+                                 instruction.OpCode + " of missing member " + element.FullName + " in " + method.FullName + " (only a call can go to a shim)");
+                    continue;
+                }
                 MethodDefinition shim = FindShim(element);
                 if (shim == null) { problems.Add(module.Name + ": member " + element.FullName); continue; }
                 MethodReference replacement = module.ImportReference(shim);
@@ -321,7 +334,8 @@ partial class DowngradeAssemblies
                 count++;
             }
         }
-        string[] rules = { "Type.GetType", "Screen fullscreen and resolution", "BinaryFormatter binder", "save paths", "DateTime.Now" };
+        string[] rules = { "Type.GetType", "Screen fullscreen and resolution", "BinaryFormatter binder", "CrowCountrySave Saves literals", "DateTime.Now",
+                           "persistentDataPath" };
         for (int i = 0; i < sites.Length; i++) Count("redirect " + rules[i], sites[i]);
         return count;
     }
@@ -403,11 +417,25 @@ partial class DowngradeAssemblies
         bool constructor = missing.Name == ".ctor";
         string name = constructor ? "ctor" : missing.Name;
         int offset = missing.HasThis && !constructor ? 1 : 0;
+        // The receiver a call pushes: a struct's address, a class's reference. A shim that takes the
+        // other would get the wrong argument (none does today; RenderTextureDescriptor's takes ref).
+        TypeDefinition ownerDefinition = Lookup(owner);
+        bool byAddress = ownerDefinition != null && ownerDefinition.IsValueType;
         foreach (MethodDefinition candidate in shimType.Methods.Where(m => m.IsStatic && m.Name == name))
         {
             // Matches first: it checks the parameter count.
             if (!Matches(candidate, missing, offset)) continue;
-            if (offset == 1 && Shape(candidate.Parameters[0].ParameterType).TrimEnd('&') != Shape(owner)) continue;
+            if (offset == 1)
+            {
+                string receiver = Shape(candidate.Parameters[0].ParameterType);
+                if (receiver.TrimEnd('&') != Shape(owner)) continue;
+                if (receiver.EndsWith("&") != byAddress)
+                {
+                    problems.Add("shim " + candidate.FullName + " takes its " + owner.FullName + " receiver " +
+                                 (byAddress ? "by value; a struct's comes by address (ref)" : "by ref; a class's comes by value"));
+                    continue;
+                }
+            }
             if (constructor && Shape(candidate.ReturnType) != Shape(owner)) continue;
             return candidate;
         }

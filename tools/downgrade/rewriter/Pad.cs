@@ -29,6 +29,9 @@ partial class DowngradeAssemblies
 
     static int PadQueries(ModuleDefinition module)
     {
+        // Each query is a rule, registered before the scan so that one with no site fails the run (the
+        // game calls all 14, 21 Oct 2026).
+        foreach (string query in PadButtonQueries.Concat(PadAxisQueries).Concat(PadAnyQueries)) Count("pad query " + query, 0);
         TypeDefinition calls = null;
         var helpers = new Dictionary<string, MethodDefinition>();
         var left = new SortedSet<string>();
@@ -106,9 +109,16 @@ partial class DowngradeAssemblies
     }
 
     static readonly string[] PadMapChanges = { "Load", "Remove", "Add", "Clear", "Set" };
+    // The map changes the game makes (21 Oct 2026), each a rule registered before the scan so that one
+    // with no site fails the run; others the prefixes catch (ControllerMap.set_enabled: none) count as they come.
+    static readonly string[] PadMapRules =
+    {
+        "AddMap", "ClearAllMaps", "ClearMaps", "LoadDefaultMaps", "LoadMap", "RemoveMap", "SetAllMapsEnabled", "SetMapsEnabled",
+    };
 
     static int PadMaps(ModuleDefinition module)
     {
+        foreach (string rule in PadMapRules) Count("pad maps " + rule, 0);
         var sites = new List<KeyValuePair<MethodDefinition, Instruction>>();
         foreach (TypeDefinition type in AllTypes(module.Types))
             foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))

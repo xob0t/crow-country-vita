@@ -44,22 +44,26 @@ partial class DowngradeAssemblies
     // nothing, and left it unmapped: no button worked, and the game kept its keyboard glyphs. Each
     // constant stored to platform or scriptingBackend goes through CrowCompat RewiredPlatform, which
     // answers PSVita and IL2CPP there; the database's PS Vita entries match the pad ("PS Vita").
+    // Each field is its own rule: the scriptingBackend stores would hide a miss in the platform ones.
     static int PatchRewiredPlatform(ModuleDefinition module)
     {
         TypeDefinition type = GameType(module, "Rewired.InputManager");
         if (type == null) return 0;
         MethodDefinition detect = type.Methods.Single(m => m.Name == "DetectPlatform");
         ILProcessor il = detect.Body.GetILProcessor();
-        int count = 0;
+        int platforms = 0, backends = 0;
         foreach (Instruction store in detect.Body.Instructions.ToArray())
         {
             var field = store.Operand as FieldReference;
             if (store.OpCode != OpCodes.Stfld || field == null || (field.Name != "platform" && field.Name != "scriptingBackend")) continue;
             string name = field.Name == "platform" ? "Platform" : "ScriptingBackend";
             il.InsertBefore(store, Instruction.Create(OpCodes.Call, CompatMethod(module, "RewiredPlatform", name)));
-            count++;
+            if (field.Name == "platform") platforms++;
+            else backends++;
         }
-        return count;
+        Count("rewired DetectPlatform platform", platforms);
+        Count("rewired DetectPlatform scriptingBackend", backends);
+        return platforms + backends;
     }
 
     // KeyboardOrControllerCheck.isKeyboard starts true, and the game shows keyboard prompts (D Confirm,
@@ -241,17 +245,23 @@ partial class DowngradeAssemblies
     // CrowCompat ScenePrefetch.LoadScene, which activates the title where it was read ahead
     // during the logos, and on the PS Vita loads areas by way of an empty scene (SceneGap,
     // compat/Loading.cs). The game's RestartLevel action (an area loaded again: retry after death)
-    // goes there too.
+    // goes there too. Each method is its own rule: LoadScene's site would hide a miss in RestartLevel's
+    // (a retry then loads the area straight over the one in memory, the peak SceneGap is there to avoid).
     static int PatchLoadSceneAction(ModuleDefinition module)
     {
         TypeDefinition type = GameType(module, "HutongGames.PlayMaker.Actions.LoadScene");
         if (type == null) return 0;
         int count = RouteLoadScene(module, type.Methods.Single(m => m.Name == "DoLoadSceneSync" && m.Parameters.Count == 0));
+        Count("load scene LoadScene.DoLoadSceneSync", count);
         TypeDefinition restart = GameType(module, "HutongGames.PlayMaker.Actions.RestartLevel");
-        if (restart != null) count += RouteLoadScene(module, restart.Methods.Single(m => m.Name == "OnEnter" && m.Parameters.Count == 0));
-        return count;
+        if (restart == null) return count;
+        int again = RouteLoadScene(module, restart.Methods.Single(m => m.Name == "OnEnter" && m.Parameters.Count == 0));
+        Count("load scene RestartLevel.OnEnter", again);
+        return count + again;
     }
 
+    // SceneManager.LoadScene(string, LoadSceneMode) only: the (string, LoadSceneParameters) overload
+    // returns a Scene, which ScenePrefetch.LoadScene's void would leave the caller without.
     static int RouteLoadScene(ModuleDefinition module, MethodDefinition load)
     {
         int count = 0;
@@ -260,7 +270,8 @@ partial class DowngradeAssemblies
             var callee = call.Operand as MethodReference;
             if (call.OpCode != OpCodes.Call || callee == null || callee.Name != "LoadScene" ||
                 callee.DeclaringType.FullName != "UnityEngine.SceneManagement.SceneManager" || callee.Parameters.Count != 2 ||
-                callee.Parameters[0].ParameterType.FullName != "System.String") continue;
+                callee.Parameters[0].ParameterType.FullName != "System.String" ||
+                callee.Parameters[1].ParameterType.FullName != "UnityEngine.SceneManagement.LoadSceneMode") continue;
             call.Operand = CompatMethod(module, "ScenePrefetch", "LoadScene");
             count++;
         }

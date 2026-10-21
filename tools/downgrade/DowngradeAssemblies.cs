@@ -452,6 +452,7 @@ partial class DowngradeAssemblies
         }
         int outOfRange;
         int widened = WidenChangedBodies(module, sizes, out outOfRange);
+        CheckStacks(module);
         return "retargeted=" + retargeted + " shimTypes=" + shimmedTypes + " attributeTypes=" + attributeTypes +
                " strippedAttributes=" + stripped +
                " widenedBodies=" + widened + " (short branches out of range in " + outOfRange + ")" +
@@ -514,6 +515,44 @@ partial class DowngradeAssemblies
                 count++;
             }
         return count;
+    }
+
+    // IL2CPP compiles IL without verifying it, and Mono's load check (LoadCheck.cs) is a stage of its
+    // own: a pass that leaves a stack unbalanced would show only as a crash or garbage in the player.
+    // After the passes, every body (the ones a pass changed, and the others: an operand changed to a
+    // method of another shape leaves the size as it was; 43,000 bodies in 0.4 s) is followed with
+    // PlayMakerData's StackProducers, which stops on a depth that differs where paths meet and on an
+    // underflow; a ret must find its value alone on the stack, and no path may run off the body's
+    // end. A body that fails is reported (UNRESOLVED, exit 3).
+    static void CheckStacks(ModuleDefinition module)
+    {
+        foreach (TypeDefinition type in AllTypes(module.Types))
+            foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
+            {
+                if (method.Body.Instructions.Count == 0)
+                {
+                    problems.Add(module.Name + ": stack: empty body " + method.FullName);
+                    continue;
+                }
+                Dictionary<Instruction, Instruction[]> before;
+                try { before = StackProducers(method, null); }
+                catch (InvalidOperationException e)
+                {
+                    problems.Add(module.Name + ": stack: " + e.Message + " in " + method.FullName);
+                    continue;
+                }
+                int returned = method.ReturnType.MetadataType == MetadataType.Void ? 0 : 1;
+                foreach (KeyValuePair<Instruction, Instruction[]> reached in before)
+                {
+                    Instruction at = reached.Key;
+                    FlowControl flow = at.OpCode.FlowControl;
+                    if (at.OpCode.Code == Code.Ret && reached.Value.Length != returned)
+                        problems.Add(module.Name + ": stack: " + reached.Value.Length + " values at " + at + " in " + method.FullName);
+                    else if (at.Next == null && flow != FlowControl.Branch && flow != FlowControl.Return && flow != FlowControl.Throw &&
+                             at.OpCode.Code != Code.Endfinally && at.OpCode.Code != Code.Endfilter)
+                        problems.Add(module.Name + ": stack: runs off the end after " + at + " in " + method.FullName);
+                }
+            }
     }
 
     static bool ShortBranchOutOfRange(MethodBody body)

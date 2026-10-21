@@ -70,9 +70,18 @@ partial class DowngradeAssemblies
                string.Join(",", element.Parameters.Select(p => p.ParameterType.FullName.Replace("!!0", "T"))) + ")";
     }
 
+    // The rows the game has no call for (21 Oct 2026), routed should it get one; every other row is a
+    // rule of its own, registered before the scan so that one with no site fails the run.
+    static readonly HashSet<string> EnemySplitOptional = new HashSet<string>
+    {
+        "SetSiblingIndex", "SetAsFirstSibling", "ComponentsInChildren", "ComponentInChildren", "ComponentsInChildrenList",
+        "ComponentInChildrenT", "ComponentInParent", "ComponentsInParent", "ComponentsInParentT", "ComponentsInParentT0",
+    };
+
     static int RouteEnemySplit(ModuleDefinition module)
     {
         TypeDefinition split = compat["CrowCompat.EnemySplit"];
+        foreach (string rule in EnemySplitCalls.Values.Distinct().Where(name => !EnemySplitOptional.Contains(name))) Count("enemy split " + rule, 0);
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
             foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))

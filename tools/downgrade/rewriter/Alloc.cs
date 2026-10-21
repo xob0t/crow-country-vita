@@ -88,7 +88,6 @@ partial class DowngradeAssemblies
                     pointer.Operand = helper;
                     make.OpCode = OpCodes.Nop;
                     make.Operand = null;
-                    Count("bound delegates", 1);
                     count++;
                 }
             }
@@ -193,7 +192,6 @@ partial class DowngradeAssemblies
                     pointer.Operand = null;
                     make.OpCode = OpCodes.Call;
                     make.Operand = helper;
-                    Count("static delegates", 1);
                     count++;
                 }
             }
@@ -233,9 +231,8 @@ partial class DowngradeAssemblies
 
     static int ShareShortcutClosures(ModuleDefinition module)
     {
-        TypeDefinition shortcuts = module.GetType("DG.Tweening.ShortcutExtensions");
+        TypeDefinition shortcuts = GameType(module, "DG.Tweening.ShortcutExtensions");
         if (shortcuts == null) return 0;
-        Count("type DG.Tweening.ShortcutExtensions", 1);
         int count = 0;
         var closureHelpers = new Dictionary<string, MethodDefinition>();
         foreach (MethodDefinition method in shortcuts.Methods.Where(m => m.HasBody && m.IsStatic && m.Parameters.Count > 0).ToArray())
@@ -308,7 +305,6 @@ partial class DowngradeAssemblies
                 gone.OpCode = OpCodes.Nop;
                 gone.Operand = null;
             }
-            Count("shared shortcut closures", 1);
             count++;
         }
         return count;

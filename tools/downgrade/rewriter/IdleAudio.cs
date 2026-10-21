@@ -15,9 +15,14 @@ partial class DowngradeAssemblies
 {
     static readonly HashSet<string> AudioPlayCalls = new HashSet<string> { "Play", "PlayDelayed", "PlayScheduled", "PlayOneShot", "UnPause" };
 
+    // The rules a site must match, registered before the scan so that one with none fails the run. The
+    // game has no PlayDelayed, PlayScheduled or UnPause call (21 Oct 2026): those stay unregistered.
+    static readonly string[] IdleAudioRules = { "AudioSource.Play", "AudioSource.PlayOneShot", "Behaviour.enabled" };
+
     static int RouteAudioSourcePlays(ModuleDefinition module)
     {
         TypeDefinition idle = compat["CrowCompat.IdleAudio"];
+        foreach (string rule in IdleAudioRules) Count("idle audio " + rule, 0);
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
             foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))

@@ -57,6 +57,15 @@ partial class DowngradeAssemblies
                 continue;
             MethodDefinition inherited = BaseExplicitImplementation(type.BaseType, method, contractReference.FullName);
             if (inherited == null || inherited.Module != module) continue;
+            // The forward names the open definitions (the interface method, the base's method): for a
+            // generic interface, interface method or base class it would need their instances, which it
+            // doesn't make. None is forwarded today (21 Oct 2026).
+            if (contract.HasGenericParameters || method.HasGenericParameters || inherited.DeclaringType.HasGenericParameters)
+            {
+                problems.Add(module.Name + ": ForwardExplicitImplementations can't forward generic " + contractReference.FullName + "::" +
+                             method.Name + " to " + inherited.FullName + " for " + type.FullName);
+                continue;
+            }
             if (inherited.IsPrivate) inherited.IsAssembly = true;
             var forward = new MethodDefinition(contract.FullName + "." + method.Name,
                 MethodAttributes.Private | MethodAttributes.Final | MethodAttributes.Virtual | MethodAttributes.NewSlot | MethodAttributes.HideBySig,

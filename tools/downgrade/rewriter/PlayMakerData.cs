@@ -101,7 +101,14 @@ partial class DowngradeAssemblies
             pushes = code.Code == Code.Newobj || called.ReturnType.MetadataType != MetadataType.Void ? 1 : 0;
             return;
         }
-        if (code.Code == Code.Calli) throw new InvalidOperationException("calli");
+        if (code.Code == Code.Calli)
+        {
+            // The call site's arguments, then the function pointer.
+            var site = (CallSite)at.Operand;
+            pops = site.Parameters.Count + (site.HasThis ? 1 : 0) + 1;
+            pushes = site.ReturnType.MetadataType != MetadataType.Void ? 1 : 0;
+            return;
+        }
         if (code.Code == Code.Ret)
         {
             pops = method.ReturnType.MetadataType == MetadataType.Void ? 0 : 1;

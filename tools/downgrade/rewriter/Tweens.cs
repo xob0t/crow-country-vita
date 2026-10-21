@@ -13,10 +13,9 @@ partial class DowngradeAssemblies
 {
     static int TweenProbeHooks(ModuleDefinition module)
     {
-        TypeDefinition tween = module.GetType("DG.Tweening.Tween");
-        TypeDefinition manager = module.GetType("DG.Tweening.Core.TweenManager");
+        TypeDefinition tween = GameType(module, "DG.Tweening.Tween");
+        TypeDefinition manager = GameType(module, "DG.Tweening.Core.TweenManager");
         if (tween == null || manager == null) return 0;
-        Count("type DG.Tweening.Tween (probe)", 1);
         MethodDefinition doGoto = tween.Methods.Single(m => m.Name == "DoGoto" && m.Parameters.Count == 4);
         FieldDefinition decor = tween.Fields.SingleOrDefault(f => f.Name == "crowDecor");
 
