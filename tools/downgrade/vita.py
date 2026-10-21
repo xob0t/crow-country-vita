@@ -41,10 +41,11 @@ reboot, args) refuse while someone else holds the vita-device lock (lock.py): th
 `lock.py run vita-device ...` (CROW_LOCK) or with CROW_HOLDER=<the lock's holder name> after
 `lock.py take`. A free lock lets them run as before.
 
-sync, install and seed read the build folder under the vita-build lock (taken without waiting for
-pc-build), so a build or quickcode can't rewrite the files while they go out: before (21 Oct) a sync
-during a quickcode could send the new il2CppAssemblies.suprx with the old global-metadata.dat, or a
-module half copied, and the game crashed at launch. They wait up to --build-wait seconds (default
+sync, install and seed (and run, before it quits the game) read the build folder under the vita-build
+lock, so a build or quickcode can't rewrite the files while they go out: before (21 Oct) a sync during
+a quickcode could send the new il2CppAssemblies.suprx with the old global-metadata.dat, or a module
+half copied, and the game crashed at launch. They hold it as a reader (lock.take): a PC build
+(pc-build) neither waits for them nor holds them up. They wait up to --build-wait seconds (default
 900) for a build that holds it, then stop (exit 75). Inside `lock.py run vita-build ...` (CROW_LOCKS,
 also through a `lock.py run vita-device` in it) or with CROW_HOLDER naming the holder of a `lock.py
 take vita-build`, the build is the caller's and they don't wait. A job holding vita-device that waits
@@ -100,7 +101,7 @@ WORDS = {'do': None, 'args': None, 'shot': 1, 'files': 1}
 KEEP_AWAKE = 'nosleep on; screen on'
 KEEP_AWAKE_SECONDS = 10
 WAKE_SECONDS = 5  # how long wake waits for the screen to draw again after a "screen on"
-BUILD_WAIT_SECONDS = 900  # how long sync, install and seed wait for a build holding vita-build (reading)
+BUILD_WAIT_SECONDS = 900  # how long sync, run, install and seed wait for a build holding vita-build (reading)
 
 
 class Unreachable(OSError):
@@ -381,7 +382,7 @@ def reading(build: Path, wait=BUILD_WAIT_SECONDS):
         yield
         return
     holder = f'vita.py {os.getpid()}: reading {build.name} for the console'
-    if lock.take('vita-build', holder, wait, process=True, alone=True) != 0:
+    if lock.take('vita-build', holder, wait, process=True, reader=True) != 0:
         print(
             f'vita.py: a build still holds vita-build after {wait:.0f} s and may be writing {build}; '
             'try again later (--build-wait SECONDS waits longer)',
@@ -760,10 +761,12 @@ def files(folder: str):
 
 def check_lock(name):
     """Stop a changing command while the vita-device lock is someone else's: before, a job whose
-    lock take failed went on and quit another job's run, and overwrote its flags."""
+    lock take failed went on and quit another job's run, and overwrote its flags. Any run this process
+    is in counts (lock.held_here), not only the innermost (CROW_LOCK): inside `lock.py run vita-device
+    -- lock.py run vita-build -- ...` the console is ours."""
     lock.clear_stale('vita-device')
     text = lock.holder_of('vita-device')
-    if text is None or os.environ.get('CROW_LOCK') == 'vita-device':
+    if text is None or 'vita-device' in lock.held_here():
         return
     mine = os.environ.get('CROW_HOLDER', '')
     if mine and lock.owner(mine) == lock.owner(text):
@@ -870,12 +873,18 @@ def run_command():
         check_lock(args.command)
     build = args.build or build_folder('vita')
 
-    if args.command in ('quit', 'run'):
+    if args.command == 'quit':
         print(quit_game())
+    if args.command == 'run':
+        # The build lock before the quit: before (21 Oct) run quit the game, then waited for a build
+        # holding vita-build and could give up after --build-wait, leaving the console on its home screen.
+        with reading(build, args.build_wait):
+            print(quit_game())
+            sync_files(build)
     if args.command == 'seed':
         with reading(build, args.build_wait):
             seed(build)
-    if args.command in ('sync', 'run'):
+    if args.command == 'sync':
         sync(build, args.build_wait)
     if args.command in ('launch', 'run'):
         print(launch_game())

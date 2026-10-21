@@ -14,8 +14,13 @@ for the lock; the default, 0, fails at once and says who holds it and since when
 
 Only one pipeline.py runs at a time, whatever the platform: a build lock (vita-build, pc-build)
 counts as taken only while the other one is free; if the other appears right after, ours is
-released again and the wait goes on. vita.py's sync and install hold vita-build too while they read
-the PS Vita build (without waiting for pc-build), so no build rewrites the files they upload.
+released again and the wait goes on. vita.py's sync, install and seed hold vita-build too while they
+read the PS Vita build, so no build rewrites the files they upload. They hold it as a reader (a
+"reader" line in the lock file): a reader and pc-build don't wait for each other, since a PC build
+never writes the PS Vita build; a vita-build taker (a build or quickcode) waits for the reader as for
+any holder, and wait vita-build too. Before (21 Oct) a sync or install held up every PC build for as
+long as it ran (an install's promote alone may take 30 minutes). An older lock.py takes a reader's
+lock for a build's, so it waits.
 
 `run` takes the lock, runs the command and releases the lock however the command ends; it exits
 with the command's code, 130 after Ctrl+C, or 75 if the lock was not taken in time. Ctrl+C reaches
@@ -193,6 +198,15 @@ def other_build_locks(name):
     return [other for other in BUILD_LOCKS if other != name] if name in BUILD_LOCKS else []
 
 
+READER = 'reader'  # the lock file's line of a reader's lock (take's reader)
+
+
+def building(name):
+    """Whether name is held by anything but a reader: the other build lock as take and wait see it. A
+    file just created and not written yet, or being deleted, counts as held (the next poll looks again)."""
+    return path(name).exists() and not re.search(rf'^{READER}$', text_of(name) or '', re.M)
+
+
 def holding(name):
     """Who holds the lock, since when and for how long ("<holder: purpose> HH:MM (N min)"), or "free"."""
     text = holder_of(name)
@@ -207,18 +221,20 @@ def held_by(name):
     return f'{name} held by: {holding(name)}'
 
 
-def take(name, holder, wait, process=False, alone=False):
+def take(name, holder, wait, process=False, reader=False):
     """process: name this process in the lock (run), so a lock it can no longer release counts as free.
-    alone: don't wait for the other build lock (vita.py's sync, which only reads a build)."""
+    reader: a job that only reads what the build lock guards (vita.py's sync of the PS Vita build): it
+    doesn't wait for the other build lock, and the other doesn't wait for it (building)."""
     lock = path(name)
-    others = [] if alone else other_build_locks(name)
+    others = [] if reader else other_build_locks(name)
     end = time.time() + wait
     own = f'pid {os.getpid()} {process_start(os.getpid())}\n' if process else ''
+    own += f'{READER}\n' if reader else ''
     waiting = False
     while True:
         for other in [name, *others]:
             clear_stale(other)
-        busy = next((other for other in others if path(other).exists()), None)
+        busy = next((other for other in others if building(other)), None)
         if busy is None:
             try:
                 fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -227,7 +243,7 @@ def take(name, holder, wait, process=False, alone=False):
             else:
                 os.write(fd, f'{holder} {time.strftime("%H:%M")}\n{own}'.encode())
                 os.close(fd)
-                busy = next((other for other in others if path(other).exists()), None)
+                busy = next((other for other in others if building(other)), None)
                 if busy is None:
                     return 0
                 remove(lock)  # the other build lock was taken in between: one pipeline at a time
@@ -242,14 +258,15 @@ def take(name, holder, wait, process=False, alone=False):
 
 def wait_free(name, wait):
     """Wait until name could be taken (it and, for a build lock, the other one free) without taking
-    it: 0, or NOT_TAKEN after wait seconds. Another job may take it before the caller does."""
+    it: 0, or NOT_TAKEN after wait seconds. Another job may take it before the caller does. A reader
+    holding the other build lock doesn't count (take's reader), one holding name does."""
     end = time.time() + wait
-    names = [name, *other_build_locks(name)]
+    others = other_build_locks(name)
     waiting = False
     while True:
-        for other in names:
+        for other in [name, *others]:
             clear_stale(other)
-        busy = next((other for other in names if path(other).exists()), None)
+        busy = name if path(name).exists() else next((other for other in others if building(other)), None)
         if busy is None:
             return 0
         if time.time() >= end:

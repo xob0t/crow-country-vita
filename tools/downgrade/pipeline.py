@@ -905,10 +905,14 @@ def build(
 # reports success: a merge or split that threw halfway leaves its scene as far as it got, and an
 # area whose MeshCombineStudio bake failed combines at run time again (Station Square -> Pool ran out
 # of memory that way). Their failure lines (MergeScenes.cs, PlayerMerge.cs: "<step> <scene> failed:
-# <exception>"; MeshCombineBake.cs, ProBuilderMeshes.cs: a summary with failed=N) fail the build.
+# <exception>"; an enemy type's or the player's atlas, from the merge's report, EnemyRebuild.cs and
+# compat/PlayerMerge.cs: "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>", which before
+# 21 Oct went through; MeshCombineBake.cs, ProBuilderMeshes.cs: a summary with failed=N) fail the build.
 # CROW_ALLOW_SCENE_FAILURES=1 lets such a build through, with the warning, for experiments.
 SCENE_STEP_FAILED = re.compile(
-    r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE) .* failed: .*$|^DOWNGRADE_(?:MCS|PROBUILDER) .*\bfailed=[1-9].*$', re.M
+    r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE|CROW_ENEMY_ATLAS) .* failed: .*$'
+    r'|^DOWNGRADE_(?:MCS|PROBUILDER) .*\bfailed=[1-9].*$',
+    re.M,
 )
 
 
@@ -986,6 +990,8 @@ def warn_stale_plugins(project: Path, version: str, platform: str):
 # all of them were hashed when build ended, so a rule edited between project and build counted as
 # built, and the shaders and common.py weren't hashed at all.
 LAYOUT = 'serialized-layout.txt'
+# A field line's place among its type's serialized fields ("<assembly> field <type>.<field> #2 <field type>").
+FIELD_PLACE = re.compile(r'^(\S+ field \S+) #\d+(?= )')
 NON_CODE_INPUTS = 'non-code-inputs.json'
 PROJECT_SOURCES = ('*_rules.py', 'common.py', 'vita_shaders/*', 'patches/*')
 BUILD_SOURCES = ('unity/*.cs',)
@@ -1056,6 +1062,11 @@ def quickcode_check(dlls: list, version: str, force: bool):
     else:
         before = (CODE_STAGE / LAYOUT).read_text(encoding='utf-8').splitlines()
         now = serialized_layout(dlls, version)
+        if not any(FIELD_PLACE.match(line) for line in before):
+            # Saved before the field lines had their place (#n, 21 Oct): compared without it, rather than
+            # every field reading as changed until the next full build.
+            now = [FIELD_PLACE.sub(r'\1', line) for line in now]
+            log(f'Field order not checked: the last full build saved {LAYOUT} without field places (before 21 Oct)')
         removed, added = sorted(set(before) - set(now)), sorted(set(now) - set(before))
         if removed or added:
             for line in [*(f'  - {line}' for line in removed), *(f'  + {line}' for line in added)][:30]:
@@ -1198,26 +1209,34 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
     metadata = next((temp / 'StagingArea').rglob('global-metadata.dat'), None)
     if not module.exists() or metadata is None:
         sys.exit(f'IL2CPP wrote no module or metadata under {temp / "StagingArea"}')
-    for target in (
-        output / 'Media' / 'Modules' / 'il2CppAssemblies.suprx',
-        output / 'SymbolFiles' / 'il2CppAssemblies.suprx',
-    ):
-        copy_whole(module, target)
-    copy_whole(metadata, output / 'Media' / 'Metadata' / 'global-metadata.dat')
+    copy_whole(
+        {
+            output / 'Media' / 'Modules' / 'il2CppAssemblies.suprx': module,
+            output / 'Media' / 'Metadata' / 'global-metadata.dat': metadata,
+            output / 'SymbolFiles' / 'il2CppAssemblies.suprx': module,
+        }
+    )
     native_plugins(output)
     boot_config(output)
     log(f'Updated the code of {output} in {time.time() - started:.0f}s; vita.py sync uploads it')
 
 
-def copy_whole(source: Path, target: Path):
-    """Copy into <target>.part, then rename it over target: a quickcode stopped mid-copy leaves the
-    build's file whole (vita.py sync reads the build under the vita-build lock, see vita.py)."""
-    part = target.with_name(target.name + '.part')
+def copy_whole(files: dict):
+    """Copy each source into <target>.part, all of them first, then rename the parts over their targets
+    one right after the other: a quickcode stopped mid-copy leaves the build's files whole and as a set
+    (vita.py sync reads the build under the vita-build lock, see vita.py). Before (21 Oct) each file was
+    copied and renamed in turn, so one stopped after the module's rename left the new module with the
+    old metadata, which crashes at launch. A .part a killed quickcode leaves behind is never sent
+    (vita_app_files); the next quickcode writes over it."""
+    parts = {target: target.with_name(target.name + '.part') for target in files}
     try:
-        shutil.copy2(source, part)
-        os.replace(part, target)
+        for target, source in files.items():
+            shutil.copy2(source, parts[target])
+        for target, part in parts.items():
+            os.replace(part, target)
     except BaseException:
-        part.unlink(missing_ok=True)
+        for part in parts.values():
+            part.unlink(missing_ok=True)
         raise
 
 
@@ -1291,7 +1310,8 @@ VITA_COMMANDS = (VITA_HOST, 1338)  # vitacompanion's command server
 def vita_app_files(build: Path):
     """Files of the installed app for a PC Hosted PS Vita build, as (path in the app, local path or
     bytes): the player becomes eboot.bin with the trial flag cleared, the LiveArea art replaces
-    Unity's placeholders, host-only files are left out (The Drifter's port's packaging)."""
+    Unity's placeholders, host-only files are left out (The Drifter's port's packaging), and so are the
+    .part files of a quickcode killed while it copied (copy_whole): sync and the VPK used to take them."""
     import livearea
 
     selfs = list(build.glob('*.self'))
@@ -1307,7 +1327,7 @@ def vita_app_files(build: Path):
     skip = {'SymbolFiles', 'configuration.psp2path'}
     for path in sorted(build.rglob('*')):
         relative = path.relative_to(build)
-        if path.is_dir() or relative.parts[0] in skip or path.suffix in ('.self', '.bat'):
+        if path.is_dir() or relative.parts[0] in skip or path.suffix in ('.self', '.bat', '.part'):
             continue
         name = relative.as_posix()
         yield name, art / VITA_ARTWORK[name] if name in VITA_ARTWORK else path
@@ -1354,12 +1374,14 @@ def package_vita(build: Path) -> Path:
 
 def check_lock():
     """Every stage writes in work/, builds/ or artifacts/, which other jobs share: one pipeline.py at a
-    time, under lock.py run (which sets CROW_LOCK). Without it, stop while another run holds a build
+    time, under lock.py run (which sets CROW_LOCKS). Without it, stop while another run holds a build
     lock, and warn otherwise (also for a lock taken without run, or by an older lock.py, whose holder
-    can't be told from this process's parents)."""
+    can't be told from this process's parents). Every run this process is in counts (lock.held_here):
+    before (21 Oct) only CROW_LOCK, the innermost run's, did, so `lock.py run vita-build -- lock.py run
+    vita-device -- ... pipeline.py` stopped on its own vita-build."""
     import lock
 
-    if os.environ.get('CROW_LOCK') in lock.BUILD_LOCKS:
+    if set(lock.held_here()) & set(lock.BUILD_LOCKS):
         return
     held = [name for name in lock.BUILD_LOCKS if lock.holder_of(name) and not lock.stale(name)]
     holders = ', '.join(f'{name} ({lock.holder_of(name)})' for name in held)

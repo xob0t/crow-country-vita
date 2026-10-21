@@ -27,7 +27,6 @@ summary.txt). `report` prints the table again from saved logs.
 """
 
 import argparse
-import os
 import re
 import shutil
 import statistics
@@ -361,9 +360,11 @@ def main():
 
     if args.target == 'vita':
         args.build = args.build or VITA_BUILD
-        if os.environ.get('CROW_LOCK') != 'vita-device':
-            import lock
+        import lock
 
+        # Any run this process is in (CROW_LOCKS), not only the innermost (CROW_LOCK): under `lock.py run
+        # vita-device -- lock.py run vita-build -- ...` it used to wait for its own vita-device lock.
+        if 'vita-device' not in lock.held_here():
             holder = f'fightbench: {",".join(args.modes)} x{args.runs}'
             print(f'waiting for the vita-device lock as "{holder}"')
             code = lock.run('vita-device', holder, args.wait, [sys.executable, __file__, *sys.argv[1:]])

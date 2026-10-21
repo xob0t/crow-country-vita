@@ -10,6 +10,8 @@ using Mono.Cecil;
 // serialize (UnityEngine.Object subclasses and [Serializable] types) with its base type, one per
 // field it serializes (instance, not readonly or [NonSerialized], public or [SerializeField]), and
 // one per [RuntimeInitializeOnLoadMethod], sorted. Two builds with the same lines read each other's data.
+// A field's line has its place among its type's serialized fields (#0, #1, ...): a player reads the data
+// in field order, so the sort mustn't hide a change of order.
 // Usage: SerializedLayout <output.txt> <folder to resolve references in;...> <assembly.dll>...
 class SerializedLayout
 {
@@ -33,11 +35,12 @@ class SerializedLayout
                 bool unityObject = DerivesFromUnityObject(type);
                 if (!unityObject && !type.IsSerializable) continue;
                 lines.Add(name + " type " + type.FullName + " : " + (type.BaseType == null ? "" : type.BaseType.FullName));
+                int place = 0;
                 foreach (FieldDefinition field in type.Fields)
                 {
                     if (field.IsStatic || field.IsInitOnly || field.IsLiteral || field.IsNotSerialized) continue;
                     if (!field.IsPublic && !field.CustomAttributes.Any(a => a.AttributeType.Name == "SerializeField")) continue;
-                    lines.Add(name + " field " + type.FullName + "." + field.Name + " " + field.FieldType.FullName);
+                    lines.Add(name + " field " + type.FullName + "." + field.Name + " #" + place++ + " " + field.FieldType.FullName);
                 }
             }
         }
