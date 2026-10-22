@@ -58,7 +58,9 @@ using UnityEngine.SceneManagement;
 //                                  and Rewired's players, controllers and maps (CROW_REWIRED_REPORT)
 // Test key: pmglobal=<name>:true|false (a PlayMaker global bool, e.g. pause mode: the enemies held as in a menu).
 // Also (other files): -crow-ground-cache (FixedStep.cs, groundcache=), -crow-decor-visible (Decor.cs, decorvisible=).
-//   -crow-cuts-log                 every 10 s, CROW_CUTS: frozen enemies, FSM updates skipped and run, wakes by cause
+//   -crow-cuts-log                 every 10 s, CROW_CUTS: frozen enemies, FSM updates skipped and run, wakes by cause;
+//                                  and the blood stains removed (until 22 Oct logged without it too: a line, with its
+//                                  managed stack trace, for each hit Mara took past the cap)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -301,7 +303,7 @@ namespace CrowCompat
                     UnityEngine.Object.Destroy(oldest.gameObject);
                     stainsRemoved++;
                 }
-                if (extra > 0) Debug.Log("CROW_CUTS stains: " + extra + " old blood stains removed below " + parent.name + " (" + stainsRemoved + " in all)");
+                if (extra > 0 && log) Debug.Log("CROW_CUTS stains: " + extra + " old blood stains removed below " + parent.name + " (" + stainsRemoved + " in all)");
             }
         }
 
@@ -783,16 +785,25 @@ namespace CrowCompat
         internal static void Rescan()
         {
             joysticksAt = 0f;
+            settledFor = null;
             if (!FirstJoystickOnly) Cuts.RewiredMaxJoystick = 16;
         }
         static string joystickLog;
+        // The Rewired input manager (Pad.ActiveManager) a pass found everything as wanted under: while the pad reader
+        // serves, Rewired's update doesn't run, so its joysticks stay as they are (nothing in the game's code enables or
+        // disables one) and a pass would set nothing. The passes come back with a new manager (Rewired starts again at
+        // each area change), Rescan (rwjoys=) and whenever Rewired updates. Until 22 Oct every 2 s regardless: Type.GetType,
+        // reflection reads boxed per joystick and a StringBuilder (0.08% of a fight's main thread, garbage each pass).
+        static object settledFor;
 
         // Every 2 s: the joysticks but the first with a name off (FirstJoystickOnly), or back on.
         internal static void Joysticks()
         {
+            if (Pad.Serving && settledFor != null && ReferenceEquals(settledFor, Pad.ActiveManager)) return;
             float now = UnityEngine.Time.realtimeSinceStartup;
-            if (now < joysticksAt) return;
+            if (now < joysticksAt || !CrowEvents.Turn(joysticksAt <= 0f)) return;
             joysticksAt = now + 2f;
+            settledFor = null;
             try
             {
                 object ready = Static("isReady");
@@ -800,8 +811,8 @@ namespace CrowCompat
                 var joysticks = Get(Static("controllers"), "Joysticks") as System.Collections.IEnumerable;
                 if (joysticks == null) return;
                 var line = new StringBuilder();
-                bool kept = false;
-                int max = 0;
+                bool kept = false, changed = false;
+                int max = 0, before = Cuts.RewiredMaxJoystick;
                 foreach (object joystick in joysticks)
                 {
                     string name = Get(joystick, "hardwareName") as string;
@@ -810,10 +821,15 @@ namespace CrowCompat
                     if (want) max = Math.Max(max, Convert.ToInt32(Get(joystick, "unityId")));
                     bool enabled = (bool)Get(joystick, "enabled");
                     line.Append(' ').Append(Get(joystick, "unityId")).Append(":'").Append(name).Append("'=").Append(want ? "on" : "off");
-                    if (enabled != want) Set(joystick, "enabled", want);
+                    if (enabled != want)
+                    {
+                        Set(joystick, "enabled", want);
+                        changed = true;
+                    }
                 }
                 // Unity's polling stops past the last joystick kept (all of them while none is known).
                 Cuts.RewiredMaxJoystick = FirstJoystickOnly && kept ? Math.Max(1, max) : 16;
+                if (!changed && Cuts.RewiredMaxJoystick == before) settledFor = Pad.ActiveManager;
                 string text = line.ToString() + " polled<=" + Cuts.RewiredMaxJoystick;
                 if (text != joystickLog)
                 {

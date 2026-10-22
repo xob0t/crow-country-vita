@@ -448,7 +448,7 @@ namespace CrowCompat
         {
             if (!active) return;
             float now = Time.realtimeSinceStartup;
-            if (now >= nextFind) Find();
+            if (now >= nextFind && CrowEvents.Turn(nextFind <= 0f)) Find();  // the 3 s finds in a frame of their own
             silentRule = silentOn && idleOnly;
             if (adapt) Watch(now);
             if (now >= nextRank || order.Count != entries.Count)
@@ -557,22 +557,42 @@ namespace CrowCompat
         // than anything moves in a frame) and beyond; or at volume 0. A logarithmic rolloff never reaches zero.
         // Its filters then get silence at their input and give silence (their tails kept: OffAt), so a reverb
         // switched off there changes nothing heard, and is back on in the frame the sound can reach the listener.
-        static readonly Dictionary<AudioSource, AnimationCurve[]> curves = new Dictionary<AudioSource, AnimationCurve[]>();
+        // Per source, its two custom curves as first read (GetCustomCurve returns a copy, which nothing changes) and what
+        // their keys say (AnimationCurve.keys is a new array a read: until 22 Oct both were read on every call, each frame
+        // for each playing fully 3D source with a gated reverb).
+        class Curves
+        {
+            public bool BlendBelow;  // the custom spatial blend curve has a key under 0.999
+            public AnimationCurve Rolloff;
+            public float LastHeard = float.NegativeInfinity;  // the latest time of a rolloff key above 0 (NaN times left out)
+        }
+
+        static readonly Dictionary<AudioSource, Curves> curves = new Dictionary<AudioSource, Curves>();
+
+        static Curves CurvesOf(AudioSource source)
+        {
+            Curves found = new Curves { Rolloff = source.GetCustomCurve(AudioSourceCurveType.CustomRolloff) };
+            AnimationCurve blend = source.GetCustomCurve(AudioSourceCurveType.SpatialBlend);
+            if (blend != null)
+                foreach (Keyframe key in blend.keys)
+                    if (key.value < 0.999f) found.BlendBelow = true;
+            if (found.Rolloff != null)
+                foreach (Keyframe key in found.Rolloff.keys)
+                    if (key.value > 0f && key.time > found.LastHeard) found.LastHeard = key.time;
+            return found;
+        }
 
         internal static bool Silent(AudioSource source, Vector3 ear)
         {
             if (source.volume <= 0f) return true;
             if (source.spatialBlend < 0.999f) return false;
-            AnimationCurve[] pair;
+            Curves pair;
             if (!curves.TryGetValue(source, out pair))
             {
                 if (curves.Count > 2000) curves.Clear();
-                curves[source] = pair = new[] { source.GetCustomCurve(AudioSourceCurveType.SpatialBlend), source.GetCustomCurve(AudioSourceCurveType.CustomRolloff) };
+                curves[source] = pair = CurvesOf(source);
             }
-            AnimationCurve blend = pair[0];
-            if (blend != null)
-                foreach (Keyframe key in blend.keys)
-                    if (key.value < 0.999f) return false;
+            if (pair.BlendBelow) return false;
             float distance = Vector3.Distance(source.transform.position, ear) - 0.5f;
             float max = source.maxDistance;
             if (max <= 0f) return false;
@@ -581,14 +601,13 @@ namespace CrowCompat
                 case AudioRolloffMode.Linear:
                     return distance >= max && max > source.minDistance;
                 case AudioRolloffMode.Custom:
-                    AnimationCurve rolloff = pair[1];
+                    AnimationCurve rolloff = pair.Rolloff;
                     if (rolloff == null || rolloff.length == 0) return false;
                     float from = Mathf.Clamp01(distance / max);
                     for (int i = 0; i <= 8; i++)
                         if (rolloff.Evaluate(Mathf.Lerp(from, 1f, i / 8f)) > 0f) return false;
-                    foreach (Keyframe key in rolloff.keys)
-                        if (key.time >= from && key.value > 0f) return false;
-                    return true;
+                    // A key at or past from with a value above 0 (the keys' loop until 22 Oct).
+                    return !(pair.LastHeard >= from);
             }
             return false;
         }
@@ -760,7 +779,8 @@ namespace CrowCompat
         public class Group
         {
             public readonly List<Member> Members = new List<Member>();
-            public string Key, Name;
+            public Settings Key;
+            public string Name;
             public AudioMixerGroup Dest;
             public int Slot = -1;
             public float Tail;
@@ -791,7 +811,108 @@ namespace CrowCompat
         static float nextFind;
         static readonly List<Group> groups = new List<Group>();
         static readonly Dictionary<AudioReverbFilter, Group> owner = new Dictionary<AudioReverbFilter, Group>();
-        static readonly HashSet<string> logged = new HashSet<string>();
+        static readonly HashSet<Logged> logged = new HashSet<Logged>();  // filters that keep their own, logged once per reason
+        static readonly HashSet<Settings> loggedFull = new HashSet<Settings>();  // settings told that every mixer is in use
+
+        // A filter that keeps its own reverb, and why (the log's once-only set; until 22 Oct its instance ID and the
+        // reason joined into a string on every find).
+        struct Logged : IEquatable<Logged>
+        {
+            public int Id;
+            public string Why;
+
+            public bool Equals(Logged other)
+            {
+                return Id == other.Id && Why == other.Why;
+            }
+
+            public override bool Equals(object other)
+            {
+                return other is Logged && Equals((Logged)other);
+            }
+
+            public override int GetHashCode()
+            {
+                return Id * 31 + Why.GetHashCode();
+            }
+        }
+
+        // What makes reverbs alike: the destination group and the 14 settings, compared as floats (0 and -0 alike, any
+        // NaN alike). Until 22 Oct it was a string, the group's instance ID and each value's ToString("R"), which tells
+        // the same values apart and no others (Mono writes -0 as 0, every NaN as NaN), but made 14 formatted numbers a
+        // filter on every 3 s find: 13-26 KB/s of garbage on the PS Vita (sreverb A/Bs), a GC collection about a third
+        // to a half sooner.
+        public struct Settings : IEquatable<Settings>
+        {
+            int dest, hash;  // dest: the group's instance ID, 0 for none
+            float dry, room, roomHF, decay, decayHF, reflections, reflectDelay, reverb, reverbDelay, diffusion, density, hfReference, roomLF, lfReference;
+
+            internal static Settings Of(AudioReverbFilter r, AudioMixerGroup group)
+            {
+                var s = new Settings
+                {
+                    dest = group != null ? group.GetInstanceID() : 0,
+                    dry = r.dryLevel, room = r.room, roomHF = r.roomHF, decay = r.decayTime, decayHF = r.decayHFRatio, reflections = r.reflectionsLevel,
+                    reflectDelay = r.reflectionsDelay, reverb = r.reverbLevel, reverbDelay = r.reverbDelay, diffusion = r.diffusion, density = r.density,
+                    hfReference = r.hfReference, roomLF = r.roomLF, lfReference = r.lfReference,
+                };
+                int h = s.dest;
+                h = h * 31 + Bits(s.dry);
+                h = h * 31 + Bits(s.room);
+                h = h * 31 + Bits(s.roomHF);
+                h = h * 31 + Bits(s.decay);
+                h = h * 31 + Bits(s.decayHF);
+                h = h * 31 + Bits(s.reflections);
+                h = h * 31 + Bits(s.reflectDelay);
+                h = h * 31 + Bits(s.reverb);
+                h = h * 31 + Bits(s.reverbDelay);
+                h = h * 31 + Bits(s.diffusion);
+                h = h * 31 + Bits(s.density);
+                h = h * 31 + Bits(s.hfReference);
+                h = h * 31 + Bits(s.roomLF);
+                h = h * 31 + Bits(s.lfReference);
+                s.hash = h;
+                return s;
+            }
+
+            [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit)]
+            struct FloatBits
+            {
+                [System.Runtime.InteropServices.FieldOffset(0)] public float Float;
+                [System.Runtime.InteropServices.FieldOffset(0)] public int Int;
+            }
+
+            // The hash's bits of a value: one for 0 and -0, one for every NaN (Same's equality).
+            static int Bits(float v)
+            {
+                if (v == 0f) return 0;
+                if (float.IsNaN(v)) return 0x7FC00000;
+                return new FloatBits { Float = v }.Int;
+            }
+
+            static bool Same(float a, float b)
+            {
+                return a == b || (float.IsNaN(a) && float.IsNaN(b));
+            }
+
+            public bool Equals(Settings o)
+            {
+                return hash == o.hash && dest == o.dest && Same(dry, o.dry) && Same(room, o.room) && Same(roomHF, o.roomHF) && Same(decay, o.decay) &&
+                       Same(decayHF, o.decayHF) && Same(reflections, o.reflections) && Same(reflectDelay, o.reflectDelay) && Same(reverb, o.reverb) &&
+                       Same(reverbDelay, o.reverbDelay) && Same(diffusion, o.diffusion) && Same(density, o.density) && Same(hfReference, o.hfReference) &&
+                       Same(roomLF, o.roomLF) && Same(lfReference, o.lfReference);
+            }
+
+            public override bool Equals(object other)
+            {
+                return other is Settings && Equals((Settings)other);
+            }
+
+            public override int GetHashCode()
+            {
+                return hash;
+            }
+        }
 
         internal static bool Active { get { return on && !broken; } }
 
@@ -856,7 +977,7 @@ namespace CrowCompat
         {
             if (gated || held || !Active) return;
             float now = Time.realtimeSinceStartup;
-            if (now < nextFind) return;
+            if (now < nextFind || !CrowEvents.Turn(nextFind <= 0f)) return;
             nextFind = now + 3f;
             RouteAll();
         }
@@ -904,7 +1025,8 @@ namespace CrowCompat
             else
             {
                 bool after = false;
-                foreach (Component c in filter.GetComponents<Component>())
+                filter.GetComponents(components);
+                foreach (Component c in components)
                 {
                     if (ReferenceEquals(c, filter))
                     {
@@ -913,13 +1035,25 @@ namespace CrowCompat
                     }
                     if (!after || c == null) continue;
                     if (c is AudioReverbFilter || c is AudioLowPassFilter || c is AudioHighPassFilter || c is AudioEchoFilter || c is AudioChorusFilter || c is AudioDistortionFilter)
-                        why = "a " + c.GetType().Name + " after it";
+                        why = Why(filterAfter, c.GetType(), "a ", " after it");
                     else if (c is MonoBehaviour && FiltersAudio(c.GetType()))
-                        why = "OnAudioFilterRead after it (" + c.GetType().Name + ")";
+                        why = Why(scriptAfter, c.GetType(), "OnAudioFilterRead after it (", ")");
                     if (why != null) break;
                 }
+                components.Clear();
             }
             return why == null;
+        }
+
+        static readonly List<Component> components = new List<Component>();
+        static readonly Dictionary<Type, string> filterAfter = new Dictionary<Type, string>(), scriptAfter = new Dictionary<Type, string>();
+
+        // A reason naming a type, made once per type.
+        static string Why(Dictionary<Type, string> made, Type type, string before, string after)
+        {
+            string why;
+            if (!made.TryGetValue(type, out why)) made[type] = why = before + type.Name + after;
+            return why;
         }
 
         static readonly Dictionary<Type, bool> filterTypes = new Dictionary<Type, bool>();
@@ -933,21 +1067,29 @@ namespace CrowCompat
             return has;
         }
 
-        static string Key(float[] values, AudioMixerGroup dest)
+        // The filters of one Settings in a find: in the order first seen, their destination, the first as the sample.
+        // Reused by the next find (emptied at the end of each: no filter or mixer group held between finds), so a find
+        // allocates little more than the engine's filter list.
+        class Candidate
         {
-            var text = new StringBuilder(dest != null ? dest.GetInstanceID().ToString(CultureInfo.InvariantCulture) : "none");
-            foreach (float v in values) text.Append('|').Append(v.ToString("R", CultureInfo.InvariantCulture));
-            return text.ToString();
+            public Settings Key;
+            public readonly List<Member> Members = new List<Member>();
+            public AudioMixerGroup Dest;
+            public AudioReverbFilter Sample;
         }
 
-        // The groups in the loaded scenes, kept, grown, made or released. FilterGate calls it from its find.
+        static readonly Dictionary<Settings, Candidate> candidates = new Dictionary<Settings, Candidate>();
+        static readonly List<Candidate> found = new List<Candidate>(), spare = new List<Candidate>();
+        static readonly List<Group> alive = new List<Group>();
+        static readonly List<AudioReverbFilter> gone = new List<AudioReverbFilter>();
+
+        // The groups in the loaded scenes, kept, grown, made or released. FilterGate calls it from its find. The list is
+        // the next find's too: read it before.
         internal static List<Group> Find()
         {
-            var alive = new List<Group>();
+            alive.Clear();
+            Reuse();  // a find that threw
             if (!Active || !Load()) return alive;
-            var candidates = new Dictionary<string, List<Member>>();
-            var dests = new Dictionary<string, AudioMixerGroup>();
-            var sample = new Dictionary<string, AudioReverbFilter>();
             foreach (AudioReverbFilter filter in Resources.FindObjectsOfTypeAll<AudioReverbFilter>())
             {
                 if (filter == null || !filter.gameObject.scene.IsValid() || !GameHasOn(filter)) continue;
@@ -965,50 +1107,75 @@ namespace CrowCompat
                     string why;
                     if (!Eligible(filter, out source, out why))
                     {
-                        if (logged.Add(filter.GetInstanceID() + why)) Debug.Log("CROW_AUDIO shared reverb: " + Path(filter.transform) + " keeps its own (" + why + ")");
+                        if (logged.Add(new Logged { Id = filter.GetInstanceID(), Why = why }))
+                            Debug.Log("CROW_AUDIO shared reverb: " + Path(filter.transform) + " keeps its own (" + why + ")");
                         continue;
                     }
                     dest = source.outputAudioMixerGroup;
                 }
-                string key = Key(Values(filter), dest);
-                List<Member> list;
-                if (!candidates.TryGetValue(key, out list))
+                Settings key = Settings.Of(filter, dest);
+                Candidate candidate;
+                if (!candidates.TryGetValue(key, out candidate))
                 {
-                    candidates[key] = list = new List<Member>();
-                    dests[key] = dest;
-                    sample[key] = filter;
+                    if (spare.Count > 0)
+                    {
+                        candidate = spare[spare.Count - 1];
+                        spare.RemoveAt(spare.Count - 1);
+                    }
+                    else candidate = new Candidate();
+                    candidate.Key = key;
+                    candidate.Dest = dest;
+                    candidate.Sample = filter;
+                    candidates[key] = candidate;
+                    found.Add(candidate);
                 }
-                list.Add(new Member { Filter = filter, Source = source });
+                candidate.Members.Add(new Member { Filter = filter, Source = source });
             }
             // Groups whose key has fewer than two members left: released (their filters back), their mixer free.
             foreach (Group group in groups)
             {
-                List<Member> list;
-                if (!candidates.TryGetValue(group.Key, out list) || list.Count < 2) Release(group);
+                Candidate candidate;
+                if (!candidates.TryGetValue(group.Key, out candidate) || candidate.Members.Count < 2) Release(group);
             }
             groups.RemoveAll(g => !g.Alive);
-            foreach (AudioReverbFilter gone in owner.Keys.Where(k => k == null || !owner[k].Alive).ToList()) owner.Remove(gone);
-            foreach (KeyValuePair<string, List<Member>> pair in candidates)
+            foreach (KeyValuePair<AudioReverbFilter, Group> pair in owner)
+                if (pair.Key == null || !pair.Value.Alive) gone.Add(pair.Key);
+            foreach (AudioReverbFilter filter in gone) owner.Remove(filter);
+            gone.Clear();
+            foreach (Candidate candidate in found)
             {
-                if (pair.Value.Count < 2) continue;
-                Group group = groups.FirstOrDefault(g => g.Key == pair.Key);
+                if (candidate.Members.Count < 2) continue;
+                Group group = null;
+                foreach (Group existing in groups)
+                    if (existing.Key.Equals(candidate.Key))
+                    {
+                        group = existing;
+                        break;
+                    }
                 if (group == null)
                 {
                     int slot = FreeSlot();
                     if (slot < 0)
                     {
-                        if (logged.Add("full" + pair.Key)) Debug.Log("CROW_AUDIO shared reverb: all " + Slots + " mixers in use; " + pair.Value.Count + " filters keep their own");
+                        if (loggedFull.Add(candidate.Key)) Debug.Log("CROW_AUDIO shared reverb: all " + Slots + " mixers in use; " + candidate.Members.Count + " filters keep their own");
                         continue;
                     }
-                    group = new Group { Key = pair.Key, Dest = dests[pair.Key], Slot = slot };
-                    if (!Assign(group, sample[pair.Key])) continue;
+                    group = new Group { Key = candidate.Key, Dest = candidate.Dest, Slot = slot };
+                    if (!Assign(group, candidate.Sample)) continue;
                     groups.Add(group);
                 }
                 // New members take the group's state; members gone drop out.
                 group.Members.RemoveAll(m => m.Filter == null || m.Source == null);
-                foreach (Member member in pair.Value)
+                foreach (Member member in candidate.Members)
                 {
-                    if (group.Members.Any(m => ReferenceEquals(m.Filter, member.Filter))) continue;
+                    bool known = false;
+                    foreach (Member m in group.Members)
+                        if (ReferenceEquals(m.Filter, member.Filter))
+                        {
+                            known = true;
+                            break;
+                        }
+                    if (known) continue;
                     group.Members.Add(member);
                     owner[member.Filter] = group;
                     member.Filter.enabled = false;
@@ -1016,7 +1183,21 @@ namespace CrowCompat
                 }
                 alive.Add(group);
             }
+            Reuse();
             return alive;
+        }
+
+        static void Reuse()
+        {
+            foreach (Candidate candidate in found)
+            {
+                candidate.Members.Clear();
+                candidate.Dest = null;
+                candidate.Sample = null;
+                spare.Add(candidate);
+            }
+            found.Clear();
+            candidates.Clear();
         }
 
         static int FreeSlot()

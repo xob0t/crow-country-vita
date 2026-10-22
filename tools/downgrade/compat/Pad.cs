@@ -113,6 +113,9 @@ namespace CrowCompat
 
         static object activeManager, player0;
         static bool ready, primed, mapsDirty;
+
+        // Rewired's input manager Update last saw active (RewiredProbe.Joysticks: a new one is a Rewired start).
+        internal static object ActiveManager { get { return activeManager; } }
         static float retryAt;
         static int lastFrame = -1, builds;
         static string unsupported;

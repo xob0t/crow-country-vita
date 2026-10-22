@@ -66,11 +66,12 @@ namespace CrowCompat
         // Other players read the system clock as before.
         // The stopwatch is the process's time (IL2CPP's PSP2 GetTicks100NanosecondsMonotonic is
         // sceKernelGetProcessTime), which stands still while the console sleeps, so until 21 Oct a
-        // save after a night's sleep was dated the evening before. The file is written again on a
-        // call ReadEvery or more after the last (calls are rare: the log's start, each save, the
-        // Driving Intro's year), and when the file's time is ahead of the clock by over 2 s the clock
-        // moves on to it. It only moves forward, so the slots' times keep their order (Continue
-        // takes the latest).
+        // save after a night's sleep was dated the evening before. The file is written again on each
+        // call that isn't part of a burst (calls are rare: the log's start, each save, the Driving
+        // Intro's year), and when the file's time is ahead of the clock by over 2 s the clock moves on
+        // to it. It only moves forward, so the slots' times keep their order (Continue takes the
+        // latest). Until 22 Oct the re-read waited for 10 s of the process's time since the last,
+        // which the sleep doesn't add to: a save soon after waking kept the old date.
         public static DateTime Now()
         {
 #if CROW_VITA
@@ -93,10 +94,14 @@ namespace CrowCompat
         static readonly object clockGate = new object();
         static System.Diagnostics.Stopwatch sinceStart;
         static DateTime start;
-        static TimeSpan lastRead;
+        static TimeSpan lastRead, lastCall;
         static bool clockFailed, rereadFailed;
-        // At most one file write per 10 s of the process's time, should a caller ever ask every frame.
-        static readonly TimeSpan ReadEvery = TimeSpan.FromSeconds(10), Slack = TimeSpan.FromSeconds(2);
+        // A call within Burst of the process's time after the one before is part of a burst (a save
+        // asks Now and UtcNow together; a caller that asks every frame): it reads the file only
+        // ReadEvery after the last read, so such a caller writes the card at most every 10 s. A call
+        // after a pause, the sleep's included (the player has to wake the console and get to a save),
+        // reads it at once.
+        static readonly TimeSpan ReadEvery = TimeSpan.FromSeconds(10), Burst = TimeSpan.FromSeconds(1), Slack = TimeSpan.FromSeconds(2);
 
         // The console's clock (UTC), from a file's modification time.
         static DateTime FileTime()
@@ -117,7 +122,7 @@ namespace CrowCompat
                     {
                         start = FileTime();
                         sinceStart = System.Diagnostics.Stopwatch.StartNew();
-                        lastRead = TimeSpan.Zero;
+                        lastRead = lastCall = TimeSpan.Zero;
                     }
                     catch (Exception e)
                     {
@@ -127,7 +132,9 @@ namespace CrowCompat
                 }
                 if (sinceStart == null) return DateTime.UtcNow;
                 TimeSpan elapsed = sinceStart.Elapsed;
-                if (elapsed - lastRead >= ReadEvery)
+                bool apart = elapsed - lastCall >= Burst;
+                lastCall = elapsed;
+                if (apart || elapsed - lastRead >= ReadEvery)
                 {
                     lastRead = elapsed;
                     try
@@ -141,7 +148,7 @@ namespace CrowCompat
                     }
                     catch (Exception e)
                     {
-                        // The stopwatch's time stands; the next call after ReadEvery tries again.
+                        // The stopwatch's time stands; the next call apart from this one, or after ReadEvery, tries again.
                         if (!rereadFailed) Debug.Log("CROW_CLOCK file time failed (" + e.GetType().Name + ": " + e.Message + "): the stopwatch's time");
                         rereadFailed = true;
                     }

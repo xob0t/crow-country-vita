@@ -182,6 +182,7 @@ namespace CrowCompat
             float now = Time.realtimeSinceStartup;
             if (!on && Check.On) Check.Watch();
             if ((now < nextScan && !fullScan && !Check.On) || !on) return;
+            if (!Check.On && !CrowEvents.Turn(fullScan)) return;  // the 1 s scans in a frame of their own
             nextScan = now + 1f;
             if (fullScan)
             {
@@ -431,8 +432,19 @@ namespace CrowCompat
             float drag = game.x;
             float keep = 1f - drag * GameStep;
             if (drag <= 0f || keep <= 0f || keep >= 1f) return step / GameStep;
-            float now = Mathf.Pow(keep, step / GameStep);
-            float plain = keep / (1f - keep) / (now / (1f - now));
+            Vector2 powered;
+            if (poweredStep != step)
+            {
+                powers.Clear();
+                poweredStep = step;
+            }
+            if (!powers.TryGetValue(drag, out powered))
+            {
+                if (powers.Count > 256) powers.Clear();
+                float damped = Mathf.Pow(keep, step / GameStep);
+                powers[drag] = powered = new Vector2(damped, keep / (1f - keep) / (damped / (1f - damped)));
+            }
+            float now = powered.x, plain = powered.y;
             float mu = CachedGroundFriction(body);
             if (mu <= 0f) return plain;
             float impulse = force.magnitude / (mode == ForceMode.Impulse ? body.mass : 1f);  // speed it adds a step at 0.02
@@ -441,6 +453,11 @@ namespace CrowCompat
             if (impulse <= 0f || speed <= 0f) return plain;  // friction holds it at 0.02 too
             return (speed * (1f - now) / now + mu * g * step) / impulse;
         }
+
+        // Per game drag at the step in use: keep^(step / 0.02) and the gain without friction, as Gain works them out (the
+        // same inputs, the same floats). Until 22 Oct a Mathf.Pow on every rewritten AddForce (12-20 a frame in a fight).
+        static readonly Dictionary<float, Vector2> powers = new Dictionary<float, Vector2>();
+        static float poweredStep = -1f;
 
         static readonly Dictionary<Rigidbody, Collider> ownCollider = new Dictionary<Rigidbody, Collider>();
         internal static int GroundCacheSteps;

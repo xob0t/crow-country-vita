@@ -125,6 +125,7 @@ namespace CrowCompat
                     nextSelect = 0f;
                     nextList = 0f;
                     nextCamera = 0f;
+                    sendAll = true;
                     if (!on && restoreBaked) Restore();
                 });
                 CrowEvents.BeforeRender("VitaLit.Tick", Tick);
@@ -139,6 +140,8 @@ namespace CrowCompat
             {
                 pixelLights = QualitySettings.pixelLightCount;
                 QualitySettings.pixelLightCount = 0;
+                linear = QualitySettings.activeColorSpace == ColorSpace.Linear;  // the project's: fixed for the run
+                sendAll = true;
                 swapPasses = 0;
                 nextSelect = 0f;
                 sceneTime = Time.realtimeSinceStartup;
@@ -152,6 +155,7 @@ namespace CrowCompat
                     if (pair.Key != null) pair.Key.renderMode = pair.Value;
                 forced.Clear();
                 keys.Clear();
+                keyTransforms.Clear();
                 if (pixelLights >= 0) QualitySettings.pixelLightCount = pixelLights;
                 foreach (string name in keywords) Shader.DisableKeyword(name);
                 keyword = null;
@@ -228,18 +232,20 @@ namespace CrowCompat
         // by one of IL2CPP's pinned GC handles (Memory.cs, GcHandles), for every material in memory, and
         // in such a build it found none to swap (every logged pass on the PS Vita: "0 materials to
         // CrowVita/Lit", 139 to 419 saved so). Haunted Hilltop's first frame took handle 65,537 there,
-        // which made the handle table grow, and crash, on 21 Oct. A renderer's material found on Standard
-        // after all (the renderer pass below sees each one's first material) brings the scan back
-        // at once; Restore (lit=game) clears it.
+        // which made the handle table grow, and crash, on 21 Oct. The renderer pass below then looks at
+        // the first material of every renderer it lists (FindObjectsOfType: those on active
+        // GameObjects), and one on a shader the scan swaps (Standard, SFBStandard, Legacy Diffuse; until
+        // 22 Oct Standard only) brings the scan back at once; other slots, and materials no such renderer
+        // has, aren't seen. Every slot (GetSharedMaterials) made the post-load pass 2.5 to 7.5 times as
+        // long on the PS Vita (Ocean Kingdom 31 -> 235 ms, P1-verify 22 Oct): a managed Material per slot.
+        // Restore (lit=game) clears it. (A cache of the layer mask
+        // by the scenes loaded and the renderer counts, also 21 Oct, went on 22 Oct: on the PS Vita only
+        // the first pass after a load runs, and the counts differed on most revisits, Haunted Hilltop's
+        // on every one, so it saved next to nothing.)
         static bool bakedBuild;
-        // The layer mask of the renderer pass by the scenes loaded and the CrowVita/Lit renderers' count
-        // (and lightmapped count): a GameObject's layer is read through a managed GameObject, held by a
-        // pinned GC handle until the GameObject is destroyed, one per renderer (Pool 2,244).
-        // Passes 2 to 4, and a later visit to the same area with the same counts, take the mask the
-        // earlier pass worked out instead (Pool's was 41 in every logged pass).
-        static readonly Dictionary<string, int> layersBy = new Dictionary<string, int>();
-        static readonly List<Renderer> litRendererList = new List<Renderer>();
         static readonly Material[] NoMaterials = new Material[0];
+        // Per shader (instance ID): whether the material scan swaps it.
+        static readonly Dictionary<int, bool> swappable = new Dictionary<int, bool>();
 
         static void Tick()
         {
@@ -323,9 +329,9 @@ namespace CrowCompat
                 count++;
             }
             // The layers most CrowVita/Lit renderers are on (each with a tenth of them or more).
+            var perLayer = new int[32];
             int litRenderers = 0, lightmapped = 0;
             bool onStandard = false;
-            litRendererList.Clear();
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 Material material = renderer.sharedMaterial;
@@ -333,42 +339,24 @@ namespace CrowCompat
                 Shader shader = material.shader;
                 if (shader != VitaLit.lit)
                 {
-                    if (!scanned && shader != null && shader == standard) onStandard = true;
+                    if (!scanned && !onStandard && Swappable(shader)) onStandard = true;
                     continue;
                 }
-                litRendererList.Add(renderer);
+                perLayer[renderer.gameObject.layer]++;
                 litRenderers++;
                 if (renderer.lightmapIndex >= 0 && renderer.lightmapIndex < 0xFFFE) lightmapped++;
             }
             if (onStandard)
             {
                 // Not every material saved so after all: this pass again with the material scan.
-                litRendererList.Clear();
                 bakedBuild = false;
-                Debug.Log("CROW_LIT a renderer's material is on Standard: the material scan is back");
+                Debug.Log("CROW_LIT a renderer's material is on a shader the scan swaps: the material scan is back");
                 Swap();
                 return;
             }
-            var key = new System.Text.StringBuilder();
-            for (int i = 0; i < SceneManager.sceneCount; i++)
-            {
-                Scene scene = SceneManager.GetSceneAt(i);
-                if (scene.isLoaded) key.Append(scene.name).Append('|');
-            }
-            key.Append(litRenderers).Append('|').Append(lightmapped);
-            string layersKey = key.ToString();
-            bool layersKept = layersBy.TryGetValue(layersKey, out majorLayers);
-            if (!layersKept)
-            {
-                var perLayer = new int[32];
-                foreach (Renderer renderer in litRendererList) perLayer[renderer.gameObject.layer]++;
-                majorLayers = 0;
-                for (int layer = 0; layer < 32; layer++)
-                    if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
-                if (layersBy.Count > 256) layersBy.Clear();
-                layersBy[layersKey] = majorLayers;
-            }
-            litRendererList.Clear();
+            majorLayers = 0;
+            for (int layer = 0; layer < 32; layer++)
+                if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
             if (first)
             {
                 baked = bakedBuild || saved > 0;
@@ -378,7 +366,20 @@ namespace CrowCompat
                 Debug.Log("CROW_LIT " + count + " materials to CrowVita/Lit (" + transparent + " transparent, " + cutout + " cutout, " + changedQueue +
                           " render queues kept), " + (scanned ? saved + " saved so by the build" : "material scan left out (saved so by the build)") + "; " +
                           litRenderers + " renderers, " + lightmapped + " lightmapped (" + LightmapSettings.lightmaps.Length + " lightmaps); layers " +
-                          majorLayers.ToString("X") + (layersKept ? " (as before)" : "") + "; pass " + swapPasses + " in " + clock.ElapsedMilliseconds + " ms");
+                          majorLayers.ToString("X") + "; pass " + swapPasses + " in " + clock.ElapsedMilliseconds + " ms");
+        }
+
+        // Whether the material scan swaps a material on this shader (Standard, SFBStandard, Legacy Diffuse), by the
+        // shader's instance ID (a name read is a new string).
+        static bool Swappable(Shader shader)
+        {
+            if (shader == null || shader == lit) return false;
+            if (shader == standard) return true;
+            bool swaps;
+            int id = shader.GetInstanceID();
+            if (swappable.TryGetValue(id, out swaps)) return swaps;
+            string name = shader.name;
+            return swappable[id] = name == "Standard" || name == "SFBStandard" || name == "Legacy Shaders/Diffuse";
         }
 
         // Legacy Shaders/Diffuse (texture times colour, Lambert; 48 untextured materials, white, red,
@@ -413,7 +414,9 @@ namespace CrowCompat
 
         // Select runs every 0.25 s in play, so it allocates nothing (strings only with -crow-lit-log): the
         // scene's lights are listed again every 2 s and after each load, the buffers are reused, and the
-        // key lights are picked by hand.
+        // key lights are picked by hand. A 2 s listing that finds another periodic scan in its frame
+        // (CrowEvents.Turn) waits for the next Select; until 22 Oct it came in the same frame as the
+        // camera's 2 s Camera.main every time.
         // The list has the lights that are off too, and the spot lights among them that would be key
         // lights are watched every frame (Woken): a spot light that isn't a key light is Unity's, per
         // vertex, where Unity drops its cone and lights everything in its range as a point light. The
@@ -430,7 +433,7 @@ namespace CrowCompat
         static void Select()
         {
             float now = Time.realtimeSinceStartup;
-            if (now >= nextList)
+            if (now >= nextList && CrowEvents.Turn(nextList <= 0f))
             {
                 nextList = now + 2f;
                 // The scenes' lights, on or off (FindObjectsOfType lists only those on); not prefabs'.
@@ -524,6 +527,8 @@ namespace CrowCompat
                 }
             keys.Clear();
             keys.AddRange(chosen);
+            keyTransforms.Clear();
+            foreach (Light light in chosen) keyTransforms.Add(light.transform);
             if (log)
             {
                 var line = new System.Text.StringBuilder("CROW_LIT keys");
@@ -536,23 +541,52 @@ namespace CrowCompat
             }
         }
 
-        // Camera.main as Select last found it, asked again every 2 s, after each load and when that
-        // camera is gone or off. Unity 2018's Camera.main walks the scene's objects for the MainCamera
-        // tag (FindMainCamera: 3.2% of the main thread in a Station Square fight, Windows player at the
-        // PS Vita's speed), and Select runs in every frame a watched spot light comes on.
+        // Camera.main as Select last found it, asked again after each load and when that camera is gone
+        // or off. Unity 2018's Camera.main walks the scene's objects for the MainCamera tag
+        // (FindMainCamera: 3.2% of the main thread in a Station Square fight, Windows player at the
+        // PS Vita's speed), and Select runs in every frame a watched spot light comes on. Every 2 s the
+        // enabled cameras are looked at (Camera.GetAllCameras, a copy of the engine's list): while the
+        // camera found is the only one tagged MainCamera there, it is what Camera.main would give, and
+        // only otherwise is Camera.main asked. Until 22 Oct it was asked every 2 s (0.41% of the same
+        // profile, about 8 ms in one frame every 2 s).
         internal static bool CacheCamera = true;
         static Camera mainCamera;
         static float nextCamera;
+        static Camera[] enabledCameras = new Camera[8];
 
         static Camera MainCamera(float now)
         {
             if (!CacheCamera) return Camera.main;
-            if (mainCamera == null || now >= nextCamera || !mainCamera.isActiveAndEnabled)
+            if (mainCamera == null || nextCamera <= 0f || !mainCamera.isActiveAndEnabled)
             {
                 mainCamera = Camera.main;
                 nextCamera = now + 2f;
             }
+            else if (now >= nextCamera)
+            {
+                nextCamera = now + 2f;
+                if (!OnlyMainCamera(mainCamera)) mainCamera = Camera.main;
+            }
             return mainCamera;
+        }
+
+        // Whether the camera is the one enabled camera tagged MainCamera (Camera.main: "the first enabled camera
+        // tagged MainCamera"; the engine's list holds the enabled cameras of active GameObjects).
+        static bool OnlyMainCamera(Camera camera)
+        {
+            int count = Camera.allCamerasCount;
+            if (count > enabledCameras.Length) enabledCameras = new Camera[count * 2];
+            count = Camera.GetAllCameras(enabledCameras);
+            bool self = false, other = false;
+            for (int i = 0; i < count; i++)
+            {
+                Camera listed = enabledCameras[i];
+                if (listed == null || !listed.CompareTag("MainCamera")) continue;
+                if (listed == camera) self = true;
+                else other = true;
+            }
+            Array.Clear(enabledCameras, 0, count);  // no cameras held
+            return self && !other;
         }
 
         static void Unkey(Light light)
@@ -572,19 +606,47 @@ namespace CrowCompat
         };
         static readonly Vector4[] lanes = new Vector4[8];
         static string keyword;
+        static readonly int KeyPosId = Shader.PropertyToID("_CrowKeyPos"), KeyDirId = Shader.PropertyToID("_CrowKeyDir"),
+            KeyColorId = Shader.PropertyToID("_CrowKeyColor"), FillId = Shader.PropertyToID("_CrowFill"), FillColorId = Shader.PropertyToID("_CrowFillColor");
+        // The key lights' transforms (Select; a light's transform is an engine call), the colour space, and what the
+        // globals were last given: a global is set again only when its value changed (exactly; NaN always), and all of
+        // them when VitaLit comes on and after each load (sendAll). Until 22 Oct all 13 every frame, the 5 arrays and
+        // vectors by name (a string to ID lookup each: a third of Upload's samples in the 18 Oct profile).
+        static readonly List<Transform> keyTransforms = new List<Transform>();
+        static bool linear, sendAll = true;
+        static readonly Vector4[] sentPositions = new Vector4[Keys], sentDirections = new Vector4[Keys], sentColors = new Vector4[Keys];
+        static Vector4 sentFill, sentFillColor;
+
+        static bool Same(Vector4 a, Vector4 b)
+        {
+            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
+        }
+
+        // Copies values into sent; false when they were the same already.
+        static bool Changed(Vector4[] values, Vector4[] sent)
+        {
+            bool changed = false;
+            for (int k = 0; k < values.Length; k++)
+                if (!Same(values[k], sent[k]))
+                {
+                    sent[k] = values[k];
+                    changed = true;
+                }
+            return changed;
+        }
 
         // The key lights in the shader's slots, the ones that are on first; the rest far away and
         // black. CROW_KEYS_2/4: how many slots the shader reads, side by side (_CrowKeyX...: slot k in
         // lane k); CROW_KEYS_LOOP: 4 slots one after another (-crow-lit-soa off).
         static void Upload()
         {
-            bool linear = QualitySettings.activeColorSpace == ColorSpace.Linear;
             Vector4 fill = Vector4.zero, fillColor = Vector4.zero;
             int used = 0;
-            foreach (Light light in keys)
+            for (int i = 0; i < keys.Count; i++)
             {
+                Light light = keys[i];
                 if (light == null || !light.isActiveAndEnabled || light.intensity <= 0f) continue;
-                Transform transform = light.transform;
+                Transform transform = keyTransforms[i];
                 Color color = (linear ? light.color.linear : light.color) * light.intensity;
                 if (light.type == LightType.Directional)
                 {
@@ -616,23 +678,30 @@ namespace CrowCompat
                 directions[k] = Vector4.zero;
                 colors[k] = Vector4.zero;
             }
-            Shader.SetGlobalVectorArray("_CrowKeyPos", positions);
-            Shader.SetGlobalVectorArray("_CrowKeyDir", directions);
-            Shader.SetGlobalVectorArray("_CrowKeyColor", colors);
-            for (int k = 0; k < Keys; k++)
+            bool all = sendAll;
+            sendAll = false;
+            // Changed() copies the new values into sent*, so all three run (no short circuit).
+            bool positionsChanged = Changed(positions, sentPositions), directionsChanged = Changed(directions, sentDirections);
+            if (Changed(colors, sentColors) || all) Shader.SetGlobalVectorArray(KeyColorId, colors);
+            if (positionsChanged || directionsChanged || all)
             {
-                lanes[0][k] = positions[k].x;
-                lanes[1][k] = positions[k].y;
-                lanes[2][k] = positions[k].z;
-                lanes[3][k] = positions[k].w;
-                lanes[4][k] = directions[k].x;
-                lanes[5][k] = directions[k].y;
-                lanes[6][k] = directions[k].z;
-                lanes[7][k] = directions[k].w;
+                Shader.SetGlobalVectorArray(KeyPosId, positions);
+                Shader.SetGlobalVectorArray(KeyDirId, directions);
+                for (int k = 0; k < Keys; k++)
+                {
+                    lanes[0][k] = positions[k].x;
+                    lanes[1][k] = positions[k].y;
+                    lanes[2][k] = positions[k].z;
+                    lanes[3][k] = positions[k].w;
+                    lanes[4][k] = directions[k].x;
+                    lanes[5][k] = directions[k].y;
+                    lanes[6][k] = directions[k].z;
+                    lanes[7][k] = directions[k].w;
+                }
+                for (int i = 0; i < lanes.Length; i++) Shader.SetGlobalVector(laneIds[i], lanes[i]);
             }
-            for (int i = 0; i < lanes.Length; i++) Shader.SetGlobalVector(laneIds[i], lanes[i]);
-            Shader.SetGlobalVector("_CrowFill", fill);
-            Shader.SetGlobalVector("_CrowFillColor", fillColor);
+            if (!Same(fill, sentFill) || all) Shader.SetGlobalVector(FillId, sentFill = fill);
+            if (!Same(fillColor, sentFillColor) || all) Shader.SetGlobalVector(FillColorId, sentFillColor = fillColor);
             string wanted = used == 0 ? null : !soa ? keywords[2] : used <= 2 ? keywords[0] : keywords[1];
             if (wanted == keyword) return;
             foreach (string name in keywords)

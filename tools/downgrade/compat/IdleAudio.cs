@@ -30,6 +30,11 @@ namespace CrowCompat
         static readonly List<float> idleSince = new List<float>();
         static readonly Dictionary<AudioSource, int> index = new Dictionary<AudioSource, int>();
         static readonly HashSet<AudioSource> asleep = new HashSet<AudioSource>();
+        // Per watched source (by index): whether it is in asleep, so Frame passes over a sleeping one with an array
+        // read. Until 22 Oct each visit asked the engine for its enabled state and the set (most of Station Square's
+        // and Roadside's watched sources sleep: 0.38% of a fight's main thread, the most of any willRenderCanvases
+        // handler); the same sources are visited on the same frames.
+        static readonly List<bool> sleeping = new List<bool>();
         static float rescanAt;
         static int next, disabled, woken, heard;
         static readonly List<AudioSource> justWoken = new List<AudioSource>();
@@ -51,7 +56,11 @@ namespace CrowCompat
             if (!on || ReferenceEquals(source, null) || !asleep.Remove(source)) return;
             source.enabled = true;
             int at;
-            if (index.TryGetValue(source, out at)) idleSince[at] = Time.realtimeSinceStartup;
+            if (index.TryGetValue(source, out at))
+            {
+                idleSince[at] = Time.realtimeSinceStartup;
+                sleeping[at] = false;
+            }
             woken++;
             if (log) justWoken.Add(source);
         }
@@ -133,7 +142,11 @@ namespace CrowCompat
                 if (!ReferenceEquals(source, null) && asleep.Remove(source))
                 {
                     int at;
-                    if (index.TryGetValue(source, out at)) idleSince[at] = Time.realtimeSinceStartup;
+                    if (index.TryGetValue(source, out at))
+                    {
+                        idleSince[at] = Time.realtimeSinceStartup;
+                        sleeping[at] = false;
+                    }
                 }
             }
             behaviour.enabled = value;
@@ -144,6 +157,7 @@ namespace CrowCompat
         {
             watched.Clear();
             idleSince.Clear();
+            sleeping.Clear();
             index.Clear();
             asleep.RemoveWhere(s => s == null);
             foreach (AudioSource source in Resources.FindObjectsOfTypeAll<AudioSource>())
@@ -154,6 +168,7 @@ namespace CrowCompat
                 index[source] = watched.Count;
                 watched.Add(source);
                 idleSince.Add(now);
+                sleeping.Add(asleep.Contains(source));
             }
             next = 0;
             if (log) Debug.Log("CROW_IDLE_AUDIO watching " + watched.Count + " sources, " + asleep.Count + " off; " + disabled + " turned off, " + woken + " woken so far (" + heard + " playing the frame after)");
@@ -167,7 +182,7 @@ namespace CrowCompat
             for (int i = 0; i < justWoken.Count; i++)
                 if (justWoken[i] != null && justWoken[i].isPlaying) heard++;
             justWoken.Clear();
-            if (rescanAt > 0f && now >= rescanAt)
+            if (rescanAt > 0f && now >= rescanAt && CrowEvents.Turn())
             {
                 rescanAt = now + 60f;  // and every 60 s, for sources the game makes or enables later
                 Rescan(now);
@@ -177,8 +192,9 @@ namespace CrowCompat
             {
                 if (next >= watched.Count) next = 0;
                 int i = next++;
+                if (sleeping[i]) continue;  // asleep.Contains(watched[i])
                 AudioSource source = watched[i];
-                if (source == null || !source.enabled || asleep.Contains(source)) continue;
+                if (source == null || !source.enabled) continue;
                 if (source.isPlaying || source.timeSamples != 0 || !source.gameObject.activeInHierarchy)
                 {
                     idleSince[i] = now;
@@ -187,6 +203,7 @@ namespace CrowCompat
                 if (now - idleSince[i] < IdleSeconds) continue;
                 source.enabled = false;
                 asleep.Add(source);
+                sleeping[i] = true;
                 disabled++;
             }
         }

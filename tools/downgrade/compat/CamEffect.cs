@@ -253,6 +253,8 @@ namespace CrowCompat
         {
             public Material sfb, psx, blur, crt;
             public RenderTexture a, b, c, d;
+            public string notHalf;  // VitaReady's size check, made once: null when the sizes are the half-size chain's
+            public bool sized;
         }
 
         static readonly System.Collections.Generic.Dictionary<int, Chain> chains = new System.Collections.Generic.Dictionary<int, Chain>();
@@ -269,6 +271,13 @@ namespace CrowCompat
                 lastEffect = effect;
                 return lastChain = known;
             }
+            return FindChain(effect);
+        }
+
+        // The chain read from the effect's fields: a method of its own, since its lambda's closure (effect, type) was
+        // made at the start of ChainOf, in every frame (until 22 Oct), the fast path's too.
+        static Chain FindChain(Component effect)
+        {
             Type type = effect.GetType();
             Func<string, object> get = name =>
             {
@@ -388,21 +397,28 @@ namespace CrowCompat
             Graphics.Blit(source, target, material, pass);
         }
 
-        static readonly int BlurTexId = Shader.PropertyToID("_BlurTex");
+        static readonly int BlurTexId = Shader.PropertyToID("_BlurTex"), SwitchId = Shader.PropertyToID("_switch");
         static Material post;
         static Texture2D dither, noise;
         static string unavailable;
 
         // CrowVita/Post, the noise and dither textures; the chain's sizes as the half-size chain makes
-        // them and the game's _switch on (the passes are its Switch forms).
+        // them and the game's _switch on (the passes are its Switch forms). The sizes are checked once per
+        // chain: its textures are made once, by the game's Awake and AfterAwake, and nothing sets a size
+        // after (Half is read once too); until 22 Oct six engine reads every frame, and _switch by name.
         static bool VitaReady(Chain chain)
         {
             string reason = null;
             if (post == null && unavailable == null) unavailable = LoadPost();
+            if (!chain.sized)
+            {
+                chain.sized = true;
+                if (!Half || chain.a.width != 550 || chain.a.height != 400 || chain.c.width != 624 || chain.c.height != 351 || chain.d.width != 416 || chain.d.height != 234)
+                    chain.notHalf = "the chain is not the half-size one (" + chain.a.width + "x" + chain.a.height + ", " + chain.c.width + "x" + chain.c.height + ", " + chain.d.width + "x" + chain.d.height + ")";
+            }
             if (unavailable != null) reason = unavailable;
-            else if (!Half || chain.a.width != 550 || chain.a.height != 400 || chain.c.width != 624 || chain.c.height != 351 || chain.d.width != 416 || chain.d.height != 234)
-                reason = "the chain is not the half-size one (" + chain.a.width + "x" + chain.a.height + ", " + chain.c.width + "x" + chain.c.height + ", " + chain.d.width + "x" + chain.d.height + ")";
-            else if (Shader.GetGlobalFloat("_switch") < 0.5f) reason = "_switch is off";
+            else if (chain.notHalf != null) reason = chain.notHalf;
+            else if (Shader.GetGlobalFloat(SwitchId) < 0.5f) reason = "_switch is off";
             if (reason == null) return true;
             if (!logged)
             {

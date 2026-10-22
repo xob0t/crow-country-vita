@@ -284,7 +284,11 @@ namespace CrowCompat
             thread.IsBackground = true;
             thread.Name = "CrowGcGovernor";
             thread.Start();
+            Governing = true;
         }
+
+        // Whether the governor runs (it may hold the heap at its size from then on: GcHandles.Change grows no table).
+        internal static bool Governing;
 
         // The PS Vita's 26 MB of physically contiguous memory, which the game leaves unused (Unity's
         // PSVitaVideoPlayer, which needs it for its decoder, is never used: CrowCompat plays the game's
@@ -572,10 +576,11 @@ namespace CrowCompat
     // IL2CPP's tables of GC handles (libil2cpp gc/GCHandle.cpp, 2018.2.19f1): weak, weak tracking, normal and pinned,
     // a handle being (slot << 3) | (table + 1). The engine holds the managed object of every engine object scripts
     // have reached (each MonoBehaviour, and a GameObject, Transform, Renderer, Material... once a script has asked for
-    // it: FindObjectsOfType, .gameObject, .transform) by a PINNED handle until the engine object is destroyed: in the
-    // Windows IL2CPP player (21 Oct, -crow-gc-handles-count) the pinned table held 527 handles at the start, 15,666 on
-    // the title, 57,000-63,000 in Station Square, Ocean Kingdom, Fairy Forest and Pool and 79,600-80,900 in Haunted
-    // Hilltop (the same on every visit), the normal table none. The normal and pinned tables start at 32 slots and
+    // it: FindObjectsOfType, .gameObject, .transform) by a PINNED handle until the engine object is destroyed: on the
+    // PS Vita (21-22 Oct, -crow-gc-handles-count) the pinned table held 499 handles at the start, 45,700-50,900 in Fairy
+    // Forest, Station Square and Ocean Kingdom and about 64,000 in Haunted Hilltop (the same on every visit; the
+    // Windows IL2CPP player read 15,666 on the title, 57,000-63,000 in those areas and Pool, 79,600-80,900 in Haunted
+    // Hilltop), the normal table none. The normal and pinned tables start at 32 slots and
     // double when every slot is taken, and never shrink: a new entries array twice the size from the GC heap
     // (GarbageCollector::AllocateFixed, GC_MALLOC_UNCOLLECTABLE, which every collection scans),
     // the old one copied in and freed, and a bitmap of a bit a slot (malloc). alloc_handle doesn't check that the new
@@ -584,8 +589,9 @@ namespace CrowCompat
     // with the governor holding the GC heap at 75.3 MB, and the copy into NULL crashed the game (a data abort in
     // memcpy). Grow takes handles on one byte array at the start, while the heap can still grow, until the table has
     // doubled to the size asked for, then frees them all: the table keeps its size, so the game's own handles can't
-    // make it grow below that. 131,072 slots cost 512 KB of the GC heap and 16 KB of main memory for good, 1.6 times
-    // Haunted Hilltop's 81,000; 262,144 would be 512 KB more, scanned by every collection.
+    // make it grow below that. 131,072 slots cost 512 KB of the GC heap and 16 KB of main memory for good, twice the
+    // PS Vita's Haunted Hilltop (64,000; 1.6 times the Windows player's 81,000); 262,144 would be 512 KB more, scanned
+    // by every collection. Only at the start: -crow-ab's gchandles=<n> grows nothing once the governor runs.
     //   -crow-gc-handles <n>    the table grown to n slots (a power of two; the PS Vita's default 131072, logged as
     //                           CROW_GC handles: <table> table ...); 0 leaves it to IL2CPP (the default elsewhere).
     //   -crow-gc-handles-table pinned|normal  the table Grow grows (default pinned, the engine's).
@@ -595,8 +601,11 @@ namespace CrowCompat
     //                           (GCHandle.Target of the handle made from its number: GetTarget returns the entry when
     //                           the slot's bit is set, null otherwise and past the table's end), twice the size seen
     //                           (at least 131,072 slots, and on while the upper half read has handles): a probe, off
-    //                           by default. IL2CPP players (Mono refuses a free slot's handle: it says so).
-    // -crow-ab / -crow-cycle take gchandles=<n> (grows the table then) and gchandles=count (a count line then).
+    //                           by default, and a main-thread hitch of its own (524,288 slots read in 362-379 ms on
+    //                           the PS Vita, 7-13 in the Windows player): frame times measured with it on are off.
+    //                           IL2CPP players (Mono refuses a free slot's handle: it says so).
+    // -crow-ab / -crow-cycle take gchandles=<n> (grows the table then, unless the PS Vita's governor runs: see above)
+    // and gchandles=count (a count line then).
     static class GcHandles
     {
         const int VitaSlots = 131072, MaxSlots = 1 << 20;
@@ -637,8 +646,11 @@ namespace CrowCompat
             if (key != "gchandles") return false;
             int slots;
             if (value == "count") Count("asked");
-            else if (int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out slots)) Grow(slots);
-            else Debug.Log("CROW_GC handles: no change " + value);
+            else if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out slots)) Debug.Log("CROW_GC handles: no change " + value);
+            // With the governor running, the doubling Grow makes is the one that crashed Haunted Hilltop on 21 Oct: a new
+            // entries array the held heap may not have, which alloc_handle copies into unchecked.
+            else if (Memory.Governing) Debug.Log("CROW_GC handles: not grown to " + slots + " while the governor runs (it may hold the GC heap); grow at the start (-crow-gc-handles)");
+            else Grow(slots);
             return true;
         }
 
@@ -662,7 +674,7 @@ namespace CrowCompat
 
         // Handles on one object until one lands in the upper half of the size asked for (the table has doubled to it,
         // or was that big), then all freed. At most half the slots and one: 65,537 handles and a 256 KB array of them
-        // for 131,072 (2-4 ms in the Windows IL2CPP player).
+        // for 131,072 (103-104 ms at the PS Vita's start, 65,038 handles; 2-4 ms in the Windows IL2CPP player).
         static void Grow(int slots)
         {
             if (slots <= 0) return;

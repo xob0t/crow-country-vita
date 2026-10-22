@@ -113,8 +113,12 @@ namespace CrowCompat
         static void CasterTick()
         {
             float now = Time.realtimeSinceStartup;
-            // Every 10 s (each pass allocates the renderer list: Station Square 12 KB) and after each load.
-            if (casterRule == null || now - lastCasters < 10f) return;
+            // Every 10 s (each pass allocates the renderer list: Station Square 12 KB) and after each load. The
+            // 10 s passes are not for the player's hierarchy alone: renderers on objects the game switches on or
+            // clones later come up casting (the PS Vita, 21 Oct: Ocean Kingdom 32, 18 and 65 more at 10, 20 and
+            // 30 s after its load, Haunted Hilltop 3-6, Station Square 1-3), so they stay. They wait for a frame
+            // without another periodic scan (CrowEvents.Turn); the pass after a load or a new rule doesn't.
+            if (casterRule == null || now - lastCasters < 10f || !CrowEvents.Turn(lastCasters < 0f)) return;
             lastCasters = now;
             int changed = 0, casters = 0;
             if (casterRule == "player" || casterRule.StartsWith("player:")) PlayerRenderers();

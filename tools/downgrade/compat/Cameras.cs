@@ -348,7 +348,7 @@ namespace CrowCompat
             if (fogFar) FogTick(now);
             if (mode == null || mode == "game") return;
             Restore();
-            if (now >= nextScan)
+            if (now >= nextScan && CrowEvents.Turn(nextScan <= 0f))  // the 2 s scans in a frame of their own
             {
                 nextScan = now + 2f;
                 Scan();
