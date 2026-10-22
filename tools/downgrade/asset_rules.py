@@ -984,15 +984,31 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
 # and pipes), 103 MB in all, 0.3-6.6 MB an area. AssetRipper 2.0.0 exports their index buffers but
 # not their vertex data (m_DataSize 0, _typelessdata empty), so the port built them with every vertex at
 # the origin: drawn, culled as visible, and invisible on every platform. Each such exported mesh gets the
-# vertex data of the game's mesh with its name, vertex count and index buffer, read from the .resS file;
-# the vertex layout (m_Channels) is the export's, which it copied from the game.
+# vertex data of the game's mesh with its name, vertex count, index buffer and bounds, read from the .resS
+# file; the vertex layout (m_Channels) is the export's, which it copied from the game. The bounds since
+# 22 Oct: a combiner names each cell's mesh after its material, so cells of the same parts (two vents,
+# a pipe, a cabinet) have the same name, count and index buffer at other places, and every one of them
+# got the last one's vertices: 110 meshes in 50 such groups, 55 of them drawn with another's, up to
+# 17 m from their place in 26 scenes (Station Square's vent beside the crow house, the piano room's
+# fortune teller parts in Mansion), and only where their own bounds were in view. Only Underground SE's
+# and NW's `elevator 5` cells (80 of 1,680 vertices 0.44 m apart) also have the same bounds.
 STREAMED_MESHES = WORK / 'streamed-meshes.json'
 STREAMED_MESH_CACHE = WORK / 'streamed-meshes'
 NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.M)
+MESH_KEY_VERSION = 'bounds'
+LOCAL_AABB = re.compile(
+    rb'^  m_LocalAABB:\n'
+    rb'    m_Center: \{x: (\S+), y: (\S+), z: (\S+)\}\n'
+    rb'    m_Extent: \{x: (\S+), y: (\S+), z: (\S+)\}\n',
+    re.M,
+)
 
 
-def mesh_key(name: str, vertex_count: int, index_buffer: bytes):
-    return f'{name}|{vertex_count}|{hashlib.sha1(index_buffer).hexdigest()}'
+def mesh_key(name: str, vertex_count: int, index_buffer: bytes, bounds):
+    """bounds: m_LocalAABB's centre and extent (x, y, z each), as single floats, so that the export's
+    text and the game's values give the same key."""
+    floats = ','.join(repr(struct.unpack('<f', struct.pack('<f', float(value)))[0]) for value in bounds)
+    return f'{name}|{vertex_count}|{hashlib.sha1(index_buffer).hexdigest()}|{floats}'
 
 
 def original_streamed_meshes(game: Path):
@@ -1003,7 +1019,7 @@ def original_streamed_meshes(game: Path):
     data = game_data(game)
     files = sorted(p for p in data.iterdir() if re.fullmatch(r'level\d+|.*\.assets', p.name))
     key = hashlib.sha256(
-        json.dumps([[p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files]).encode()
+        json.dumps([MESH_KEY_VERSION, *([p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files)]).encode()
     ).hexdigest()
     try:
         cached = json.loads(STREAMED_MESHES.read_text(encoding='utf-8'))
@@ -1022,7 +1038,10 @@ def original_streamed_meshes(game: Path):
             stream = tree.get('m_StreamData') or {}
             if not stream.get('size'):
                 continue
-            found = mesh_key(tree['m_Name'], tree['m_VertexData']['m_VertexCount'], bytes(tree['m_IndexBuffer']))
+            aabb = tree['m_LocalAABB']
+            bounds = [aabb[part][axis] for part in ('m_Center', 'm_Extent') for axis in 'xyz']
+            count = tree['m_VertexData']['m_VertexCount']
+            found = mesh_key(tree['m_Name'], count, bytes(tree['m_IndexBuffer']), bounds)
             meshes[found] = [Path(stream['path']).name, stream['offset'], stream['size']]
     STREAMED_MESHES.write_text(json.dumps({'key': key, 'meshes': meshes}), encoding='utf-8')
     return meshes
@@ -1036,9 +1055,10 @@ def exported_mesh_key(path: Path):
     name = re.search(rb'^  m_Name: (.*)\n', data, re.M)
     count = re.search(rb'^    m_VertexCount: (\d+)\n', data, re.M)
     indices = re.search(rb'^  m_IndexBuffer: ([0-9a-f]*)\n', data, re.M)
-    if not (name and count and indices) or count[1] == b'0':
+    bounds = LOCAL_AABB.search(data)
+    if not (name and count and indices and bounds) or count[1] == b'0':
         return None
-    return mesh_key(name[1].decode('utf-8'), int(count[1]), bytes.fromhex(indices[1].decode()))
+    return mesh_key(name[1].decode('utf-8'), int(count[1]), bytes.fromhex(indices[1].decode()), bounds.groups())
 
 
 def streamed_mesh_overlay(exported: Path, game: Path):
@@ -1051,7 +1071,7 @@ def streamed_mesh_overlay(exported: Path, game: Path):
             assets,
             lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset',
             exported_mesh_key,
-            version=NO_VERTEX_DATA.pattern.decode(),
+            version=NO_VERTEX_DATA.pattern.decode() + MESH_KEY_VERSION,
         ).items()
         if found
     }
