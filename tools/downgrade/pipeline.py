@@ -909,11 +909,12 @@ def build(
 # of memory that way). Their failure lines (MergeScenes.cs, PlayerMerge.cs: "<step> <scene> failed:
 # <exception>"; an enemy type's or the player's atlas, from the merge's report, EnemyRebuild.cs and
 # compat/PlayerMerge.cs: "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>", which before
-# 21 Oct went through; MeshCombineBake.cs, ProBuilderMeshes.cs: a summary with failed=N) fail the build.
+# 21 Oct went through; MeshCombineBake.cs (the bake's and the strip's), ProBuilderMeshes.cs, PuddleBake.cs: a
+# summary with failed=N) fail the build.
 # CROW_ALLOW_SCENE_FAILURES=1 lets such a build through, with the warning, for experiments.
 SCENE_STEP_FAILED = re.compile(
     r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE|CROW_ENEMY_ATLAS) .* failed: .*$'
-    r'|^DOWNGRADE_(?:MCS|PROBUILDER) .*\bfailed=[1-9].*$',
+    r'|^DOWNGRADE_(?:MCS|PROBUILDER|PUDDLE) .*\bfailed=[1-9].*$',
     re.M,
 )
 

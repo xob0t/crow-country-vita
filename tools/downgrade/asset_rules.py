@@ -370,6 +370,24 @@ def render_texture_overlay(exported: Path):
 PLATFORM_AUDIO = {'vita': {0: (1, 5, None), 1: (1, 3, 0.5), 2: (2, 3, 0.7)}}
 # A clip kept in memory is read whole, on the main thread, when it first plays; long loops stream.
 STREAM_SECONDS = 45
+# Ambience loops of 25-43 s that stream too (M2, 22 Oct): every AudioSource that plays them loops, in all
+# 63 scenes, and a clip kept in memory stays loaded until the next area change (Ocean Kingdom starts with
+# seagulls 1 and ocean surface 1, 2.9 MB; Haunted Hilltop plays fireplace, puddle baby talk and the crickets).
+# 16.2 MB in memory in all; a stream costs FMOD's buffers instead (tens of KB) and reads from the memory card
+# while it plays. By file stem (Assets/AudioClip/<stem>.ogg); each must match a clip. Empty: as before.
+STREAM_LOOPS = {
+    '470793-Man_In_Dungeon_Please_Let_Me_Out',
+    'crawler mumble',
+    'puddle baby talk',
+    '57901-Crickets-Night_Urban-Intense',
+    'seagulls 1',
+    'road night ambience',
+    'ocean surface 1',
+    'haunted boom',
+    'control room ambience',
+    '406013-JSB-Florida_EXT_Cicedas_and_Distant_Road',
+    'fireplace',
+}
 
 
 def audio_seconds(path: Path):
@@ -513,7 +531,7 @@ def audio_overlay(exported: Path, platform: str):
     formats = PLATFORM_AUDIO.get(platform)
     if not formats:
         return shared_reverb_mixers()
-    overlay, streamed = shared_reverb_mixers(), []
+    overlay, streamed, loops = shared_reverb_mixers(), [], set()
     settings = re.compile(
         r'^(  defaultSettings:\n    loadType: )(\d)(\n(?:    .*\n)*?    compressionFormat: )(\d+)'
         r'(\n    quality: )([\d.]+)',
@@ -527,17 +545,25 @@ def audio_overlay(exported: Path, platform: str):
         def convert(m, meta=meta):
             load_type, compression, quality = formats[int(m[2])]
             if load_type == 1:
+                stem = meta.with_suffix('').stem
                 seconds = audio_seconds(meta.with_suffix(''))
-                if seconds is not None and seconds >= STREAM_SECONDS:
+                if stem in STREAM_LOOPS:
+                    loops.add(stem)
+                if stem in STREAM_LOOPS or (seconds is not None and seconds >= STREAM_SECONDS):
                     load_type, compression, quality = formats[2]
-                    streamed.append(meta.with_suffix('').stem)
+                    streamed.append(stem)
             return m[1] + str(load_type) + m[3] + str(compression) + m[5] + (m[6] if quality is None else str(quality))
 
         text = settings.sub(convert, text, count=1)
         text = re.sub(r'^  preloadAudioData: 1$', '  preloadAudioData: 0', text, flags=re.M)
         if text != original:
             overlay[meta.relative_to(exported)] = text.encode('utf-8')
-    log(f'{platform} audio import changed for {len(overlay) - 2 * SHARED_REVERB_MIXERS - 1} clips; {len(streamed)} long clips stream')
+    if STREAM_LOOPS - loops:
+        sys.exit(f'STREAM_LOOPS names no clip kept in memory: {", ".join(sorted(STREAM_LOOPS - loops))}')
+    log(
+        f'{platform} audio import changed for {len(overlay) - 2 * SHARED_REVERB_MIXERS - 1} clips; '
+        f'{len(streamed)} long clips stream ({len(loops)} of them the STREAM_LOOPS ambience)'
+    )
     return overlay
 
 
@@ -758,24 +784,55 @@ PLATFORM_TEXTURE_SIZE_CAPS = {
         'UnifontZhTw Atlas_0': 1024,
     }
 }
+# Per platform: the largest textures of Haunted Hilltop's and Ocean Kingdom's loads, halved or more (M2, 22 Oct;
+# the user accepts a softer look there for the memory). Area textures sit in main memory on the PS Vita, and
+# those two areas' loads bottomed at 4-7 MB free (Ocean Kingdom -> Haunted Hilltop). Most are shared with other
+# areas, which get the same cut. The 400x400 sprites are uncompressed on the PS Vita (RGBA32: not powers of
+# two); at 256 they are, so they compress to DXT5 as well (0.61 MB -> 64 KB). Copies a texture has in the
+# export are capped alike, so texture_dedup_overlay still finds them identical. Haunted Hilltop about -3.6 MB,
+# Ocean Kingdom about -4.9 MB. Without a PS Vita entry (textures the game ships compressed), the default
+# platform's size is capped. Empty: as before.
+PLATFORM_TEXTURE_AREA_CAPS = {
+    'vita': {
+        'blood pool 1': 512,  # 1024 DXT5, 41 areas
+        'water surface': 512,  # 1024 DXT5
+        'ocean light - Copy': 512,  # 1024 DXT1 with mipmaps, Ocean Kingdom and its submarine
+        'concrete 2': 512,  # 1024 DXT1
+        'concrete 2_0': 512,
+        'rock wall 1': 512,  # 1024 DXT1, Ocean Kingdom
+        'grime 2': 512,  # 512x1024 DXT1 with mipmaps
+        'cloud puff': 256,  # 400x400 RGBA32 sprites
+        'gradient4': 256,
+        'blur circle': 256,
+        'blur circle_0': 256,
+        'ring4': 256,  # 512 DXT5 particles
+        'lightning particle grid 1': 256,
+        'trash symbol': 256,
+        'drip': 256,
+    }
+}
 
 
 def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
-    caps = PLATFORM_TEXTURE_SIZE_CAPS.get(platform, {})
+    area = PLATFORM_TEXTURE_AREA_CAPS.get(platform, {})
+    caps = {**PLATFORM_TEXTURE_SIZE_CAPS.get(platform, {}), **area}
     if not caps:
         return {}
     target = PLATFORM_TEXTURE_FORMATS[platform][0]
     entry = re.compile(rf'(buildTarget: {target}\n    maxTextureSize: )\d+')
+    default = re.compile(r'(^  maxTextureSize: |buildTarget: DefaultTexturePlatform\n    maxTextureSize: )\d+', re.M)
     result = {}
     for stem, size in caps.items():
         relative = Path('Assets') / 'Texture2D' / f'{stem}.png.meta'
         if not (exported / relative).exists():
             sys.exit(f'No {relative} in the export for its size cap')
         text, count = entry.subn(rf'\g<1>{size}', current_text(exported, overlay, relative))
+        if not count and stem in area:
+            text, count = default.subn(rf'\g<1>{size}', text)
         if not count:
             sys.exit(f'{relative} has no {target} import settings to cap')
         result[relative] = text.encode('utf-8')
-    log(f"{platform}: {len(result)} textures capped in size (the player prefab's CJK font atlases)")
+    log(f"{platform}: {len(result)} textures capped in size (CJK font atlases; {len(area)} of the big areas')")
     return result
 
 
