@@ -39,6 +39,7 @@ using GCHandle = System.Runtime.InteropServices.GCHandle;
 //   -crow-gc-max <MB>       also never past this size: the heap collects instead of growing (an area's
 //                           load leaves garbage the heap grows into, and the heap never shrinks).
 //   -crow-no-phycont-heap   keep the GC heap out of the PHYCONT memory (see PhyContPool).
+//   -crow-heap-sort off     leave the low-level allocator's block sorting off (PS Vita default on; see HeapSort).
 //   -crow-gc-handles <n>    IL2CPP's table of GC handles the engine uses grown to n slots at the start (PS
 //                           Vita default 131072; 0: as IL2CPP has it, the default on other players). See GcHandles
 //                           (and -crow-gc-handles-table).
@@ -204,7 +205,7 @@ namespace CrowCompat
                 return;
             }
             int retries = CrowFlags.Int(args, "-crow-gc-retries", VitaRetries), divisor = CrowFlags.Int(args, "-crow-gc-divisor", VitaDivisor);
-            string pool = PhyContPool(args);
+            string pool = HeapSort(args) + PhyContPool(args);
             try
             {
                 if (retries > 0) GC_set_max_retries((UIntPtr)(uint)retries);
@@ -289,6 +290,31 @@ namespace CrowCompat
 
         // Whether the governor runs (it may hold the heap at its size from then on: GcHandles.Change grows no table).
         internal static bool Governing;
+
+        // The PS Vita player's low-level allocator (the memory blocks it takes from the system for Unity's
+        // heaps and memalign calls) keeps its free blocks sorted (PSVita.Utility.EnableHeapBlockSorting:
+        // "can help to reduce memory fragmentation at the cost of reduced performance"). Without it the
+        // main memory free in each Ocean Kingdom -> Haunted Hilltop gap fell by 2-3 MB per round trip
+        // that Unity's own totals (reserved, allocated) and the GC heap don't account for (22 Oct, six
+        // round trips: 56, 44, 44, 40, 35 MB, the load's lowest point 13, 12, 12, 6, 12); with it that
+        // part stays flat (57, 56, 50, 49, 43; lowest 15, 15, 15, 15, 13), and Unity's own holes
+        // (reserved, not allocated: +3 MB a trip either way) are mostly reused by the next load. Station
+        // Square's fight bench keeps its frame time (38.8 against 38.4 ms, 5 runs each) with 8 MB more
+        // free; the first two area loads after the start take 3-5 s longer, the later ones 2-3 s less
+        // (Ocean Kingdom <-> Haunted Hilltop: 15 s instead of 18). Off with -crow-heap-sort off.
+        static string HeapSort(string[] args)
+        {
+            if (CrowFlags.Value(args, "-crow-heap-sort") == "off") return " heapSort=off";
+            try
+            {
+                UnityEngine.PSVita.Utility.EnableHeapBlockSorting();
+                return " heapSort=on";
+            }
+            catch (Exception e)
+            {
+                return " heapSort=error:" + e.GetType().Name;
+            }
+        }
 
         // The PS Vita's 26 MB of physically contiguous memory, which the game leaves unused (Unity's
         // PSVitaVideoPlayer, which needs it for its decoder, is never used: CrowCompat plays the game's
@@ -1005,5 +1031,13 @@ namespace UnityEngine.PSVita
     {
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.InternalCall)]
         public static extern bool TransferMemToMonoHeap();
+    }
+
+    // UnityEngine.PSVitaModule's Utility.EnableHeapBlockSorting (Memory.HeapSort), declared the same way
+    // ("UnityEngine.PSVita.Utility::EnableHeapBlockSorting").
+    public static class Utility
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.InternalCall)]
+        public static extern void EnableHeapBlockSorting();
     }
 }
