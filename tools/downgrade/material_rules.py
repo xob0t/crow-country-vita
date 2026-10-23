@@ -80,13 +80,16 @@ def original_keywords(game: Path):
     return materials
 
 
-VECTOR = r'\{r: ([-\d.e]+), g: ([-\d.e]+), b: ([-\d.e]+), a: ([-\d.e]+)\}'
+# A number as the export writes it: the particle materials' _CameraFadeParams is {r: 0, g: Infinity, ...}, and a
+# key without it matched nothing, so those Fade particles lost _ALPHABLEND_ON (drawn opaque). float() reads all three.
+NUMBER = r'([-\d.e]+|-?Infinity|NaN)'
+VECTOR = rf'\{{r: {NUMBER}, g: {NUMBER}, b: {NUMBER}, a: {NUMBER}\}}'
 
 
 def exported_properties(text):
     """(name, floats, colors, textures) of an exported material's YAML."""
     name = re.search(r'^  m_Name: ?(.*)$', text, re.M)[1]
-    floats = {m[1]: float(m[2]) for m in re.finditer(r'^      (\w+): ([-\d.e]+)$', text, re.M)}
+    floats = {m[1]: float(m[2]) for m in re.finditer(r'^      (\w+): ' + NUMBER + '$', text, re.M)}
     colors = {
         m[1]: [float(m[i]) for i in range(2, 6)] for m in re.finditer(r'^      (\w+): ' + VECTOR + '$', text, re.M)
     }

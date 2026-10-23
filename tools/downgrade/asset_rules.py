@@ -1766,6 +1766,29 @@ def set_properties(text: str, block: str, values: dict):
     return text[: start.end()] + body + text[end:]
 
 
+# CrowVita/Particles Lit (vita_shaders/CrowParticles.shader) for Particles/Standard Surface's materials: the editor
+# compiles no PS Vita programs of that surface shader, so they (the Crypt's water rings, bubbles, splashes, leaves
+# and blobs, the crows' feathers, the enemies' death puffs, Scamper's prints) drew with its fallback, VertexLit:
+# opaque quads (23 Oct). The PS Vita project saves them with this one.
+PARTICLES_SURFACE = '{fileID: 210, guid: 0000000000000000f000000000000000, type: 0}'
+
+
+def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str):
+    shader_line = re.compile(r'^  m_Shader: (\{.*\})$', re.M)
+    result = {}
+    for path in (exported / 'Assets').rglob('*.mat'):
+        relative = path.relative_to(exported)
+        text = current_text(exported, overlay, relative)
+        found = shader_line.search(text)
+        if not found or found.group(1) != PARTICLES_SURFACE:
+            continue
+        shader = f'{{fileID: 4800000, guid: {particles_guid}, type: 3}}'
+        result[relative] = (text[: found.start(1)] + shader + text[found.end(1) :]).encode('utf-8')
+    expect(len(result), 9, 'Particles/Standard Surface materials saved with CrowVita/Particles Lit')
+    log(f'CrowVita/Particles Lit saved into {len(result)} materials')
+    return result
+
+
 def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     import os
 
@@ -1793,6 +1816,12 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     result[VITA_LIT_FOLDER / post.name] = post.read_bytes()
     post_meta = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter')
     result[meta_of(VITA_LIT_FOLDER / post.name)] = post_meta.encode()
+    if platform == 'vita':
+        particles = VITA_SHADERS / 'CrowParticles.shader'
+        result[VITA_LIT_FOLDER / particles.name] = particles.read_bytes()
+        particles_meta = stable_meta('asset', 'CrowVita/CrowParticles.shader', 'ShaderImporter')
+        result[meta_of(VITA_LIT_FOLDER / particles.name)] = particles_meta.encode()
+        result.update(vita_particle_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowParticles.shader')))
     for index, keywords in enumerate(sorted(sets)):
         name = f'CrowLitVariant{index}'
         relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'
