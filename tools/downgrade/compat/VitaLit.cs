@@ -23,6 +23,23 @@ using UnityEngine.SceneManagement;
 // range, angle, position and enabled state every frame, and the key set is chosen again every
 // 0.25 s and in the frame a spot light comes on (the guns' laser sights as aiming starts). On the
 // PS Vita in Roadside: 61-62 -> 38 ms a frame, the main thread 34-35 -> 24 ms.
+// Which lights are keys (25 Oct, LOUNGE): Unity picks each object's pixel lights by the object, but the
+// key lights are one set for the whole frame, so a light that drops out of it goes from per pixel to
+// per vertex (on the big combined walls next to nothing) at once: its pool of light on a wall or a
+// pillar vanishes. The set used to be scored from the camera, 15 m away from everything it shows, so
+// range and intensity decided, the spot lights first wherever they were: in Corridor B's north walkway
+// the window spot 17 m away in the south-west wing (behind walls) took a slot, and the wall lamps a few
+// metres from Mara swapped in and out as the camera turned through a few degrees (the walls and
+// pilasters by the lamp lit, then not). view (the default) scores each light by what it gives the
+// ground the camera shows: the player's body (else a point 15 m along the camera's view), lights whose
+// range doesn't reach within -crow-lit-view metres (4) of it out, the others by intensity x range,
+// attenuated as Unity does over their distance past that radius; spots only first when the player is
+// inside their range (the laser sights, daylight pools); the last choice counts 1.5 times, each light is scored on
+// its highest intensity and range since the load (the game's flicker doesn't reorder them), a key the
+// game switches off keeps its slot for up to 2 s (a candle going out and back for a moment), and
+// keys change by a fade (a light Select drops for half a second keeps its slot, then its slot fades out
+// over -crow-lit-fade seconds, 0.35, and the
+// new one fades in; a spot light coming on, a laser sight, takes its slot at once).
 //   -crow-lit game|vita    game keeps Standard and the game's lights (the default on other players);
 //                          vita as above (the PS Vita's default)
 //   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 4; 8 slots cost Mansion
@@ -32,9 +49,14 @@ using UnityEngine.SceneManagement;
 //                          4-slot form it had before (CROW_KEYS_LOOP), for comparisons
 //   -crow-lit-min-range <m>  point lights with a shorter range stay Unity's, per vertex (default 0)
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
+//   -crow-lit-select view|camera  how key lights are scored: view (the default, above) or camera (from the
+//                          camera's position, spots first: the scoring before 25 Oct, with no fade)
+//   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
+//   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
 //   -crow-lit-debug <n>    a value for the shader's _CrowDebug (for a debugging build of it)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m> and litsoa=on|off.
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m>, litsoa=on|off, litsel=view|camera,
+// litfade=<s> and litview=<m>.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -61,12 +83,17 @@ namespace CrowCompat
         static int maxKeys = 4;
         static bool soa = true;
         static float minRange = 0f;
+        static bool viewSelect = true;
+        static float fadeTime = 0.35f, viewRadius = 4f;
 
         // -crow-cycle's litkeys= and litrange=.
         internal static void SetLimits(string key, float value)
         {
             if (key == "litkeys") maxKeys = Mathf.Clamp((int)value, 0, Keys);
             else if (key == "litsoa") soa = value != 0f;
+            else if (key == "litsel") viewSelect = value != 0f;
+            else if (key == "litfade") fadeTime = Mathf.Max(0f, value);
+            else if (key == "litview") viewRadius = Mathf.Max(0f, value);
             else minRange = value;
             nextSelect = 0f;
         }
@@ -79,6 +106,9 @@ namespace CrowCompat
             maxKeys = Mathf.Clamp((int)CrowFlags.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
             minRange = CrowFlags.Number(args, "-crow-lit-min-range", minRange);
             soa = CrowFlags.Value(args, "-crow-lit-soa") != "off";
+            viewSelect = CrowFlags.Value(args, "-crow-lit-select") != "camera";
+            fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", viewSelect ? fadeTime : 0f));
+            viewRadius = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-view", viewRadius));
             Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
             string value = CrowFlags.Value(args, "-crow-lit") ?? (Application.platform == RuntimePlatform.PSP2 ? "vita" : null);
             if (value != null) Set(value);
@@ -121,6 +151,9 @@ namespace CrowCompat
                 CrowEvents.Loaded("VitaLit.sceneLoaded", (scene, mode) =>
                 {
                     sceneTime = Time.realtimeSinceStartup;
+                    peaks.Clear();
+                    offSince.Clear();
+                    dropped.Clear();
                     swapPasses = 0;
                     nextSelect = 0f;
                     nextList = 0f;
@@ -155,6 +188,8 @@ namespace CrowCompat
                     if (pair.Key != null) pair.Key.renderMode = pair.Value;
                 forced.Clear();
                 keys.Clear();
+                weights.Clear();
+                desired.Clear();
                 keyTransforms.Clear();
                 if (pixelLights >= 0) QualitySettings.pixelLightCount = pixelLights;
                 foreach (string name in keywords) Shader.DisableKeyword(name);
@@ -260,11 +295,16 @@ namespace CrowCompat
             }
             if (now >= nextSelect || Woken())
             {
-                if (now < nextSelect) wokenSelects++;
+                if (now < nextSelect)
+                {
+                    wokenSelects++;
+                    urgent = true;
+                }
                 selects++;
                 nextSelect = now + 0.25f;
                 Select();
             }
+            Transition();
             Upload();
             if (log && now >= nextSelectsLog)
             {
@@ -452,6 +492,7 @@ namespace CrowCompat
             Camera view = MainCamera(now);
             Vector3 camera = view != null ? view.transform.position : Vector3.zero;
             if (view != null) GeometryUtility.CalculateFrustumPlanes(view, frustum);
+            Vector3 focus = viewSelect ? Focus(view, now) : camera;
             candidates.Clear();
             scores.Clear();
             excluded.Clear();
@@ -470,7 +511,18 @@ namespace CrowCompat
                 if (type == LightType.Area || light == main) continue;
                 KeyValuePair<int, LightShadows> saved;
                 int mask = keyed.TryGetValue(light, out saved) ? saved.Key : light.cullingMask;
-                if (!light.isActiveAndEnabled || light.intensity <= 0f)
+                bool off = !light.isActiveAndEnabled || light.intensity <= 0f;
+                if (off && viewSelect && keyed.ContainsKey(light))
+                {
+                    // A key the game switched off for a moment (Mansion's candles flicker by going out
+                    // and back): its slot is kept for up to 2 s (it draws nothing meanwhile), so the next
+                    // candidate doesn't take it and give it back as it relights.
+                    float since;
+                    if (!offSince.TryGetValue(light, out since)) offSince[light] = since = now;
+                    if (now - since < 2f) off = false;
+                }
+                else offSince.Remove(light);
+                if (off)
                 {
                     // Off: a spot light that could be a key light is picked the frame it comes on.
                     if (type == LightType.Spot && (mask & world) == world) watched.Add(light);
@@ -494,9 +546,33 @@ namespace CrowCompat
                 // its candles 33.3 ms a frame, 8 slots 41.9, the game 66); -crow-lit-min-range leaves
                 // short-range point lights to Unity (per vertex) instead.
                 if (light.type == LightType.Point && light.range < minRange) continue;
-                float distance = Mathf.Max(0f, Vector3.Distance(camera, position) - light.range);
-                float score = light.range * Mathf.Sqrt(light.intensity * Luminance(light.color)) / (1f + distance);
-                if (light.type == LightType.Spot) score += 1e6f;
+                float score;
+                if (viewSelect)
+                {
+                    // What it gives the ground around the player: out if its range ends short of the
+                    // radius, else intensity x range, attenuated as Unity's lights are over the distance
+                    // past the radius; a spot first only when the player is inside its range.
+                    // Its peak intensity and range since the load: the game's flicker (candles, fires,
+                    // a fireplace's glow, LightFlicker and the "light flicker" FSMs) doesn't reorder them.
+                    Vector2 peak;
+                    peaks.TryGetValue(light, out peak);
+                    peak = new Vector2(Mathf.Max(peak.x, light.intensity), Mathf.Max(peak.y, light.range));
+                    peaks[light] = peak;
+                    float reach = peak.y, away = Vector3.Distance(focus, position), beyond = Mathf.Max(0f, away - viewRadius);
+                    if (beyond >= reach) continue;
+                    float x = beyond / Mathf.Max(reach, 0.0001f);
+                    score = peak.x * Luminance(light.color) * reach / (1f + 25f * x * x);
+                    if (light.type == LightType.Spot && away < reach) score += 1e6f;
+                    // The last choice keeps its slot against a near tie (not every keyed light: one fading out
+                    // is keyed too, and three equal candles all so marked swapped places at every pass).
+                    if (desired.Contains(light)) score *= 1.5f;
+                }
+                else
+                {
+                    float distance = Mathf.Max(0f, Vector3.Distance(camera, position) - light.range);
+                    score = light.range * Mathf.Sqrt(light.intensity * Luminance(light.color)) / (1f + distance);
+                    if (light.type == LightType.Spot) score += 1e6f;
+                }
                 candidates.Add(light);
                 scores.Add(score);
             }
@@ -512,33 +588,138 @@ namespace CrowCompat
                 chosen.Add(candidates[best]);
                 candidates[best] = null;
             }
-            scratch.Clear();
-            foreach (KeyValuePair<Light, KeyValuePair<int, LightShadows>> pair in keyed)
-                if (pair.Key == null || !chosen.Contains(pair.Key)) scratch.Add(pair.Key);
-            foreach (Light light in scratch)
-                if (light == null) keyed.Remove(light);
-                else Unkey(light);
-            foreach (Light light in chosen)
-                if (!keyed.ContainsKey(light))
-                {
-                    keyed[light] = new KeyValuePair<int, LightShadows>(light.cullingMask, light.shadows);
-                    light.cullingMask = 0;
-                    light.shadows = LightShadows.None;
-                }
-            keys.Clear();
-            keys.AddRange(chosen);
-            keyTransforms.Clear();
-            foreach (Light light in chosen) keyTransforms.Add(light.transform);
+            // The slots follow in Transition (a fade, or at once).
+            desired.Clear();
+            desired.AddRange(chosen);
             if (log)
             {
                 var line = new System.Text.StringBuilder("CROW_LIT keys");
-                foreach (Light light in keys) line.Append(' ').Append(light.type).Append(':').Append(Perf.Path(light.transform, 2)).Append('@').Append(light.range.ToString("F1"));
+                foreach (Light light in desired)
+                {
+                    Vector3 at = light.transform.position;
+                    line.Append(' ').Append(light.type).Append(':').Append(Perf.Path(light.transform, 2)).Append('@').Append(light.range.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
+                        .Append('(').Append(at.x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(';').Append(at.z.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(')');
+                }
                 line.Append(main == null ? " main=none" : " main=" + Perf.Path(main.transform, 2) + "/mask=" + main.cullingMask.ToString("X"));
                 if (excluded.Count > 0) line.Append(" other-layers ").Append(string.Join(" ", excluded.ToArray()));
                 string text = line.ToString();
                 if (text != lastLog) Debug.Log(text);
                 lastLog = text;
             }
+        }
+
+        // The key slots: keys (with keyTransforms and weights, 0 to 1) are what the shader is given;
+        // desired is Select's choice. A key Select no longer wants fades out and is given back to
+        // Unity at 0; a wanted light takes a free slot and fades in; a spot light coming on (urgent:
+        // a laser sight) takes the slot of a leaving key at once, at full strength. With no fade, as
+        // before 25 Oct: every change at once.
+        static readonly List<Light> desired = new List<Light>();
+        static readonly List<float> weights = new List<float>();
+        // Each light's highest intensity and range seen since the load (the view scoring's).
+        static readonly Dictionary<Light, Vector2> peaks = new Dictionary<Light, Vector2>();
+        // When each key light the game switched off went off (the view scoring keeps its slot 2 s).
+        static readonly Dictionary<Light, float> offSince = new Dictionary<Light, float>();
+        // When Select dropped each key still in a slot (its fade starts half a second later).
+        static readonly Dictionary<Light, float> dropped = new Dictionary<Light, float>();
+        static bool urgent;
+
+        static void Transition()
+        {
+            float step = fadeTime > 0f ? Time.unscaledDeltaTime / fadeTime : 1f;
+            float now = Time.realtimeSinceStartup;
+            bool changed = false;
+            for (int i = keys.Count - 1; i >= 0; i--)
+            {
+                Light light = keys[i];
+                bool want = light != null && desired.Contains(light);
+                if (!want && light != null && light.type != LightType.Directional && fadeTime > 0f)
+                {
+                    // A key Select dropped starts to fade only after half a second: a light that wins
+                    // one pass and loses the next (Station Square's blinking lamps) never gets a slot.
+                    float since;
+                    if (!dropped.TryGetValue(light, out since)) dropped[light] = since = now;
+                    if (now - since < 0.5f) continue;
+                }
+                else if (light != null) dropped.Remove(light);
+                if (want && light.type == LightType.Directional) weights[i] = 1f;
+                else if (want) weights[i] = Mathf.Min(1f, weights[i] + step);
+                else weights[i] = light == null || light.type == LightType.Directional ? 0f : Mathf.Max(0f, weights[i] - step);
+                if (want || weights[i] > 0f) continue;
+                if (light == null) keyed.Remove(light);
+                else if (keyed.ContainsKey(light)) Unkey(light);
+                if (light != null) dropped.Remove(light);
+                keys.RemoveAt(i);
+                weights.RemoveAt(i);
+                changed = true;
+            }
+            int slots = 0;
+            foreach (Light light in keys)
+                if (light != null && light.type != LightType.Directional) slots++;
+            foreach (Light light in desired)
+            {
+                if (light == null || keys.Contains(light)) continue;
+                bool directional = light.type == LightType.Directional;
+                if (!directional && slots >= maxKeys)
+                {
+                    if (!urgent) continue;
+                    // A spot light that just came on: the weakest leaving key gives its slot at once.
+                    int weakest = -1;
+                    for (int i = 0; i < keys.Count; i++)
+                        if (keys[i] != null && keys[i].type != LightType.Directional && !desired.Contains(keys[i]) &&
+                            (weakest < 0 || weights[i] < weights[weakest])) weakest = i;
+                    if (weakest < 0) continue;
+                    dropped.Remove(keys[weakest]);
+                    Unkey(keys[weakest]);
+                    keys.RemoveAt(weakest);
+                    weights.RemoveAt(weakest);
+                    slots--;
+                }
+                if (!keyed.ContainsKey(light))
+                {
+                    keyed[light] = new KeyValuePair<int, LightShadows>(light.cullingMask, light.shadows);
+                    light.cullingMask = 0;
+                    light.shadows = LightShadows.None;
+                }
+                keys.Add(light);
+                weights.Add(directional || urgent || fadeTime <= 0f ? 1f : 0f);
+                if (!directional) slots++;
+                changed = true;
+            }
+            urgent = false;
+            if (!changed) return;
+            if (log)
+            {
+                // What the shader is given from now (CROW_LIT keys is Select's choice; with the fades the slots follow it).
+                var line = new System.Text.StringBuilder("CROW_LIT slots");
+                foreach (Light light in keys)
+                {
+                    if (light == null || light.type == LightType.Directional) continue;
+                    Vector3 at = light.transform.position;
+                    line.Append(" (").Append(at.x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(';')
+                        .Append(at.z.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(')');
+                }
+                Debug.Log(line.ToString());
+            }
+            keyTransforms.Clear();
+            foreach (Light light in keys) keyTransforms.Add(light != null ? light.transform : null);
+        }
+
+        // The view scoring's centre: the player's body (character RIGIDBODY, looked up again at most
+        // every 2 s while missing or off), else a point 15 m along the camera's view (the gameplay
+        // camera is about 15 m from the player).
+        static Transform body;
+        static float nextBody;
+
+        static Vector3 Focus(Camera view, float now)
+        {
+            if ((body == null || !body.gameObject.activeInHierarchy) && now >= nextBody)
+            {
+                nextBody = now + 2f;
+                GameObject found = GameObject.Find("character RIGIDBODY");
+                body = found != null ? found.transform : null;
+            }
+            if (body != null && body.gameObject.activeInHierarchy) return body.position + Vector3.up * 0.3f;
+            return view != null ? view.transform.position + view.transform.forward * 15f : Vector3.zero;
         }
 
         // Camera.main as Select last found it, asked again after each load and when that camera is gone
@@ -647,7 +828,7 @@ namespace CrowCompat
                 Light light = keys[i];
                 if (light == null || !light.isActiveAndEnabled || light.intensity <= 0f) continue;
                 Transform transform = keyTransforms[i];
-                Color color = (linear ? light.color.linear : light.color) * light.intensity;
+                Color color = (linear ? light.color.linear : light.color) * (light.intensity * weights[i]);
                 if (light.type == LightType.Directional)
                 {
                     Vector3 to = -transform.forward;

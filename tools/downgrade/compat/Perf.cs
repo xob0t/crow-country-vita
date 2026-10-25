@@ -13,6 +13,10 @@ using UnityEngine.SceneManagement;
 //                               sub-emitters, trails, lights, prewarm, automatic culling)
 //   -crow-particles game|off    off stops and clears every particle system, every second (to measure
 //                               what they cost); game leaves them
+//   -crow-particle-noise game|low|medium
+//                               the noise module's quality on every particle system of the loaded scenes
+//                               that has it (ParticleNoise; low, the PS Vita's default: Unity's 1D noise
+//                               instead of the game's 3D; game keeps it); -crow-cycle takes pnoise=
 //   -crow-physics <changes>     physics settings: iter=<n> (default solver iterations), sync=0|1
 //                               (Physics.autoSyncTransforms), comma-separated; the step and the longest
 //                               frame are FixedStep's fixeddt= and physcap= (fixed= and maxdt=, which set
@@ -69,6 +73,7 @@ namespace CrowCompat
             Diag.Guard("SceneSplit", () => SceneSplit.Install(args));
             float particles = CrowFlags.Number(args, "-crow-particles-report", -1f);
             if (particles > 0f) ParticleReport.Install(particles);
+            Diag.Guard("ParticleNoise", () => ParticleNoise.Install(args));
             string rule = CrowFlags.Value(args, "-crow-particles");
             if (rule != null) Change("particles", rule);
             string changes = CrowFlags.Value(args, "-crow-physics");
@@ -91,6 +96,9 @@ namespace CrowCompat
             {
                 case "particles":
                     ParticleRule.Set(value);
+                    return true;
+                case "pnoise":
+                    ParticleNoise.Set(value);
                     return true;
                 case "merge":
                     Merge.Set(value);
@@ -347,6 +355,74 @@ namespace CrowCompat
                 count++;
             }
             if (count > 0) Debug.Log("CROW_PARTICLES rule off: stopped " + count);
+        }
+    }
+
+    // The particle systems' noise module at a lower quality. Corridor B's two window dust systems (the
+    // motes in the light, 75 and 50 a second for 8-16 s: 900 and 600 particles alive, everywhere in the
+    // area, since a system with noise is never culled) move each particle by 3D noise on separate axes
+    // (quality High), and the particle update took 14-19 ms of the main thread's frame there (Corridor
+    // B standing: 40-47 ms a frame, Crypt 3.4 ms of particles). The noise moves them by at most 3 cm;
+    // Low (1D noise) looks the same at the camera's 15 m. Set on every system of the loaded scenes
+    // after each load (and those instantiated later keep their own); game puts the saved qualities back.
+    static class ParticleNoise
+    {
+        static string rule = "game";
+        static bool hooked;
+        static readonly Dictionary<ParticleSystem, ParticleSystemNoiseQuality> saved = new Dictionary<ParticleSystem, ParticleSystemNoiseQuality>();
+        static readonly List<ParticleSystem> dead = new List<ParticleSystem>();
+
+        public static void Install(string[] args)
+        {
+            string value = CrowFlags.Value(args, "-crow-particle-noise");
+            if (value != null) Set(value);
+            else if (Application.platform == RuntimePlatform.PSP2) Set("low");
+        }
+
+        internal static void Set(string value)
+        {
+            rule = value == "low" || value == "medium" ? value : "game";
+            if (!hooked)
+            {
+                hooked = true;
+                CrowEvents.Loaded("ParticleNoise.sceneLoaded", (scene, mode) => Apply(scene));
+            }
+            if (rule == "game")
+            {
+                int restored = 0;
+                foreach (KeyValuePair<ParticleSystem, ParticleSystemNoiseQuality> pair in saved)
+                    if (pair.Key != null)
+                    {
+                        ParticleSystem.NoiseModule noise = pair.Key.noise;
+                        noise.quality = pair.Value;
+                        restored++;
+                    }
+                saved.Clear();
+                Debug.Log("CROW_PARTICLES noise game: " + restored + " systems back");
+                return;
+            }
+            for (int i = 0; i < SceneManager.sceneCount; i++) Apply(SceneManager.GetSceneAt(i));
+        }
+
+        static void Apply(Scene scene)
+        {
+            if (rule == "game" || !scene.isLoaded) return;
+            ParticleSystemNoiseQuality quality = rule == "low" ? ParticleSystemNoiseQuality.Low : ParticleSystemNoiseQuality.Medium;
+            int changed = 0;
+            foreach (ParticleSystem system in Resources.FindObjectsOfTypeAll<ParticleSystem>())
+            {
+                if (system == null || system.gameObject.scene != scene) continue;
+                ParticleSystem.NoiseModule noise = system.noise;
+                if (!noise.enabled || noise.quality == quality) continue;
+                if (!saved.ContainsKey(system)) saved[system] = noise.quality;
+                noise.quality = quality;
+                changed++;
+            }
+            // The unloaded areas' systems out of the saved list.
+            dead.Clear();
+            foreach (ParticleSystem system in saved.Keys) if (system == null) dead.Add(system);
+            foreach (ParticleSystem system in dead) saved.Remove(system);
+            if (changed > 0) Debug.Log("CROW_PARTICLES noise " + rule + ": " + changed + " systems in " + scene.name);
         }
     }
 

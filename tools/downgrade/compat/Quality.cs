@@ -121,6 +121,8 @@ namespace CrowCompat
                 if (pair[0] == "lit") VitaLit.Set(pair[1]);
                 else if (pair[0] == "litkeys" || pair[0] == "litrange") VitaLit.SetLimits(pair[0], number);
                 else if (pair[0] == "litsoa") VitaLit.SetLimits(pair[0], pair[1] == "off" ? 0f : 1f);
+                else if (pair[0] == "litsel") VitaLit.SetLimits(pair[0], pair[1] == "camera" ? 0f : 1f);
+                else if (pair[0] == "litfade" || pair[0] == "litview") VitaLit.SetLimits(pair[0], number);
                 else if (pair[0] == "pixel") pixelLights = (int)number;
                 else if (pair[0] == "shadows") shadows = pair[1];
                 else if (pair[0] == "distance") shadowDistance = number;
