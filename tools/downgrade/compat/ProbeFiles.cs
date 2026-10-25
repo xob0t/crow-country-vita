@@ -67,7 +67,12 @@ namespace CrowCompat
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
         static void Install()
         {
-            if (!Vita) return;
+            string culture = Settings.Culture();  // before anything turns a number into text (Settings.cs)
+            if (!Vita)
+            {
+                if (culture != null) Debug.Log(culture);
+                return;
+            }
             try
             {
                 Directory.CreateDirectory(Folder);
@@ -86,6 +91,7 @@ namespace CrowCompat
                     new Thread(WriteLines) { IsBackground = true, Name = "CrowLog" }.Start();
                 }
                 Application.logMessageReceivedThreaded += Write;
+                if (culture != null) Debug.Log(culture);
             }
             catch (Exception exception)
             {
