@@ -30,7 +30,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import zipfile
 from pathlib import Path
 
@@ -50,9 +49,9 @@ from common import (
     TARGET,
     WORK,
     download,
-    file_hash,
     finish_deleting,
     mono_cecil,
+    replace_path,
 )
 from rich.text import Text
 
@@ -121,7 +120,7 @@ class Setup:
         if self.args.dry_run:
             self.say('dotnet', f'would download {url} and extract it into {doctor.DOTNET}')
             return
-        archive = download_sha512(url, DOWNLOADS / url.rsplit('/', 1)[1], sha512)
+        archive = download(url, DOWNLOADS / url.rsplit('/', 1)[1], sha512)
         partial = doctor.DOTNET.with_name(doctor.DOTNET.name + '.part')
         if partial.exists():
             shutil.rmtree(partial)
@@ -129,7 +128,7 @@ class Setup:
             extract_zip(archive, partial)
         if doctor.DOTNET.exists():
             shutil.rmtree(doctor.DOTNET)
-        rename(partial, doctor.DOTNET)
+        replace_path(partial, doctor.DOTNET, attempts=20)  # a virus scanner can hold a folder just written
         if not self.args.keep_downloads:
             archive.unlink()
         self.say('dotnet', f'.NET SDK {doctor.DOTNET_VERSION} installed into {doctor.DOTNET}')
@@ -408,18 +407,6 @@ class Setup:
 # ---------------------------------------------------------------- helpers
 
 
-def download_sha512(url, destination: Path, sha512):
-    """download() for a file pinned by SHA-512 (Microsoft lists only SHA-512 for .NET's files)."""
-    if destination.exists() and file_hash(destination, 'sha512') == sha512:
-        return destination
-    download(url, destination, None)
-    actual = file_hash(destination, 'sha512')
-    if actual != sha512:
-        destination.unlink()
-        sys.exit(f'{url}: SHA-512 {actual}, expected {sha512}. The download is corrupt or not the pinned file.')
-    return destination
-
-
 def msi_files(folders, depth=INSTALLER_DEPTH):
     """The .msi files in the folders and up to depth levels below them, each once, in order: one walk,
     as an SDK's folder can sit in a large one."""
@@ -437,17 +424,6 @@ def extract_zip(archive: Path, destination: Path):
     destination.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(archive) as handle:
         handle.extractall(destination)
-
-
-def rename(source: Path, target: Path, attempts=20):
-    """Path.rename, retried: right after a folder is written, a virus scanner can hold it for a moment."""
-    for attempt in range(attempts):
-        try:
-            return source.rename(target)
-        except PermissionError:
-            if attempt == attempts - 1:
-                raise
-            time.sleep(0.5)
 
 
 def seven_zip():
@@ -556,18 +532,15 @@ def download_only(args):
     folder = Path(args.to)
     for item in args.items:
         if item == 'dotnet':
-            url, sha512 = doctor.DOTNET_ZIP
-            path = download_sha512(url, folder / url.rsplit('/', 1)[1], sha512)
-            print(f'{item}: {path} (SHA-512 matches)')
-            continue
-        if item == 'assetripper':
-            url, sha256 = doctor.ASSETRIPPER_ZIP
+            url, digest = doctor.DOTNET_ZIP  # SHA-512
+        elif item == 'assetripper':
+            url, digest = doctor.ASSETRIPPER_ZIP
         elif item == 'cecil':
-            url, sha256 = CECIL_URL, CECIL_SHA256
+            url, digest = CECIL_URL, CECIL_SHA256
         else:
-            url, sha256 = doctor.INSTALLERS[item]
-        path = download(url, folder / url.rsplit('/', 1)[1], sha256)
-        print(f'{item}: {path} (SHA-256 matches)')
+            url, digest = doctor.INSTALLERS[item]
+        path = download(url, folder / url.rsplit('/', 1)[1], digest)
+        print(f'{item}: {path} ({"SHA-512" if len(digest) == 128 else "SHA-256"} matches)')
         if item in doctor.INSTALLERS:
             verify_unity_signature(path)
 

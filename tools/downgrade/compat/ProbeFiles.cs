@@ -12,8 +12,9 @@ using Debug = UnityEngine.Debug;
 // The probe's flags and the player's log on the PS Vita, where a player gets no command line and
 // Unity's log goes only to a development kit's console. Flags come from the command line, and on
 // the PS Vita also from ux0:data/crow/args.txt (vita.py args); the player's log messages go to
-// ux0:data/crow/log.txt (vita.py log; the two runs before in log.prev.txt and log.prev2.txt): errors and exceptions with their stack traces, a message
-// repeated back to back as one line with its count, and nothing more once the file reaches
+// ux0:data/crow/log.txt (vita.py log; the two runs before in log.prev.txt and log.prev2.txt): errors and
+// exceptions with their stack traces, a message repeated back to back as one line with its count, and nothing
+// more once the file reaches
 // MaxBytes, so an error every frame cannot fill the card. A thread of its own writes the lines: a
 // write to the memory card now and then takes seconds (two lines in a row took 2 s each, a 4 s frame
 // in Station Square), and the main thread, which logs, waited for it. A write that takes 150 ms or
@@ -21,6 +22,8 @@ using Debug = UnityEngine.Debug;
 // The writer runs at the main thread's priority, on any CPU, catches and logs its own
 // failures (CROW_LOG_ERROR, and it opens the file again), and notes lines that waited a second or
 // more (CROW_LOG_LATE); Flush writes what is queued from the calling thread, for the stall dump's crash.
+// Install also applies the PS Vita's audio settings (Audio.Configure), which must come before the first scene.
+// The flag helpers every module uses are in Helpers.cs.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -80,10 +83,11 @@ namespace CrowCompat
                 path = Path.Combine(Folder, "log.txt");
                 log = new StreamWriter(path, false, new UTF8Encoding(false));
                 log.WriteLine("Crow Country " + Application.version + ", Unity " + Application.unityVersion + ", started " + Saves.Now().ToString("s"));
+                // fightbench.py looks for this line in the log's first 5 lines (the run's name, -crow-fight-run).
                 log.WriteLine("args: " + string.Join(" ", Args.Skip(1).ToArray()));
                 if (keepFailed != null) log.WriteLine("CROW_LOG the logs before weren't all kept: " + keepFailed);
                 log.Flush();
-                sync = Args.Contains("-crow-log-sync");
+                sync = CrowFlags.Has(Args, "-crow-log-sync");
                 if (!sync)
                 {
                     mainPriority = MainPriority();
@@ -254,7 +258,7 @@ namespace CrowCompat
                 var name = new byte[32];
                 CrowThreadQuery(self, info, name);
                 string was = "priority " + info[1] + " cpus 0x" + info[2].ToString("X");
-                int result = CrowThreadSet(self, mainPriority >= 64 ? mainPriority : 64, 0x70000);
+                int result = CrowThreadSet(self, mainPriority >= 64 ? mainPriority : 64, Threads.Mask("012"));
                 CrowThreadQuery(self, info, name);
                 return "was " + was + "; main thread priority " + mainPriority + "; now priority " + info[1] + " cpus 0x" + info[2].ToString("X") +
                        (result < 0 ? " (set failed 0x" + result.ToString("X8") + ")" : "");
@@ -302,91 +306,4 @@ namespace CrowCompat
         }
     }
 
-    // The probe's flags as the modules read them from ProbeFiles.Args: a flag's value is the word
-    // after it, numbers in the invariant culture.
-    static class CrowFlags
-    {
-        internal static bool Has(string[] args, string flag)
-        {
-            return Array.IndexOf(args, flag) >= 0;
-        }
-
-        // The word after the flag, or null.
-        internal static string Value(string[] args, string flag)
-        {
-            int index = Array.IndexOf(args, flag);
-            return index >= 0 && index + 1 < args.Length ? args[index + 1] : null;
-        }
-
-        // The word after the flag, or null when there is none or it is another -crow-* flag (for flags
-        // whose value may be left out: -crow-audio [s]).
-        internal static string Optional(string[] args, string flag)
-        {
-            string value = Value(args, flag);
-            return value != null && !value.StartsWith("-crow-") ? value : null;
-        }
-
-        internal static float Number(string[] args, string flag, float fallback)
-        {
-            string text = Value(args, flag);
-            float value;
-            return text != null && float.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
-
-        internal static int Int(string[] args, string flag, int fallback)
-        {
-            string text = Value(args, flag);
-            int value;
-            return text != null && int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
-    }
-
-    // Members of objects CrowCompat doesn't reference (Rewired's, PlayMaker's) read by name, through reflection.
-    // One copy since 21 Oct: the pad reader's (Pad.cs) and RewiredProbe's (Cuts.cs) had drifted apart (one passed
-    // over indexers, the other took a null target). Diag's -crow-input reader keeps its own: it also reads
-    // non-public members, and writes the error in its log line in place of a value.
-    static class ByName
-    {
-        const System.Reflection.BindingFlags Public = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance;
-
-        // The most derived public instance property of that name that takes no index (Rewired's types redeclare some).
-        internal static System.Reflection.PropertyInfo Property(object target, string name)
-        {
-            for (Type type = target.GetType(); type != null; type = type.BaseType)
-            {
-                System.Reflection.PropertyInfo property = type.GetProperty(name, Public | System.Reflection.BindingFlags.DeclaredOnly);
-                if (property != null && property.GetIndexParameters().Length == 0) return property;
-            }
-            return null;
-        }
-
-        // That property's value, else the public field's; no such member throws (the pad reader's tables need each one).
-        internal static object Get(object target, string name)
-        {
-            System.Reflection.PropertyInfo property = Property(target, name);
-            if (property != null) return property.GetValue(target, null);
-            System.Reflection.FieldInfo field = target.GetType().GetField(name, Public);
-            if (field == null) throw new MissingMemberException(target.GetType().FullName, name);
-            return field.GetValue(target);
-        }
-
-        // The same, but null for a null target or no such member (the probes' reports).
-        internal static object GetOrNull(object target, string name)
-        {
-            if (target == null) return null;
-            System.Reflection.PropertyInfo property = Property(target, name);
-            if (property != null) return property.GetValue(target, null);
-            System.Reflection.FieldInfo field = target.GetType().GetField(name, Public);
-            return field == null ? null : field.GetValue(target);
-        }
-
-        // PlayMaker's global bool of that name (FsmVariables.GlobalVariables.FindFsmBool): its FsmBool, null when the
-        // game has no such global; without PlayMaker it throws.
-        internal static object GlobalBool(string name)
-        {
-            Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
-            object globals = variables.GetProperty("GlobalVariables").GetValue(null, null);
-            return variables.GetMethod("FindFsmBool", new[] { typeof(string) }).Invoke(globals, new object[] { name });
-        }
-    }
 }

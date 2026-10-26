@@ -15,7 +15,16 @@ import wave
 from fractions import Fraction
 from pathlib import Path
 
-from asset_rules import COMPAT_GUID, SCENE_REFERENCE_FOLDERS_SKIPPED, current_text, script_file_id
+from asset_rules import (
+    COMPAT_GUID,
+    PLATFORM_TEXTURE_FORMATS,
+    SCENE_REFERENCE_FOLDERS_SKIPPED,
+    TEXTURE_PLATFORM_ENTRY,
+    current_bytes,
+    current_text,
+    dxt_format,
+    script_file_id,
+)
 from common import YAML_FILES, expect, folder_meta, guid_for, listing, log, meta_guid, meta_of, scan
 
 VIDEO_SUFFIXES = {'.webm', '.mp4', '.mov', '.ogv'}
@@ -32,8 +41,6 @@ ATLAS_MAX = 2048
 # Unity's fileIDs of an imported file's main object and of a native asset's.
 CLIP_FILE_ID, ASSET_FILE_ID = 32900000, 11400000
 TEXTURE_FILE_ID, AUDIO_FILE_ID = 2800000, 8300000
-# Per platform: the atlas's (build target, TextureImporterFormat), DXT1, as the texture rules do.
-PLATFORM_ATLAS_FORMAT = {'vita': ('PSP2', 10)}
 
 
 def decode(path: Path):
@@ -195,18 +202,6 @@ TextureImporter:
   assetBundleName:
   assetBundleVariant:
 """
-ATLAS_PLATFORM = """  - serializedVersion: 2
-    buildTarget: {target}
-    maxTextureSize: {size}
-    resizeAlgorithm: 0
-    textureFormat: {format}
-    textureCompression: 1
-    compressionQuality: 100
-    crunchedCompression: 0
-    allowsAlphaSplitting: 0
-    overridden: 1
-    androidETC2FallbackOverride: 0
-"""
 # Short loops: kept whole in memory as PCM (100 KB a clip, mono at 48 kHz), loaded with the clip.
 SOUND_META = """fileFormatVersion: 2
 guid: {guid}
@@ -242,9 +237,9 @@ def clip_overlay(path: Path, relative: Path, guid: str, platform: str):
     atlas_path = FOLDER / f'{stem} frames.png'
     overlay[atlas_path] = png_bytes(atlas)
     platform_entry = ''
-    if platform in PLATFORM_ATLAS_FORMAT:
-        target, texture_format = PLATFORM_ATLAS_FORMAT[platform]
-        platform_entry = ATLAS_PLATFORM.format(target=target, size=ATLAS_MAX, format=texture_format)
+    if platform in PLATFORM_TEXTURE_FORMATS:  # DXT1, as the texture rules import an opaque image
+        target = PLATFORM_TEXTURE_FORMATS[platform][0]
+        platform_entry = TEXTURE_PLATFORM_ENTRY.format(target=target, size=ATLAS_MAX, format=dxt_format(platform, True))
     overlay[meta_of(atlas_path)] = ATLAS_META.format(guid=frames_guid, size=ATLAS_MAX, platform=platform_entry).encode()
     sound_ref = '{fileID: 0}'
     if sound is not None:
@@ -276,7 +271,7 @@ def video_overlay(exported: Path, overlay: dict, excluded: set, platform: str):
         for relative, stat in listing(assets).items()
         if stat is not None and relative.suffix.lower() in VIDEO_SUFFIXES
     )
-    expect(len(videos), 10, 'videos in the export')  # the health monitor's, Pool's, the ending's
+    expect(len(videos), 10, 'videos in the export')  # the health monitor's five, twice
     # name_overlay's moves of them ("<stem>/<original name>.webm" and its folder).
     for key in [
         k for k in overlay if k.suffix.lower() in VIDEO_SUFFIXES or Path(k.stem).suffix.lower() in VIDEO_SUFFIXES
@@ -309,9 +304,8 @@ def video_overlay(exported: Path, overlay: dict, excluded: set, platform: str):
     for found, named in names_video.items():
         relative = Path('Assets') / found
         if relative in overlay:
-            if isinstance(overlay[relative], Path):
-                overlay[relative] = overlay[relative].read_bytes()
-            named = any(key in overlay[relative] for key in keys)
+            data = current_bytes(exported, overlay, relative)
+            named = any(key in data for key in keys)
         if not named:
             continue
         if relative in excluded:

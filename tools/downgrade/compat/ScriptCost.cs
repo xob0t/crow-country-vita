@@ -31,7 +31,6 @@ using System.Runtime.CompilerServices;
 //   -crow-script-cost game   keep the game's per-frame work (all but the FastStack, a type change),
 //                            for A/B measurements on one build
 //   -crow-script-cost-log    log each fade action's OnEnter and OnExit (CROW_SCRIPT_COST)
-//   -crow-blob-trail game    keep the Blob trail's throw only (A/B of TrailReady)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -48,8 +47,7 @@ namespace CrowCompat
         }
 
         // BlobTrailSpawn.Spawn's first step (rewriter PatchBlobTrailSpawn): whether the trail's pool has a
-        // piece left, its destroyed ones removed. -crow-blob-trail game (or -crow-script-cost game) keeps
-        // the game's throw.
+        // piece left, its destroyed ones removed. -crow-script-cost game keeps the game's throw.
         public static bool TrailReady(List<UnityEngine.GameObject> pool)
         {
             if (Cuts.NoTrails) return false;  // -crow-blob-trails off (Cuts.cs): no new pieces
@@ -60,7 +58,7 @@ namespace CrowCompat
         }
 
         static readonly Predicate<UnityEngine.GameObject> destroyed = piece => piece == null;
-        static readonly bool trailGuard = Fast && CrowFlags.Value(ProbeFiles.Args, "-crow-blob-trail") != "game";
+        static readonly bool trailGuard = Fast;
 
         // The fade actions between OnEnter and OnExit, with their FSM's GameObject (FsmStateAction.Owner).
         static readonly Dictionary<object, UnityEngine.Object> guiActions = new Dictionary<object, UnityEngine.Object>(new SameObject());

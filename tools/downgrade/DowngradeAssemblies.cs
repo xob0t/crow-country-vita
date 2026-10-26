@@ -61,7 +61,8 @@ partial class DowngradeAssemblies
         "UnityEngine.UnityAPICompatibilityVersionAttribute",
     };
 
-    // Unity reserves these names for assemblies compiled from project scripts.
+    // Unity reserves these names for assemblies compiled from project scripts. pipeline.ASSEMBLY_NAMES and
+    // Compat2018.cs name the new ones too: keep them in step.
     static readonly Dictionary<string, string> renamedAssemblies = new Dictionary<string, string>
     {
         { "Assembly-CSharp", "Recovered.CrowCountry" },

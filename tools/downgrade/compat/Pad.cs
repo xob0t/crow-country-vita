@@ -126,11 +126,10 @@ namespace CrowCompat
         // From Diag.Install (every player).
         internal static void Install(string[] args)
         {
-            string value = CrowFlags.Value(args, "-crow-pad");
-            Set(value ?? (Application.platform == RuntimePlatform.PSP2 ? "reader" : "rewired"));
-            log = Array.IndexOf(args, "-crow-pad-log") >= 0;
+            Set(CrowFlags.Value(args, "-crow-pad", "reader", "rewired"));
+            log = CrowFlags.Has(args, "-crow-pad-log");
             Presses.Install(CrowFlags.Value(args, "-crow-pad-press"), CrowFlags.Value(args, "-crow-pad-press-from"), CrowFlags.Value(args, "-crow-pad-shots"));
-            if (log || mode != (Application.platform == RuntimePlatform.PSP2 ? Reader : Rewired)) Debug.Log("CROW_PAD mode=" + Describe());
+            if (log || mode != (CrowFlags.Vita ? Reader : Rewired)) Debug.Log("CROW_PAD mode=" + Describe());
         }
 
         static void Set(string value)
@@ -176,7 +175,7 @@ namespace CrowCompat
             int frame = Time.frameCount;
             if (frame == lastFrame) return Serving;
             lastFrame = frame;
-            long start = System.Diagnostics.Stopwatch.GetTimestamp();
+            long start = log ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;  // timed for -crow-pad-log only
             if ((!ready || mapsDirty) && Time.realtimeSinceStartup >= retryAt) Build();
             if (ready)
             {
@@ -186,9 +185,10 @@ namespace CrowCompat
                 primed = true;
             }
             else Serving = false;
+            if (!log) return Serving;
             ticks += System.Diagnostics.Stopwatch.GetTimestamp() - start;
             frames++;
-            if (log && Time.realtimeSinceStartup - logAt >= 10f) Log();
+            if (Time.realtimeSinceStartup - logAt >= 10f) Log();
             return Serving;
         }
 
@@ -253,6 +253,8 @@ namespace CrowCompat
             return true;
         }
 
+        // The axis kinds (6 axis, 7 raw) read the same value: kind stays for the rewriter, which picks these
+        // overloads by their signatures (rewriter Pad.cs).
         public static bool Axis(object player, string action, int kind, out float result)
         {
             int slot;
@@ -290,15 +292,7 @@ namespace CrowCompat
 
         static bool ButtonOf(int slot, int kind)
         {
-            switch (kind)
-            {
-                case 0: return flags[slot][0];
-                case 1: return flags[slot][1];
-                case 2: return flags[slot][2];
-                case 3: return flags[slot][3];
-                case 4: return flags[slot][4];
-                default: return flags[slot][5];
-            }
+            return flags[slot][kind >= 0 && kind < 5 ? kind : 5];
         }
 
         // The reader's active actions, for -crow-input while it serves (Diag.cs), or null.
@@ -375,8 +369,8 @@ namespace CrowCompat
             Vector2 v;
             if (deadZone2D == 2 || ApproximatelyZero(cx.DeadZone))
             {
-                v.x = Calibrated(cx, rawX, cx.DeadZone, false, false);
-                v.y = Calibrated(cy, rawY, cy.DeadZone, false, false);
+                v.x = Calibrated(cx, rawX, cx.DeadZone);
+                v.y = Calibrated(cy, rawY, cy.DeadZone);
             }
             else
             {
@@ -398,11 +392,11 @@ namespace CrowCompat
             element[y] = v.y;
         }
 
-        // Rewired's AxisCalibration.GetCalibratedValue (InputTools.GetCalibratedAxisValue(Clamped)).
-        static float Calibrated(Calibration c, float value, float dead, bool applySensitivity, bool applyInversion)
+        // Rewired's AxisCalibration.GetCalibratedValue (InputTools.GetCalibratedAxisValue(Clamped)), as Stick calls
+        // it: without its sensitivity and inversion, which Stick applies after.
+        static float Calibrated(Calibration c, float value, float dead)
         {
             if (!c.Enabled) return 0f;
-            bool invert = applyInversion && c.Invert;
             if (c.Range)
             {
                 if (value < c.Min) value = c.Min;
@@ -410,15 +404,11 @@ namespace CrowCompat
                 if (Approximately(value, c.Zero)) return 0f;
                 if ((value > c.Zero && value <= c.Zero + dead) || (value < c.Zero && value >= c.Zero - dead)) return 0f;
                 value = !(value > c.Zero) ? NewRange(value, c.Min, c.Zero - dead, -1f, 0f) : NewRange(value, c.Zero + dead, c.Max, 0f, 1f);
-                if (applySensitivity) value = Sensitivity(value, c.SensitivityType, c.Sensitivity, c.Curve);
-                value = Snap(value);
-                return invert ? value * -1f : value;
+                return Snap(value);
             }
             if (Approximately(value, 0f)) return 0f;
             if ((value > 0f && value <= 0f + dead) || (value < 0f && value >= 0f - dead)) return 0f;
-            value -= dead * (value < 0f ? -1f : 1f);
-            if (applySensitivity) value = Sensitivity(value, c.SensitivityType, c.Sensitivity, c.Curve);
-            return invert ? value * -1f : value;
+            return value - dead * (value < 0f ? -1f : 1f);
         }
 
         // Rewired's InputTools and MathTools, as they are.
@@ -585,7 +575,7 @@ namespace CrowCompat
                 deadZone2D = Convert.ToInt32(Get(configuration, "defaultJoystickAxis2DDeadZoneType"));
                 sensitivity2D = Convert.ToInt32(Get(configuration, "defaultJoystickAxis2DSensitivityType"));
                 for (int axis = 1; axis < 8; axis++) axisNames[axis] = "Joy" + unity + "Axis" + axis;
-                for (int i = 0; i < Buttons; i++) buttonKeys[i] = (KeyCode)(350 + 20 * (unity - 1) + i);
+                for (int i = 0; i < Buttons; i++) buttonKeys[i] = KeyCode.Joystick1Button0 + 20 * (unity - 1) + i;
                 Tables((IEnumerable)Get(Static(input, "mapping"), "Actions"), maps, found);
                 if (unsupported != null)
                 {
@@ -956,6 +946,71 @@ namespace CrowCompat
                 }
                 return held;
             }
+        }
+    }
+
+    // Rewired's keyboard and mouse controllers, off on the PS Vita, which has neither: Rewired reads
+    // them through Unity's input every frame (each mapped key, the mouse's axes and buttons) for
+    // nothing. Roadside: Update 7.7 -> 7.2 ms and the main thread's work per frame 39.2 -> 38.4 ms;
+    // Driving Intro: Update 4.8 -> 4.45 ms. The pad is a Rewired joystick and doesn't change.
+    static class RewiredPad
+    {
+        const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        static bool pad, hooked;
+        static float next = -1f;
+        static System.Reflection.PropertyInfo ready, controllers;
+
+        public static void Install(string[] args)
+        {
+            if (CrowFlags.On(args, "-crow-rewired", "pad")) Set(true);
+        }
+
+        internal static void Set(bool on)
+        {
+            pad = on;
+            next = 0f;
+            if (hooked) return;
+            hooked = true;
+            CrowEvents.Loaded("RewiredPad.sceneLoaded", (scene, mode) => next = 0f);
+            CrowEvents.BeforeRender("RewiredPad.Tick", Tick);
+        }
+
+        // Once a second until Rewired is ready, and again after each scene load.
+        static void Tick()
+        {
+            if (next < 0f || Time.realtimeSinceStartup < next) return;
+            next = Time.realtimeSinceStartup + 1f;
+            if (ready == null)
+            {
+                Type input = Type.GetType("Rewired.ReInput, Rewired_Core");
+                if (input == null)
+                {
+                    next = -1f;
+                    return;
+                }
+                ready = input.GetProperty("isReady", Any | System.Reflection.BindingFlags.Static);
+                controllers = input.GetProperty("controllers", Any | System.Reflection.BindingFlags.Static);
+                if (ready == null || controllers == null)
+                {
+                    next = -1f;
+                    Debug.Log("CROW_REWIRED no ReInput.isReady or controllers");
+                    return;
+                }
+            }
+            if (!(bool)ready.GetValue(null, null)) return;
+            next = -1f;
+            object helper = controllers.GetValue(null, null);
+            var changed = new List<string>();
+            foreach (string name in new[] { "Keyboard", "Mouse" })
+            {
+                System.Reflection.PropertyInfo property = helper == null ? null : helper.GetType().GetProperty(name, Any | System.Reflection.BindingFlags.Instance);
+                object controller = property == null ? null : property.GetValue(helper, null);
+                System.Reflection.PropertyInfo enabled = controller == null ? null : controller.GetType().GetProperty("enabled", Any | System.Reflection.BindingFlags.Instance);
+                if (enabled == null || (bool)enabled.GetValue(controller, null) == !pad) continue;
+                enabled.SetValue(controller, !pad, null);
+                changed.Add(name);
+            }
+            if (changed.Count > 0) Debug.Log("CROW_REWIRED " + string.Join(" and ", changed.ToArray()) + (pad ? " off" : " on"));
         }
     }
 }

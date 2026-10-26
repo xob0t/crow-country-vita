@@ -48,23 +48,25 @@ namespace CrowCompat
 
         public static void Install(string[] args)
         {
-            probe = Array.IndexOf(args, "-crow-map-log") >= 0;
-            string arrowsValue = CrowFlags.Value(args, "-crow-map-arrows");
-            if (arrowsValue != null ? arrowsValue == "canvas" : Application.platform == RuntimePlatform.PSP2) SetArrows(true);
-            string value = CrowFlags.Value(args, "-crow-map-pan");
-            if (value != null ? value == "on" : Application.platform == RuntimePlatform.PSP2) Set(true);
+            probe = CrowFlags.Has(args, "-crow-map-log");
+            if (CrowFlags.On(args, "-crow-map-arrows", "canvas")) SetArrows(true);
+            if (CrowFlags.On(args, "-crow-map-pan")) Set(true);
+        }
+
+        // The frame's tick and the loads, once for both switches.
+        static void Hook()
+        {
+            if (hooked) return;
+            hooked = true;
+            CrowEvents.Canvases("MapPan.Tick", Tick);
+            CrowEvents.Loaded("MapPan.sceneLoaded", (scene, mode) => nextFind = 0f);
         }
 
         internal static void Set(bool value)
         {
             on = value;
             open = false;
-            if (!hooked)
-            {
-                hooked = true;
-                CrowEvents.Canvases("MapPan.Tick", Tick);
-                CrowEvents.Loaded("MapPan.sceneLoaded", (scene, mode) => nextFind = 0f);
-            }
+            Hook();
             Debug.Log("CROW_MAP pan " + (on ? "on" : "game"));
         }
 
@@ -85,7 +87,7 @@ namespace CrowCompat
             canvas = null;
             scroller = null;
             images = null;
-            GameObject holder = GameObject.Find("UI Canvases");
+            GameObject holder = GameObject.Find(MaraScene.Canvases);
             if (holder == null) return;
             Transform map = null;
             for (int i = 0; i < holder.transform.childCount; i++)
@@ -131,12 +133,7 @@ namespace CrowCompat
         internal static void SetArrows(bool value)
         {
             arrowsOn = value;
-            if (!hooked)
-            {
-                hooked = true;
-                CrowEvents.Canvases("MapPan.Tick", Tick);
-                CrowEvents.Loaded("MapPan.sceneLoaded", (scene, mode) => nextFind = 0f);
-            }
+            Hook();
             Arrows();
             Debug.Log("CROW_MAP arrows " + (arrowsOn ? "canvas" : "game"));
         }

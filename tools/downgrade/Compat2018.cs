@@ -6,6 +6,8 @@ using UnityEngine;
 // The editor's API updater then takes CrowCompat as up to date and leaves it alone, as it does the
 // rewritten assemblies (DowngradeAssemblies.MarkApiVersion); its check failed on CrowCompat every
 // time it changed (it could not resolve UnityEngine.CoreModule for RuntimeInitializeOnLoadMethod's enum).
+// Written out here, while the rewriter's mark takes the target from CROW_API_VERSION (pipeline.py): keep it the
+// pipeline's target (common.TARGET) if that ever changes.
 [assembly: UnityAPICompatibilityVersion("2018.2.19f1")]
 
 // Implementations of Unity 2022 APIs that Unity 2018.2 lacks. The assembly
@@ -17,20 +19,8 @@ using UnityEngine;
 //
 // CrowCompat is this file and compat/*.cs, compiled together in the order of
 // pipeline.COMPAT_SOURCES (all in namespace CrowCompat; the rewriter finds its classes
-// by name, not by file). In that order:
-//   Compat2018.cs        AssemblyAliases, TypeNames (the renamed assemblies; the save binder's cache)
-//   ApiShims.cs          Unity 2022 API that 2018.2 lacks (the naming convention above)
-//   TextCore.cs, Addressables.cs, Video.cs  the packages and engine modules the target lacks
-//   ProbeFiles.cs        the probe's flags and the player's log on the PS Vita (ux0:data/crow)
-//   Diag.cs              the measurement probe (-crow-* flags)
-//   CamEffect.cs         the camera's post-processing chain at half size on the PS Vita
-//   Quality.cs           lighting and shadow overrides from the probe's flags
-//   Window.cs            the game's fullscreen calls: kept windowed for test runs (-crow-windowed), none on the PS Vita
-//   Saves.cs             the save folder and persistentDataPath (ux0:data/CrowCountry on the PS Vita)
-//   RewiredPlatform.cs   the platform Rewired detects (PSVita on the PS Vita, not the build's Windows)
-//   Memory.cs            the memory probe (-crow-memory: allocator totals, free PS Vita memory, assets by type)
-//   Settings.cs          the game's console mode and Switch animation choice on the PS Vita (-crow-console, -crow-platform-anim)
-//   Loading.cs           load time: long frames per player loop step, MeshCombineStudio's combining time (-crow-load-trace, -crow-mcs-time)
+// by name, not by file). Each file's header says what it holds; pipeline.COMPAT_SOURCES lists them all.
+// This one: AssemblyAliases and TypeNames (the renamed assemblies; the save binder's cache).
 
 namespace CrowCompat
 {
@@ -45,6 +35,7 @@ namespace CrowCompat
             AppDomain.CurrentDomain.AssemblyResolve += (sender, args) =>
             {
                 string name = new System.Reflection.AssemblyName(args.Name).Name;
+                // The renamed assemblies: keep in step with DowngradeAssemblies.cs' renames and pipeline.py's names.
                 string target = name == "Assembly-CSharp" ? "Recovered.CrowCountry"
                     : name == "Assembly-CSharp-firstpass" ? "Recovered.Firstpass" : null;
                 return target == null ? null

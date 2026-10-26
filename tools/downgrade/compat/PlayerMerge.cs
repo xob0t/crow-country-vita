@@ -31,9 +31,8 @@ using UnityEngine.SceneManagement;
 //                               and an estimate of the draws a merge and an atlas would leave (CROW_PLAYER_MERGE)
 //   -crow-player-merge-dry <dir> the build's analysis of the player's scene as it loads, with the uses in dir
 //                               (work/player-uses), reporting what it would merge (CROW_PLAYER_MERGE dry)
-//   pmergetest=hide|show        (-crow-fight-cycle / -crow-cycle / -crow-ab; a cost test, it changes the
-//                               picture) of each group the player's own analysis would merge (worked out at the
-//                               first use), all renderers but the first switched off; show puts them back
+//   -crow-player-tree            after each area load, the player's hierarchy (subtrees of 40 transforms or more)
+//                               and what Merge.Split with movers would take out of it (CROW_PLAYER_TREE)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -41,11 +40,44 @@ namespace CrowCompat
     {
         static float playerReportAfter = -1f, playerReportAt = -1f;
 
+        // -crow-player-tree: after each area load, the player's hierarchy (Tree), and what Split's analysis with
+        // movers would take out of it (CROW_PLAYER_TREE).
+        static void InstallPlayerTree()
+        {
+            CrowEvents.Loaded("PlayerTree.sceneLoaded", (scene, loadMode) =>
+            {
+                if (!Scenes.IsArea(scene)) return;
+                GameObject player = MaraScene.FindPlayer();
+                if (player == null) return;
+                var line = new StringBuilder("CROW_PLAYER_TREE ").Append(player.transform.root.hierarchyCount);
+                Tree(player.transform.root, 0, 10, line);
+                Debug.Log(line.ToString());
+                bool movers = SplitMovers;
+                SplitMovers = true;
+                Debug.Log("CROW_PLAYER_TREE " + Split(player.scene, false));
+                SplitMovers = movers;
+            });
+        }
+
+        // The hierarchy below a node: subtrees of 40 transforms or more to depth levels, with their size and whether
+        // they are active.
+        static void Tree(Transform node, int level, int depth, StringBuilder line)
+        {
+            foreach (Transform child in node)
+            {
+                int size = child.GetComponentsInChildren<Transform>(true).Length;
+                if (size < 40) continue;
+                line.Append(" | ").Append(new string('>', level)).Append(child.name.Replace(' ', '_')).Append('=').Append(size).Append(child.gameObject.activeInHierarchy ? "" : "(off)");
+                if (level + 1 < depth) Tree(child, level + 1, depth, line);
+            }
+        }
+
         internal static void InstallPlayer(string[] args)
         {
             InstallPlayerSwitch(args);
             PlayerShots.Install(args);
             PlayerMergeCheck.Install(args);
+            if (CrowFlags.Has(args, "-crow-player-tree")) InstallPlayerTree();
             playerReportAfter = CrowFlags.Number(args, "-crow-player-merge-report", -1f);
             if (playerReportAfter < 0f) return;
             CrowEvents.Loaded("PlayerMerge.report.sceneLoaded", (scene, mode) =>
@@ -156,79 +188,18 @@ namespace CrowCompat
                 case "CrowCountryKeyMapCheck":
                 case "KeyboardOrControllerCheck":
                 case "CrowCountryCamEffect":  // the camera's image effect
-                case "SplitMirror":  // Perf.cs' PlayerSplit: switches the split menus with its own object
+                case "SplitMirror":  // SceneSplit.cs' PlayerSplit: switches the split menus with its own object
                     return true;
             }
             return false;
         }
 
-        static List<List<MeshRenderer>> testGroups;
-        static readonly List<Renderer> testHidden = new List<Renderer>();
-
-        // A -crow-cycle / -crow-fight-cycle / -crow-ab change (from EnemyCost.Change); false when it isn't one.
+        // A -crow-cycle / -crow-fight-cycle / -crow-ab change (Quality.Change): pmerge=; false for other keys.
         internal static bool ChangePlayer(string key, string value)
         {
-            if (key == "pmerge")
-            {
-                Debug.Log(SetPlayer(value));
-                return true;
-            }
-            if (key != "pmergetest") return false;
-            foreach (Renderer renderer in testHidden)
-                if (renderer != null) renderer.enabled = true;
-            testHidden.Clear();
-            var clock = System.Diagnostics.Stopwatch.StartNew();
-            if (value == "hide")
-            {
-                if (testGroups == null) testGroups = PlayerGroups();
-                foreach (List<MeshRenderer> group in testGroups)
-                    foreach (MeshRenderer renderer in group.Skip(1))
-                        if (renderer != null && renderer.enabled)
-                        {
-                            renderer.enabled = false;
-                            testHidden.Add(renderer);
-                        }
-            }
-            Debug.Log("CROW_PLAYER_MERGE_TEST " + value + ": groups=" + (testGroups == null ? 0 : testGroups.Count) + " hidden=" + testHidden.Count + " ms=" + clock.ElapsedMilliseconds);
+            if (key != "pmerge") return false;
+            Debug.Log(SetPlayer(value));
             return true;
-        }
-
-        // The groups of the player's enabled renderers that the merge would make one renderer (two or more),
-        // by the player's own analysis.
-        static List<List<MeshRenderer>> PlayerGroups()
-        {
-            Transform player = PlayerRoot();
-            var result = new List<List<MeshRenderer>>();
-            if (player == null) return result;
-            playerRules = true;
-            Analysis analysis;
-            try
-            {
-                analysis = Analyze(new List<GameObject> { player.gameObject }, new Dictionary<string, int>(), false);
-                RandomAnchors(new[] { player.gameObject }, analysis);
-            }
-            finally
-            {
-                playerRules = false;
-            }
-            var groups = new Dictionary<string, List<MeshRenderer>>();
-            foreach (MeshRenderer renderer in player.GetComponentsInChildren<MeshRenderer>(false))
-            {
-                if (!renderer.enabled || renderer.gameObject.layer == 5) continue;
-                Transform anchor;
-                if (Blocker(renderer, analysis, out anchor) != null) continue;
-                var filter = renderer.GetComponent<MeshFilter>();
-                Mesh mesh = filter == null ? null : filter.sharedMesh;
-                Material[] materials = renderer.sharedMaterials;
-                if (mesh == null || mesh.vertexCount == 0 || materials.Length != mesh.subMeshCount || materials.Any(m => m == null || m.renderQueue > 2500)) continue;
-                string key = (anchor == null ? 0 : anchor.GetInstanceID()) + "|" + renderer.gameObject.layer + "|" + (int)renderer.shadowCastingMode + "|" +
-                             renderer.receiveShadows + "|" + (int)renderer.lightProbeUsage + "|" + (int)renderer.reflectionProbeUsage;
-                List<MeshRenderer> list;
-                if (!groups.TryGetValue(key, out list)) groups[key] = list = new List<MeshRenderer>();
-                list.Add(renderer);
-            }
-            result.AddRange(groups.Values.Where(g => g.Count > 1));
-            return result;
         }
 
         // Actions the merge's lists don't name that only read what they act on (its pose, name, tag, variables,
@@ -352,7 +323,7 @@ namespace CrowCompat
                                 if (variable)
                                 {
                                     string name = Field(value, "name") as string ?? "";
-                                    findVariables.Add(Perf.Path(behaviour.transform, 3) + ":" + action + ":" + name + (own.Contains(name) ? "" : "(global)"));
+                                    findVariables.Add(Hierarchy.Path(behaviour.transform, 3) + ":" + action + ":" + name + (own.Contains(name) ? "" : "(global)"));
                                     if (own.Contains(name)) names.UnionWith(held);
                                     else names.Add("*");
                                 }
@@ -446,7 +417,7 @@ namespace CrowCompat
                     {
                         if (mesh == null || mesh.vertexCount == 0) why = "no mesh";
                         else if (anchor == null) why = "no anchor";
-                        else if (renderer.gameObject.layer == 5) why = "ui layer";  // the menus' 3D objects, drawn only under the menus
+                        else if (renderer.gameObject.layer == MaraScene.UiLayer) why = "ui layer";  // the menus' 3D objects, drawn only under the menus
                         else if (renderer.isPartOfStaticBatch) why = "static batch";
                         else if (renderer.lightmapIndex >= 0 && renderer.lightmapIndex < 65534) why = "lightmap";
                         else if (materials.Length != mesh.subMeshCount) why = "materials != submeshes";
@@ -467,7 +438,7 @@ namespace CrowCompat
                             {
                                 Mark mark;
                                 if (!analysis.marks.TryGetValue(t, out mark) || (mark & Mark.Exclude) == 0) continue;
-                                string at = Perf.Path(t, 4) + "[" + analysis.why[t].Replace(' ', '_') + "]";
+                                string at = Hierarchy.Path(t, 4) + "[" + analysis.why[t].Replace(' ', '_') + "]";
                                 excluders.TryGetValue(at, out count);
                                 excluders[at] = count + 1;
                                 break;
@@ -475,8 +446,7 @@ namespace CrowCompat
                         continue;
                     }
                     candidates++;
-                    string common = "P|" + anchor.GetInstanceID() + "|" + renderer.gameObject.layer + "|" + (int)renderer.shadowCastingMode + "|" + renderer.receiveShadows + "|" +
-                                    (int)renderer.lightProbeUsage + "|" + (int)renderer.reflectionProbeUsage + "|" + (apply ? Channels(mesh) : "?");
+                    string common = "P|" + DrawKey(anchor, renderer) + "|" + (apply ? Channels(mesh) : "?");
                     List<Slot> slots;
                     if (!groups.TryGetValue(common, out slots)) groups[common] = slots = new List<Slot>();
                     for (int s = 0; s < materials.Length; s++)
@@ -492,7 +462,7 @@ namespace CrowCompat
                        " globalMarks=" + globalMarks + " foundMarks=" + foundMarks + " finds=" + finds.Count + " ms=" + clock.ElapsedMilliseconds +
                        "\nCROW_PLAYER_MERGE " + sceneName + " left out: " + string.Join(" ", blockers.OrderByDescending(p => p.Value).Take(30).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()) +
                        "\nCROW_PLAYER_MERGE " + sceneName + " excluded below: " + string.Join(" ", excluders.OrderByDescending(p => p.Value).Take(25).Select(p => p.Key + "=" + p.Value).ToArray()) +
-                       "\nCROW_PLAYER_MERGE " + sceneName + " groups: " + string.Join(" ", merging.Select(g => Perf.Path(g[0].anchor, 3) + "=" + g.Select(x => x.renderer).Distinct().Count() + "/" +
+                       "\nCROW_PLAYER_MERGE " + sceneName + " groups: " + string.Join(" ", merging.Select(g => Hierarchy.Path(g[0].anchor, 3) + "=" + g.Select(x => x.renderer).Distinct().Count() + "/" +
                                                                                                                   g.Select(x => x.material).Distinct().Count()).ToArray());
             recordPoses = true;
             try
@@ -531,7 +501,7 @@ namespace CrowCompat
                    " uses=" + uses.Count() + " marked=" + analysis.marks.Count + " ms=" + clock.ElapsedMilliseconds +
                    "\nCROW_PLAYER_MERGE " + sceneName + " left out: " + string.Join(" ", blockers.OrderByDescending(p => p.Value).Take(30).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()) +
                    "\nCROW_PLAYER_MERGE " + sceneName + " excluded below: " + string.Join(" ", excluders.OrderByDescending(p => p.Value).Take(25).Select(p => p.Key + "=" + p.Value).ToArray()) +
-                   "\nCROW_PLAYER_MERGE " + sceneName + " groups: " + string.Join(" ", merging.Select(g => Perf.Path(g[0].anchor, 2) + "=" + g.Select(x => x.renderer).Distinct().Count() + "/" +
+                   "\nCROW_PLAYER_MERGE " + sceneName + " groups: " + string.Join(" ", merging.Select(g => Hierarchy.Path(g[0].anchor, 2) + "=" + g.Select(x => x.renderer).Distinct().Count() + "/" +
                                                                                                            g.Select(x => x.material).Distinct().Count()).ToArray()) +
                    "\n" + atlas;
         }
@@ -552,7 +522,7 @@ namespace CrowCompat
             int groups = 0, parts = 0, records = 0;
             foreach (MergedRenderer group in Resources.FindObjectsOfTypeAll<MergedRenderer>())
             {
-                if (group == null || !group.gameObject.scene.IsValid() || !group.transform.root.name.StartsWith("CharacterCameraPrefab", StringComparison.Ordinal)) continue;
+                if (group == null || !group.gameObject.scene.IsValid() || !MaraScene.IsPlayerRoot(group.transform.root.gameObject)) continue;
                 player = group.transform.root;
                 bool merged = value != "off";
                 var renderer = group.GetComponent<MeshRenderer>();
@@ -644,7 +614,7 @@ namespace CrowCompat
             for (; t != null; t = t.parent)
             {
                 Mark mark;
-                if (analysis.marks.TryGetValue(t, out mark)) chain.Add(t.name.Replace(' ', '_') + "[" + mark + ":" + why(analysis, t).Replace(' ', '_') + "]");
+                if (analysis.marks.TryGetValue(t, out mark)) chain.Add(t.name.Replace(' ', '_') + "[" + mark + ":" + Reason(analysis, t).Replace(' ', '_') + "]");
                 else if (!t.gameObject.activeSelf) chain.Add(t.name.Replace(' ', '_') + "[off]");
                 if (t == root) break;
             }
@@ -684,7 +654,7 @@ namespace CrowCompat
             int on = 0, drawn = 0, drawnSubmeshes = 0, keptSubmeshes = 0, transparent = 0;
             foreach (Renderer renderer in player.GetComponentsInChildren<Renderer>(false))
             {
-                if (!renderer.enabled || renderer.gameObject.layer == 5) continue;
+                if (!renderer.enabled || renderer.gameObject.layer == MaraScene.UiLayer) continue;
                 on++;
                 bool visible = renderer.isVisible;
                 Material[] materials = renderer.sharedMaterials;
@@ -700,12 +670,12 @@ namespace CrowCompat
                     else if (mesh.vertexCount > EnemyMaxPartVertices) blocker = "big";
                 }
                 if (analysis.names.Contains(renderer.name) && blocker == null) blocker = "named";
-                string anchorPath = anchor == null ? "-" : Perf.Path(anchor, 3);
-                report.Append("CROW_PLAYER_MERGE_PART ").Append(visible ? "drawn " : "unseen ").Append(Perf.Path(renderer.transform, 5))
+                string anchorPath = anchor == null ? "-" : Hierarchy.Path(anchor, 3);
+                report.Append("CROW_PLAYER_MERGE_PART ").Append(visible ? "drawn " : "unseen ").Append(Hierarchy.Path(renderer.transform, 5))
                     .Append(" type=").Append(renderer.GetType().Name).Append(" verts=").Append(mesh == null ? 0 : mesh.vertexCount)
                     .Append(" layer=").Append(renderer.gameObject.layer).Append(" shadow=").Append((int)renderer.shadowCastingMode)
                     .Append(" materials=").Append(string.Join(",", materials.Select(m => m == null ? "null" : m.name.Replace(' ', '_') + "(" + (m.shader == null ? "?" : m.shader.name.Replace(' ', '_')) + ":" + m.renderQueue + ")").ToArray()))
-                    .Append(" anchor=").Append(anchorPath).Append("[").Append(anchor == null ? "" : why(analysis, anchor).Replace(' ', '_')).Append("]")
+                    .Append(" anchor=").Append(anchorPath).Append("[").Append(anchor == null ? "" : Reason(analysis, anchor).Replace(' ', '_')).Append("]")
                     .Append(" blocker=").Append(blocker == null ? "-" : blocker.Replace(' ', '_'))
                     .Append(" marks:").Append(MarkChain(renderer.transform, player, analysis)).Append('\n');
                 if (!visible) continue;
@@ -724,8 +694,7 @@ namespace CrowCompat
                     keptBy[key] = count + 1;
                     continue;
                 }
-                string common = (anchor == null ? 0 : anchor.GetInstanceID()) + "|" + renderer.gameObject.layer + "|" + (int)renderer.shadowCastingMode + "|" +
-                                renderer.receiveShadows + "|" + (int)renderer.lightProbeUsage + "|" + (int)renderer.reflectionProbeUsage + "|" + Channels(mesh);
+                string common = DrawKey(anchor, renderer) + "|" + Channels(mesh);
                 List<Material> slots;
                 if (!groups.TryGetValue(common, out slots)) groups[common] = slots = new List<Material>();
                 slots.AddRange(materials);
@@ -779,7 +748,7 @@ namespace CrowCompat
                     .Where(t => t != null && t.root == player).Distinct().ToList();
                 if (objects.Count == 0) continue;
                 var uses = analysis.globalUses.Where(u => u.Key == global.Key).Select(u => u.Value.Value).Distinct().ToArray();
-                report.Append("CROW_PLAYER_MERGE_GLOBAL ").Append(global.Key.Replace(' ', '_')).Append(" = ").Append(string.Join(",", objects.Select(t => Perf.Path(t, 3)).ToArray()))
+                report.Append("CROW_PLAYER_MERGE_GLOBAL ").Append(global.Key.Replace(' ', '_')).Append(" = ").Append(string.Join(",", objects.Select(t => Hierarchy.Path(t, 3)).ToArray()))
                     .Append(" uses: ").Append(string.Join(",", uses)).Append('\n');
             }
             return report.ToString();
@@ -792,6 +761,26 @@ namespace CrowCompat
     // (<area>-<k>-<side>-merged.png, -parts.png) and CROW_PLAYER_SHOT pixel counts (ab builds).
     static class PlayerShots
     {
+        // Two shots pixel by pixel (the largest channel difference): over 2, over 24, the pixels of parts not its first
+        // pixel's colour (the background), the differences' sum; the pixel count.
+        static int Compare(Texture2D merged, Texture2D parts, out int differ, out int big, out int covered, out long sum)
+        {
+            Color32[] a = merged.GetPixels32(), b = parts.GetPixels32();
+            differ = big = covered = 0;
+            sum = 0;
+            Color32 background = b[0];
+            for (int i = 0; i < a.Length; i++)
+            {
+                int d = Math.Max(Math.Abs(a[i].r - b[i].r), Math.Max(Math.Abs(a[i].g - b[i].g), Math.Abs(a[i].b - b[i].b)));
+                if (d > 2) differ++;
+                if (d > 24) big++;
+                if (b[i].r != background.r || b[i].g != background.g || b[i].b != background.b) covered++;
+                sum += d;
+            }
+            return a.Length;
+        }
+
+        const int ShotLayer = 31;  // a layer nothing of the game's is on: the shot camera draws only the parts put there
         static float every = -1f, next = -1f;
         static int times = 6, taken;
         static bool groups;
@@ -801,13 +790,12 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            int at = Array.IndexOf(args, "-crow-player-shots");
-            if (at < 0 || at + 2 >= args.Length) return;
-            float.TryParse(args[at + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out every);
-            dir = args[at + 2];
-            groups = args.Contains("-crow-player-shots-groups");
-            int count;
-            if (at + 3 < args.Length && int.TryParse(args[at + 3], out count)) times = count;
+            const string flag = "-crow-player-shots";
+            dir = CrowFlags.Word(args, flag, 2);
+            if (dir == null) return;
+            every = CrowFlags.NumberAt(args, flag, 1, 0f);
+            groups = CrowFlags.Has(args, "-crow-player-shots-groups");
+            times = (int)CrowFlags.NumberAt(args, flag, 3, times);
             CrowEvents.Loaded("PlayerShots.sceneLoaded", (scene, mode) =>
             {
                 if (!Scenes.IsArea(scene)) return;
@@ -842,7 +830,7 @@ namespace CrowCompat
             int index = 0;
             foreach (MergedRenderer group in Resources.FindObjectsOfTypeAll<MergedRenderer>())
             {
-                if (group == null || !group.gameObject.scene.IsValid() || !group.transform.root.name.StartsWith("CharacterCameraPrefab", StringComparison.Ordinal)) continue;
+                if (group == null || !group.gameObject.scene.IsValid() || !MaraScene.IsPlayerRoot(group.transform.root.gameObject)) continue;
                 var filter = group.GetComponent<MeshFilter>();
                 var renderer = group.GetComponent<MeshRenderer>();
                 if (filter == null || renderer == null || filter.sharedMesh == null || group.parts == null) continue;
@@ -866,7 +854,7 @@ namespace CrowCompat
                     lens.transform.position = bounds.center + direction * (radius / Mathf.Tan(15f * Mathf.Deg2Rad) * 1.05f) + Vector3.up * radius * 0.5f;
                     lens.transform.LookAt(bounds.center);
                     int mask = lens.cullingMask;
-                    lens.cullingMask = 1 << 31;
+                    lens.cullingMask = 1 << ShotLayer;
                     var temporary = new List<GameObject> { Stand(mesh, materials, group.transform) };
                     Texture2D merged = Render();
                     foreach (GameObject go in temporary) UnityEngine.Object.DestroyImmediate(go);
@@ -885,17 +873,10 @@ namespace CrowCompat
                     string name = area + "-g" + index + "-" + side.Key;
                     System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, name + "-merged.png"), merged.EncodeToPNG());
                     System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, name + "-parts.png"), parts.EncodeToPNG());
-                    Color32[] a = merged.GetPixels32(), b = parts.GetPixels32();
-                    int differ = 0, big = 0, covered = 0;
-                    Color32 background = b[0];
-                    for (int i = 0; i < a.Length; i++)
-                    {
-                        int d = Math.Max(Math.Abs(a[i].r - b[i].r), Math.Max(Math.Abs(a[i].g - b[i].g), Math.Abs(a[i].b - b[i].b)));
-                        if (d > 2) differ++;
-                        if (d > 24) big++;
-                        if (b[i].r != background.r || b[i].g != background.g || b[i].b != background.b) covered++;
-                    }
-                    Debug.Log("CROW_PLAYER_SHOT group " + name + " " + Perf.Path(group.transform.parent, 3) + " active=" + group.gameObject.activeInHierarchy + " parts=" + drawn +
+                    int differ, big, covered;
+                    long sum;
+                    Compare(merged, parts, out differ, out big, out covered, out sum);
+                    Debug.Log("CROW_PLAYER_SHOT group " + name + " " + Hierarchy.Path(group.transform.parent, 3) + " active=" + group.gameObject.activeInHierarchy + " parts=" + drawn +
                               " materials=" + string.Join(",", materials.Select(m => m == null ? "null" : m.name.Replace(' ', '_')).ToArray()) +
                               " covered=" + covered + " differ=" + differ + " big=" + big);
                     UnityEngine.Object.Destroy(merged);
@@ -907,7 +888,7 @@ namespace CrowCompat
         // A renderer of its own on layer 31 at a transform's world pose (no scripts: nothing runs).
         static GameObject Stand(Mesh mesh, Material[] materials, Transform at)
         {
-            var go = new GameObject("CrowPlayerShotPart") { layer = 31 };
+            var go = new GameObject("CrowPlayerShotPart") { layer = ShotLayer };
             go.transform.position = at.position;
             go.transform.rotation = at.rotation;
             go.transform.localScale = at.lossyScale;
@@ -932,7 +913,7 @@ namespace CrowCompat
         {
             GameObject player = MaraScene.FindPlayer();
             if (player == null) return;
-            Transform body = player.transform.Find("character RIGIDBODY");
+            Transform body = player.transform.Find(MaraScene.Body);
             if (body == null) body = player.transform;
             if (lens == null)
             {
@@ -948,14 +929,14 @@ namespace CrowCompat
                 lens.farClipPlane = 40f;
                 lens.clearFlags = CameraClearFlags.SolidColor;
                 lens.backgroundColor = new Color(0.25f, 0.25f, 0.28f);
-                lens.cullingMask &= ~(1 << 5);
+                lens.cullingMask &= ~(1 << MaraScene.UiLayer);
             }
             // Her drawn renderers' bounds (not the menus', particles or sprites), seen from the game camera's side.
             var bounds = new Bounds(body.position, Vector3.zero);
             bool any = false;
             foreach (Renderer renderer in body.GetComponentsInChildren<Renderer>(false))
             {
-                if (!renderer.enabled || renderer.gameObject.layer == 5 || !(renderer is MeshRenderer)) continue;
+                if (!renderer.enabled || renderer.gameObject.layer == MaraScene.UiLayer || !(renderer is MeshRenderer)) continue;
                 if (any) bounds.Encapsulate(renderer.bounds);
                 else bounds = renderer.bounds;
                 any = true;
@@ -985,17 +966,10 @@ namespace CrowCompat
                 string name = area + "-" + taken + "-" + side.Key;
                 System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, name + "-merged.png"), merged.EncodeToPNG());
                 System.IO.File.WriteAllBytes(System.IO.Path.Combine(dir, name + "-parts.png"), parts.EncodeToPNG());
-                Color32[] a = merged.GetPixels32(), b = parts.GetPixels32();
-                int differ = 0, big = 0;
-                long sum = 0;
-                for (int i = 0; i < a.Length; i++)
-                {
-                    int d = Math.Max(Math.Abs(a[i].r - b[i].r), Math.Max(Math.Abs(a[i].g - b[i].g), Math.Abs(a[i].b - b[i].b)));
-                    if (d > 2) differ++;
-                    if (d > 24) big++;
-                    sum += d;
-                }
-                Debug.Log("CROW_PLAYER_SHOT " + name + " differ=" + differ + " big=" + big + " of " + a.Length + " mean=" + (sum / (double)a.Length).ToString("F3", CultureInfo.InvariantCulture));
+                int differ, big, covered;
+                long sum;
+                int pixels = Compare(merged, parts, out differ, out big, out covered, out sum);
+                Debug.Log("CROW_PLAYER_SHOT " + name + " differ=" + differ + " big=" + big + " of " + pixels + " mean=" + (sum / (double)pixels).ToString("F3", CultureInfo.InvariantCulture));
                 UnityEngine.Object.Destroy(merged);
                 UnityEngine.Object.Destroy(parts);
             }
@@ -1016,7 +990,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            if (!args.Contains("-crow-player-merge-check")) return;
+            if (!CrowFlags.Has(args, "-crow-player-merge-check")) return;
             CrowEvents.Canvases("PlayerMergeCheck.Tick", Tick);
         }
 
@@ -1029,7 +1003,7 @@ namespace CrowCompat
             foreach (MergedRenderer group in Resources.FindObjectsOfTypeAll<MergedRenderer>())
             {
                 if (group == null || !group.gameObject.scene.IsValid() || group.parts == null || group.poses == null) continue;
-                if (!group.transform.root.name.StartsWith("CharacterCameraPrefab", StringComparison.Ordinal)) continue;
+                if (!MaraScene.IsPlayerRoot(group.transform.root.gameObject)) continue;
                 groups++;
                 var merged = group.GetComponent<MeshRenderer>();
                 bool active = group.gameObject.activeInHierarchy, on = merged != null && merged.enabled;
@@ -1050,18 +1024,18 @@ namespace CrowCompat
                         else if (moved > 0.001f) why = "moved";
                         else if (on && part.enabled) why = "its renderer is on";
                         else if (!part.sharedMaterials.SequenceEqual(first)) why = "material";
-                        if (why == "moved" && reported.Add(Perf.Path(part.transform, 6) + ":" + why))
+                        if (why == "moved" && reported.Add(Hierarchy.Path(part.transform, 6) + ":" + why))
                         {
                             differences++;
-                            Debug.Log("CROW_PLAYER_MERGE_CHECK " + Perf.Path(part.transform, 6) + ": moved " + moved.ToString("0.####", CultureInfo.InvariantCulture) + " (merged in " +
-                                      Perf.Path(group.transform.parent, 3) + ", active=" + active + ")");
+                            Debug.Log("CROW_PLAYER_MERGE_CHECK " + Hierarchy.Path(part.transform, 6) + ": moved " + moved.ToString("0.####", CultureInfo.InvariantCulture) + " (merged in " +
+                                      Hierarchy.Path(group.transform.parent, 3) + ", active=" + active + ")");
                             continue;
                         }
                     }
                     if (why == null) continue;
                     differences++;
-                    string key = (part != null ? Perf.Path(part.transform, 6) : Perf.Path(group.transform, 4)) + ":" + why.Split(' ')[0];
-                    if (reported.Add(key)) Debug.Log("CROW_PLAYER_MERGE_CHECK " + key + " " + why + " (merged in " + Perf.Path(group.transform.parent, 3) + ")");
+                    string key = (part != null ? Hierarchy.Path(part.transform, 6) : Hierarchy.Path(group.transform, 4)) + ":" + why.Split(' ')[0];
+                    if (reported.Add(key)) Debug.Log("CROW_PLAYER_MERGE_CHECK " + key + " " + why + " (merged in " + Hierarchy.Path(group.transform.parent, 3) + ")");
                 }
             }
             if (now < summary + 10f) return;

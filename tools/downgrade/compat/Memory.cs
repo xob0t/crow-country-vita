@@ -41,21 +41,21 @@ using GCHandle = System.Runtime.InteropServices.GCHandle;
 //   -crow-no-phycont-heap   keep the GC heap out of the PHYCONT memory (see PhyContPool).
 //   -crow-heap-sort off     leave the low-level allocator's block sorting off (PS Vita default on; see HeapSort).
 //   -crow-gc-handles <n>    IL2CPP's table of GC handles the engine uses grown to n slots at the start (PS
-//                           Vita default 131072; 0: as IL2CPP has it, the default on other players). See GcHandles
-//                           (and -crow-gc-handles-table).
+//                           Vita default 131072; 0: as IL2CPP has it, the default on other players). See GcHandles.
 //   -crow-gc-handles-count [s]  s seconds (default 2) after each scene load, the GC handles in use per table
 //                           (CROW_GC handles). A probe: it reads every slot of the tables.
-// MeshRelease, below, frees what MeshCombineStudio keeps after combining (on the PS Vita).
+// MeshRelease.cs frees what MeshCombineStudio keeps after combining (on the PS Vita; -crow-keep-mesh-caches,
+// -crow-release-meshes).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
     public class Memory : MonoBehaviour
     {
         const float MB = 1048576f;
+        const long Bytes = 1048576L;  // a megabyte
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
         static float every;
         static bool types, typesEvery, unload, fsmCensus;
-        static Type vitaDiagnostics;
         float started, lastBeat, typesAt = -1f;
 
         // From Diag.Install (a RuntimeInitializeOnLoadMethod: the build lists those, so quickcode can't add one).
@@ -66,23 +66,17 @@ namespace CrowCompat
             // PHYCONT pool), then the mesh caches' release: one failing doesn't take the other with it.
             Diag.Guard("Memory.GcSettings", () => GcSettings(args));
             Diag.Guard("MeshRelease", () => MeshRelease.Install(args));
-            int watch = Array.IndexOf(args, "-crow-memory-watch");
-            if (watch >= 0)
+            if (CrowFlags.Has(args, "-crow-memory-watch"))
             {
-                int ms;
-                Watch(watch + 1 < args.Length && int.TryParse(args[watch + 1], out ms) && ms > 0 ? ms : 250);
+                int ms = CrowFlags.Int(args, "-crow-memory-watch", 250);
+                Watch(ms > 0 ? ms : 250);
             }
-            int index = Array.IndexOf(args, "-crow-memory");
-            if (index < 0) return;
-            every = 30f;
-            float value;
-            if (index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, Inv, out value)) every = value;
-            types = args.Contains("-crow-memory-types");
-            typesEvery = args.Contains("-crow-memory-types-every");
-            unload = args.Contains("-crow-memory-unload");
-            fsmCensus = args.Contains("-crow-memory-fsm");
-            if (Application.platform == RuntimePlatform.PSP2)
-                vitaDiagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
+            if (!CrowFlags.Has(args, "-crow-memory")) return;
+            every = CrowFlags.Number(args, "-crow-memory", 30f);
+            types = CrowFlags.Has(args, "-crow-memory-types");
+            typesEvery = CrowFlags.Has(args, "-crow-memory-types-every");
+            unload = CrowFlags.Has(args, "-crow-memory-unload");
+            fsmCensus = CrowFlags.Has(args, "-crow-memory-fsm");
             var probe = new GameObject("CrowMemory");
             DontDestroyOnLoad(probe);
             probe.AddComponent<Memory>();
@@ -146,10 +140,10 @@ namespace CrowCompat
         static string VitaFree()
         {
             if (Application.platform != RuntimePlatform.PSP2) return "";
-            if (vitaDiagnostics == null) return " vita=missing";
-            Func<string, string> free = name => F((int)vitaDiagnostics.GetMethod(name).Invoke(null, null) / MB);
-            return " freeLPDDR=" + free("GetFreeMemoryLPDDR") + " freeCDRAM=" + free("GetFreeMemoryCDRAM") +
-                   " freePHYSCONT=" + free("GetFreeMemoryPHYSCONT");
+            if (VitaMemory.FreeLPDDR == null) return " vita=missing";
+            Func<Func<int>, string> free = read => read == null ? "missing" : F(read() / MB);
+            return " freeLPDDR=" + free(VitaMemory.FreeLPDDR) + " freeCDRAM=" + free(VitaMemory.FreeCDRAM) +
+                   " freePHYSCONT=" + free(VitaMemory.FreePHYSCONT);
         }
 
         // The IL2CPP garbage collector's heap (Boehm, linked into the game module): its size as taken
@@ -195,7 +189,6 @@ namespace CrowCompat
         [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_max_retries();
         [System.Runtime.InteropServices.DllImport("__Internal")] static extern void GC_set_free_space_divisor(UIntPtr value);
         [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_free_space_divisor();
-        [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
 
         static void GcSettings(string[] args)
         {
@@ -211,9 +204,9 @@ namespace CrowCompat
                 if (retries > 0) GC_set_max_retries((UIntPtr)(uint)retries);
                 if (divisor > 0) GC_set_free_space_divisor((UIntPtr)(uint)divisor);
                 int reserve = CrowFlags.Int(args, "-crow-gc-reserve", VitaReserveMB);
-                maxHeap = CrowFlags.Int(args, "-crow-gc-max", 0) * 1048576L;
+                maxHeap = CrowFlags.Int(args, "-crow-gc-max", 0) * Bytes;
                 Debug.Log("CROW_GC max_retries=" + (ulong)GC_get_max_retries() + " free_space_divisor=" + (ulong)GC_get_free_space_divisor() +
-                          " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve + " maxMB=" + maxHeap / 1048576L);
+                          " heapMB=" + F((ulong)GC_get_heap_size() / MB) + pool + " reserveMB=" + reserve + " maxMB=" + maxHeap / Bytes);
                 // The handle table's growth while the heap can still grow: before the governor can hold it.
                 GcHandles.Install(args);
                 if (reserve > 0) Governor(reserve);
@@ -231,25 +224,15 @@ namespace CrowCompat
 
         static void Governor(int reserveMB)
         {
-            Type diagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
-            MethodInfo freeMain = diagnostics == null ? null : diagnostics.GetMethod("GetFreeMemoryLPDDR");
-            if (freeMain == null)
+            // A delegate (VitaMemory), not MethodInfo.Invoke: Invoke allocates (a parameter array, the boxed
+            // result) ten times a second, for as long as the game runs.
+            Func<int> free = VitaMemory.FreeLPDDR;
+            if (free == null)
             {
                 Debug.Log("CROW_GC no governor: UnityEngine.PSVita.Diagnostics.GetFreeMemoryLPDDR missing");
                 return;
             }
-            long reserve = reserveMB * 1048576L;
-            // A delegate, not MethodInfo.Invoke: Invoke allocates (a parameter array, the boxed result)
-            // ten times a second, for as long as the game runs.
-            Func<int> free;
-            try
-            {
-                free = (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), freeMain);
-            }
-            catch (Exception)
-            {
-                free = () => (int)freeMain.Invoke(null, null);
-            }
+            long reserve = reserveMB * Bytes;
             var thread = new System.Threading.Thread(() =>
             {
                 bool held = false;
@@ -262,7 +245,7 @@ namespace CrowCompat
                         long room = Math.Max(0L, freeNow - reserve);
                         // Not by slivers: each section is a memory block of its own, and Boehm has a
                         // fixed number of section slots.
-                        if (room < 4 * 1048576L) room = 0;
+                        if (room < 4 * Bytes) room = 0;
                         if (maxHeap > 0 && heap + room > maxHeap) room = Math.Max(0L, maxHeap - heap);
                         GC_set_max_heap_size((UIntPtr)(ulong)(heap + room));
                         bool holds = room == 0;
@@ -325,7 +308,7 @@ namespace CrowCompat
         // memory. Before the heap grows past its first sections; off with -crow-no-phycont-heap.
         static string PhyContPool(string[] args)
         {
-            if (args.Contains("-crow-no-phycont-heap")) return " phycontPool=off";
+            if (CrowFlags.Has(args, "-crow-no-phycont-heap")) return " phycontPool=off";
             try
             {
                 return " phycontPool=" + (UnityEngine.PSVita.PSVitaVideoPlayer.TransferMemToMonoHeap() ? "on" : "failed");
@@ -340,15 +323,7 @@ namespace CrowCompat
         // a scene load's long frames). Each sample: GC heap, GC free, free LPDDR, CDRAM, PHYSCONT (MB).
         static void Watch(int ms)
         {
-            MethodInfo[] free = new MethodInfo[3];
-            Type diagnostics = Application.platform == RuntimePlatform.PSP2
-                ? Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule") : null;
-            if (diagnostics != null)
-            {
-                free[0] = diagnostics.GetMethod("GetFreeMemoryLPDDR");
-                free[1] = diagnostics.GetMethod("GetFreeMemoryCDRAM");
-                free[2] = diagnostics.GetMethod("GetFreeMemoryPHYSCONT");
-            }
+            Func<int>[] free = { VitaMemory.FreeLPDDR, VitaMemory.FreeCDRAM, VitaMemory.FreePHYSCONT };
             bool gc = Application.platform == RuntimePlatform.PSP2;
             var thread = new System.Threading.Thread(() =>
             {
@@ -367,14 +342,14 @@ namespace CrowCompat
                         {
                             now[0] = (ulong)GC_get_heap_size() / MB;
                             now[1] = (ulong)GC_get_free_bytes() / MB;
-                            total = (long)(ulong)GC_get_total_bytes();
+                            total = GcTotal.Bytes();
                         }
                         else
                         {
                             now[0] = GC.GetTotalMemory(false) / MB;
                         }
                         for (int i = 0; i < 3; i++)
-                            if (free[i] != null) now[2 + i] = (int)free[i].Invoke(null, null) / MB;
+                            if (free[i] != null) now[2 + i] = free[i]() / MB;
                     }
                     catch (Exception e)
                     {
@@ -442,7 +417,7 @@ namespace CrowCompat
         // A mesh's vertex data is not readable from scripts when the mesh is not readable, so its
         // size is estimated: 32 bytes a vertex (position, normal, one uv) and 2 bytes an index;
         // a readable mesh also keeps that copy on the CPU.
-        static long MeshBytes(Mesh mesh)
+        internal static long MeshBytes(Mesh mesh)
         {
             long indices = 0;
             for (int sub = 0; sub < mesh.subMeshCount; sub++) indices += mesh.GetIndexCount(sub);
@@ -476,7 +451,7 @@ namespace CrowCompat
         static string FsmCensus()
         {
             const BindingFlags field = BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public;
-            Type fsmComponent = Type.GetType("PlayMakerFSM, PlayMaker");
+            Type fsmComponent = GameTypes.PlayMakerFsm;
             Type fsmType = Type.GetType("HutongGames.PlayMaker.Fsm, PlayMaker");
             Type stateType = Type.GetType("HutongGames.PlayMaker.FsmState, PlayMaker");
             Type dataType = Type.GetType("HutongGames.PlayMaker.ActionData, PlayMaker");
@@ -620,7 +595,6 @@ namespace CrowCompat
     // by every collection. Only at the start: -crow-ab's gchandles=<n> grows nothing once the governor runs.
     //   -crow-gc-handles <n>    the table grown to n slots (a power of two; the PS Vita's default 131072, logged as
     //                           CROW_GC handles: <table> table ...); 0 leaves it to IL2CPP (the default elsewhere).
-    //   -crow-gc-handles-table pinned|normal  the table Grow grows (default pinned, the engine's).
     //   -crow-gc-handles-count [s]  s seconds (default 2) after each scene load, and at the start, a CROW_GC
     //                           handles line: per table (pinned, normal, weak) the handles in use, the highest slot in
     //                           use and the table's size as far as seen. libil2cpp has no count, so each slot is read
@@ -637,7 +611,7 @@ namespace CrowCompat
         const int VitaSlots = 131072, MaxSlots = 1 << 20;
         const int Weak = 1, Normal = 3, Pinned = 4;  // a handle's low 3 bits: its table + 1
         static readonly byte[] anchor = new byte[1];  // pinnable (GCHandle.Alloc checks)
-        static int grown = Pinned;
+        const int grown = Pinned;  // the engine's table
         static readonly Dictionary<int, int> sizes = new Dictionary<int, int>();  // per table: the power of two above the highest slot seen
         static float countAfter = -1f, countAt = -1f;
 
@@ -646,7 +620,6 @@ namespace CrowCompat
         {
             try
             {
-                if (CrowFlags.Value(args, "-crow-gc-handles-table") == "normal") grown = Normal;
                 Grow(CrowFlags.Int(args, "-crow-gc-handles", Application.platform == RuntimePlatform.PSP2 ? VitaSlots : 0));
                 if (!CrowFlags.Has(args, "-crow-gc-handles-count")) return;
                 string after = CrowFlags.Optional(args, "-crow-gc-handles-count");
@@ -714,7 +687,7 @@ namespace CrowCompat
             }
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var taken = new GCHandle[wanted / 2 + 1];
-            var type = grown == Pinned ? System.Runtime.InteropServices.GCHandleType.Pinned : System.Runtime.InteropServices.GCHandleType.Normal;
+            var type = System.Runtime.InteropServices.GCHandleType.Pinned;
             int count = 0, highest = -1;
             try
             {
@@ -776,246 +749,75 @@ namespace CrowCompat
         }
     }
 
-    // MeshCombineStudio combines the meshes under its MeshCombiners' search parents when a scene
-    // starts, into new meshes it makes unreadable. It reads each source mesh (which must be readable,
-    // so it keeps a CPU copy of its vertices and indices) into a managed MeshCache, and keeps those
-    // caches, and the sources' CPU copies, for as long as the scene is loaded: nothing clears
-    // MeshCombineJobManager.meshCacheDictionary. On the PS Vita, once every MeshCombiner has combined
-    // and no job is left, MeshRelease clears the caches and makes the cached source meshes unreadable
-    // (UploadMeshData(true) frees the CPU copy; the GPU's stays, so the original renderers draw as
-    // before), except meshes a MeshCollider or a particle system also uses, and meshes under the search
-    // parents of a run-time MeshCombiner that hasn't combined yet, active or not: most areas have
-    // several, switched on later (Station Square 14, Gift Shop 7), and a combiner that meets a source
-    // mesh made unreadable skips it with an error and leaves its renderer as it was, a draw call of
-    // its own (Gift Shop's "Cube" and "gums"). Those are released at the check after they combine.
-    // It also drops MeshCombineStudio's pooled work buffers (about 7 MB, ReleaseBuffers).
-    // Off with -crow-keep-mesh-caches; on other players with -crow-release-meshes.
-    // -crow-no-mesh-combine disables every MeshCombiner when its scene has loaded (before its Start),
-    // to measure what combining costs.
-    public class MeshRelease : MonoBehaviour
+    // Bytes IL2CPP's collector (Boehm, linked into the game module) has handed out since the start, for every module
+    // that measures allocation: -1 where there is no such function (Mono players), found at the first call.
+    static class GcTotal
     {
-        static Type combinerType, managerType;
-        static FieldInfo instancesField, inRuntimeField, combinedField, combinerJobsField, managerField, cacheField, managerJobsField;
-        static FieldInfo searchOptionsField, parentField, parentsField;
-        static FieldInfo poolField, tempCacheField, weldField;
-        // Unity's built-in primitive meshes, which every scene shares and no scene unload frees: made
-        // unreadable in one area, they stayed so in the next (Roadside then Station Square: a
-        // MeshCollider on a scaled Quad stopped working, and MeshCombineStudio skipped a Plane).
-        static readonly HashSet<string> Builtin = new HashSet<string> { "Cube", "Sphere", "Capsule", "Cylinder", "Plane", "Quad" };
-        static int released;
-        static long releasedBytes;
-        float nextCheck;
+        [System.Runtime.InteropServices.DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
+        static bool missing;
 
-        internal static void Install(string[] args)
+        internal static long Bytes()
         {
-            bool on = Application.platform == RuntimePlatform.PSP2 ? !args.Contains("-crow-keep-mesh-caches") : args.Contains("-crow-release-meshes");
-            combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
-            managerType = Type.GetType("MeshCombineStudio.MeshCombineJobManager, MeshCombineStudio.Runtime");
-            if (combinerType == null || managerType == null) return;
-            const BindingFlags any = BindingFlags.Public | BindingFlags.NonPublic;
-            instancesField = combinerType.GetField("instances", any | BindingFlags.Static);
-            inRuntimeField = combinerType.GetField("combineInRuntime", any | BindingFlags.Instance);
-            combinedField = combinerType.GetField("combined", any | BindingFlags.Instance);
-            combinerJobsField = combinerType.GetField("meshCombineJobs", any | BindingFlags.Instance);
-            managerField = managerType.GetField("instance", any | BindingFlags.Static);
-            cacheField = managerType.GetField("meshCacheDictionary", any | BindingFlags.Instance);
-            managerJobsField = managerType.GetField("meshCombineJobs", any | BindingFlags.Instance);
-            poolField = managerType.GetField("newMeshObjectsPool", any | BindingFlags.Instance);
-            tempCacheField = managerType.GetField("tempMeshCache", any | BindingFlags.Instance);
-            Type newMeshObject = managerType.GetNestedType("NewMeshObject", any);
-            weldField = newMeshObject == null ? null : newMeshObject.GetField("weldVertices", any | BindingFlags.Static);
-            searchOptionsField = combinerType.GetField("searchOptions", any | BindingFlags.Instance);
-            if (searchOptionsField != null)
+            if (missing) return -1;
+            try
             {
-                parentField = searchOptionsField.FieldType.GetField("parent", any | BindingFlags.Instance);
-                parentsField = searchOptionsField.FieldType.GetField("parentGOs", any | BindingFlags.Instance);
+                return Native();
             }
-            if (instancesField == null || inRuntimeField == null || combinedField == null || managerField == null || cacheField == null)
+            catch (Exception)
             {
-                Debug.Log("MeshRelease: MeshCombineStudio's fields not found");
-                combinerType = null;
-                return;
+                missing = true;
+                return -1;
             }
-            if (args.Contains("-crow-no-mesh-combine"))
-                CrowEvents.Loaded("MeshRelease.sceneLoaded", (scene, mode) =>
-                {
-                    var instances = instancesField.GetValue(null) as System.Collections.IList;
-                    if (instances == null) return;
-                    foreach (object instance in instances.Cast<object>().ToArray())
-                    {
-                        var behaviour = instance as Behaviour;
-                        if (behaviour != null) behaviour.enabled = false;
-                    }
-                    Debug.Log("MeshRelease: disabled " + instances.Count + " MeshCombiners");
-                });
-            if (!on) return;
-            var holder = new GameObject("CrowMeshRelease");
-            DontDestroyOnLoad(holder);
-            holder.AddComponent<MeshRelease>();
         }
 
-        static int Count(object collection)
+        // Apart, as Mono looks the function up when it compiles a caller (see Audio.cs's Threads.SelfNative).
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static long Native()
         {
-            var items = collection as System.Collections.ICollection;
-            return items == null ? 0 : items.Count;
+            return (long)(ulong)GC_get_total_bytes();
+        }
+    }
+
+    // The PS Vita's free memory from UnityEngine.PSVita.Diagnostics (kept by link.xml; by reflection, as other players
+    // have no PSVitaModule), each function as a delegate made once: MethodInfo.Invoke allocates at every call. Null
+    // where the module or the function is missing.
+    static class VitaMemory
+    {
+        internal static readonly Func<int> FreeLPDDR, FreeCDRAM, FreePHYSCONT;
+
+        static VitaMemory()
+        {
+            Type diagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
+            if (diagnostics == null) return;
+            FreeLPDDR = Make(diagnostics.GetMethod("GetFreeMemoryLPDDR"));
+            FreeCDRAM = Make(diagnostics.GetMethod("GetFreeMemoryCDRAM"));
+            FreePHYSCONT = Make(diagnostics.GetMethod("GetFreeMemoryPHYSCONT"));
         }
 
-        static System.Collections.IDictionary Cache()
+        static Func<int> Make(MethodInfo method)
         {
-            object manager = managerField.GetValue(null);
-            return manager == null ? null : cacheField.GetValue(manager) as System.Collections.IDictionary;
+            if (method == null) return null;
+            try
+            {
+                return (Func<int>)Delegate.CreateDelegate(typeof(Func<int>), method);
+            }
+            catch (Exception)
+            {
+                return () => (int)method.Invoke(null, null);
+            }
         }
 
-        // Whether every active run-time MeshCombiner has combined and no job is left.
-        static bool Idle(out int combiners, out int combined)
+        // The free main memory in MB, or -1 where there is none to read.
+        internal static float FreeMainMB()
         {
-            combiners = combined = 0;
-            object manager = managerField.GetValue(null);
-            bool idle = manager != null && (managerJobsField == null || Count(managerJobsField.GetValue(manager)) == 0);
-            var instances = instancesField.GetValue(null) as System.Collections.IList;
-            if (instances == null) return idle;
-            foreach (object instance in instances)
+            try
             {
-                var behaviour = instance as Behaviour;
-                if (behaviour == null || !behaviour.isActiveAndEnabled || !(bool)inRuntimeField.GetValue(instance)) continue;
-                combiners++;
-                if ((bool)combinedField.GetValue(instance)) combined++;
-                else idle = false;
-                if (combinerJobsField != null && Count(combinerJobsField.GetValue(instance)) > 0) idle = false;
+                return FreeLPDDR == null ? -1f : FreeLPDDR() / 1048576f;
             }
-            return idle;
-        }
-
-        // For the probe's MEMTYPES line: combiners done of active ones, cached meshes, meshes released.
-        internal static string Report()
-        {
-            if (combinerType == null) return "";
-            int combiners, combined;
-            Idle(out combiners, out combined);
-            System.Collections.IDictionary cache = Cache();
-            return " mcs=" + combined + "/" + combiners + ",cache" + (cache == null ? 0 : cache.Count) +
-                   ",released" + released + "," + (releasedBytes / 1048576f).ToString("0.0", CultureInfo.InvariantCulture) + "MB";
-        }
-
-        void Update()
-        {
-            if (Time.unscaledTime < nextCheck) return;
-            nextCheck = Time.unscaledTime + 1f;
-            int combiners, combined;
-            System.Collections.IDictionary cache = Cache();
-            if (cache == null || cache.Count == 0 || !Idle(out combiners, out combined)) return;
-            var keep = new HashSet<Mesh>();
-            // Called directly (CrowCompat references the physics module), so the linker keeps the getter.
-            foreach (MeshCollider collider in Resources.FindObjectsOfTypeAll<MeshCollider>())
-                if (collider.sharedMesh != null) keep.Add(collider.sharedMesh);
-            var meshes = new Mesh[8];
-            foreach (ParticleSystemRenderer renderer in Resources.FindObjectsOfTypeAll<ParticleSystemRenderer>())
+            catch (Exception)
             {
-                int count = Math.Min(renderer.GetMeshes(meshes), meshes.Length);
-                for (int i = 0; i < count; i++) if (meshes[i] != null) keep.Add(meshes[i]);
+                return -1f;
             }
-            foreach (ParticleSystem system in Resources.FindObjectsOfTypeAll<ParticleSystem>())
-            {
-                Mesh mesh = system.shape.mesh;
-                if (mesh != null) keep.Add(mesh);
-            }
-            int pending = KeepPending(keep);
-            int now = 0;
-            long bytes = 0;
-            foreach (object key in cache.Keys)
-            {
-                var mesh = key as Mesh;
-                if (mesh == null || !mesh.isReadable || keep.Contains(mesh) || Builtin.Contains(mesh.name)) continue;
-                long indices = 0;
-                for (int sub = 0; sub < mesh.subMeshCount; sub++) indices += mesh.GetIndexCount(sub);
-                bytes += mesh.vertexCount * 32L + indices * 2L;
-                mesh.UploadMeshData(true);
-                now++;
-            }
-            int entries = cache.Count;
-            cache.Clear();
-            released += now;
-            releasedBytes += bytes;
-            int buffers = ReleaseBuffers();
-            Debug.Log("MeshRelease: " + combined + " of " + combiners + " MeshCombiners done; cleared " + entries +
-                      " mesh caches, made " + now + " source meshes unreadable (about " +
-                      (bytes / 1048576f).ToString("0.0", CultureInfo.InvariantCulture) + " MB), dropped " + buffers +
-                      " combine buffers; " + pending + " MeshCombiners still to combine keep theirs");
-        }
-
-        // MeshCombineStudio's work buffers, which it keeps for its next combine: each pooled NewMeshObject
-        // has arrays for a whole 65,534-vertex mesh (vertices, 786,408 triangle indices, normals, tangents,
-        // uvs, colours: about 7 MB of managed heap), and the job manager a vertex copy and the welder a
-        // vertex list. Dropped while no job runs; MeshCombineStudio makes new ones when a combiner that
-        // switches on later combines. Returns how many pooled objects went.
-        static int ReleaseBuffers()
-        {
-            object manager = managerField.GetValue(null);
-            if (manager == null) return 0;
-            int dropped = 0;
-            object pool = poolField == null ? null : poolField.GetValue(manager);
-            if (pool != null)
-            {
-                lock (pool)
-                {
-                    Type list = pool.GetType();
-                    FieldInfo items = FieldOf(list, "items"), count = FieldOf(list, "Count"), innerCount = FieldOf(list, "_count");
-                    var array = items == null ? null : items.GetValue(pool) as Array;
-                    if (array != null && count != null && innerCount != null)
-                    {
-                        dropped = (int)count.GetValue(pool);
-                        Array.Clear(array, 0, array.Length);
-                        count.SetValue(pool, 0);
-                        innerCount.SetValue(pool, 0);
-                    }
-                }
-            }
-            if (tempCacheField != null) tempCacheField.SetValue(manager, null);
-            if (weldField != null) weldField.SetValue(null, null);
-            return dropped;
-        }
-
-        // An instance field declared by the type or a base type (FastList's are in two generations of bases).
-        static FieldInfo FieldOf(Type type, string name)
-        {
-            const BindingFlags declared = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly;
-            for (Type t = type; t != null; t = t.BaseType)
-            {
-                FieldInfo found = t.GetField(name, declared);
-                if (found != null) return found;
-            }
-            return null;
-        }
-
-        // Adds the meshes under the search parents of every run-time MeshCombiner in a loaded scene that
-        // hasn't combined, active or not, inactive children included (MeshCombiner searches with
-        // GetComponentsInChildren(true)); its tag, layer and other conditions are left out, so a few
-        // more stay readable than it takes. Returns how many such combiners there are.
-        static int KeepPending(HashSet<Mesh> keep)
-        {
-            if (searchOptionsField == null || (parentField == null && parentsField == null)) return 0;
-            int pending = 0;
-            foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(combinerType))
-            {
-                var combiner = found as Component;
-                if (combiner == null || !combiner.gameObject.scene.IsValid()) continue;  // a prefab asset
-                if (!(bool)inRuntimeField.GetValue(combiner) || (bool)combinedField.GetValue(combiner)) continue;
-                pending++;
-                object options = searchOptionsField.GetValue(combiner);
-                if (options == null) continue;
-                var parents = new List<GameObject>();
-                var many = parentsField == null ? null : parentsField.GetValue(options) as GameObject[];
-                if (many != null) parents.AddRange(many);
-                var one = parentField == null ? null : parentField.GetValue(options) as GameObject;
-                if (one != null) parents.Add(one);
-                foreach (GameObject parent in parents)
-                {
-                    if (parent == null) continue;
-                    foreach (MeshFilter filter in parent.GetComponentsInChildren<MeshFilter>(true))
-                        if (filter.sharedMesh != null) keep.Add(filter.sharedMesh);
-                }
-            }
-            return pending;
         }
     }
 }

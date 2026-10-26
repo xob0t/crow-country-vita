@@ -7,12 +7,12 @@ using System.Reflection;
 using System.Text;
 using UnityEngine;
 
-// DOTween's update and what its tweens cost (19 Oct; status.md, "DOTween and moving transforms"). The rewriter
+// DOTween's update and what its tweens cost (19 Oct; status-log.md, "DOTween and moving transforms"). The rewriter
 // (rewriter/Tweens.cs, TweenProbeHooks) times TweenManager.Update (every update type) and Tween.OnTweenCallback,
-// and sends TweenManager.Update's one Tween.DoGoto through Tween.CrowGoto, which counts it and holds the kinds
-// tweenhold= names; nothing else changes. A lean evaluator for the Transform shortcuts' steady frames (the same
-// values bit for bit, checked over 15 million tween frames on Windows) saved nothing measurable on the console and was
-// taken out again (its code: work/scratch/tweens/fastpath/).
+// and sends TweenManager.Update's one Tween.DoGoto through Tween.CrowGoto, which counts it; nothing else changes.
+// A lean evaluator for the Transform shortcuts' steady frames (the same values bit for bit, checked over 15 million
+// tween frames on Windows) saved nothing measurable on the console and was taken out again (its code:
+// work/scratch/tweens/fastpath/).
 //   -crow-tween-log           every 10 s CROW_TWEENS: DOTween's update in ms a frame, the tweens it moved a frame;
 //                             fight windows log dotween=<ms>/<moved>
 //   -crow-tween-detail        (tweendetail=on|off) also DOTween's callbacks (OnStart, OnComplete... and the FSM
@@ -21,13 +21,8 @@ using UnityEngine;
 //   -crow-tween-census <s>    every s seconds (from 10 s after a load) the playing tweens by owner (Decor's kinds:
 //                             breath, enemy-free, enemy-fixed, prop, decor; else player, enemy, ui, scene), plugin
 //                             types, loops and loop type, ease, update type and callbacks (CROW_TWEEN_CENSUS)
-// Experiments for -crow-cycle / -crow-fight-cycle / -crow-ab (measurement only; they change what moves):
-//   tweenhold=none|<kinds>    tweens of these kinds get no time (held: DoGoto not called): breath, enemy, decor,
-//                             prop, other (what Decor refused: Mara's other tweens, the UI), all; joined by +.
-//                             A held tween never completes, so FSMs that start tweens on a timer pile up new
-//                             ones (enemy, other, all): compare DOTween's time per tween there, not the frame
-//   rigstill=on|off           the camera rig's PMFollow off: the rig ("camera follow player", 2,890 transforms,
-//                             194 active) stays where it is; logs its subtrees of 50 transforms or more
+// The experiments tweenhold= and rigstill= are done and gone (status-log.md, DOTween and moving transforms, 19 Oct;
+// RigPark, UiPark.cs, now parks the rig for good).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -35,16 +30,14 @@ namespace CrowCompat
     {
         // Counted by Tween.CrowGoto: tweens moved.
         public static int Gotos;
-        // tweenhold= (Tween.CrowGoto asks Held while it isn't 0).
-        public static int Hold;
-        const int HoldBreath = 1, HoldEnemy = 2, HoldDecor = 4, HoldProp = 8, HoldOther = 16;
         static bool log;
         static float census = -1f, censusAt = -1f;
 
         internal static void Install(string[] args)
         {
-            log = Array.IndexOf(args, "-crow-tween-log") >= 0;
-            Detail = Array.IndexOf(args, "-crow-tween-detail") >= 0;
+            log = CrowFlags.Has(args, "-crow-tween-log");
+            detail = CrowFlags.Has(args, "-crow-tween-detail");
+            timing = log || Fight.On;  // only -crow-tween-log and the fight windows read the time
             census = CrowFlags.Number(args, "-crow-tween-census", -1f);
             CrowEvents.Loaded("TweenProbe.sceneLoaded", (scene, loadMode) =>
             {
@@ -58,23 +51,14 @@ namespace CrowCompat
         {
             switch (key)
             {
-                case "tweenhold":
-                    Hold = 0;
-                    foreach (string kind in value.Split('+'))
-                        Hold |= kind == "breath" ? HoldBreath : kind == "enemy" ? HoldEnemy : kind == "decor" ? HoldDecor : kind == "prop" ? HoldProp :
-                                kind == "other" ? HoldOther : kind == "all" ? 31 : 0;
-                    break;
-                case "rigstill":
-                    RigStill(value == "on");
-                    break;
                 case "tweendetail":
-                    Detail = value == "on";
+                    detail = value == "on";
                     callDepth = 0;
                     break;
                 default:
                     return false;
             }
-            Debug.Log("CROW_TWEENS " + key + "=" + value + " hold=" + Hold + " detail=" + Detail);
+            Debug.Log("CROW_TWEENS " + key + "=" + value + " detail=" + detail);
             return true;
         }
 
@@ -83,32 +67,34 @@ namespace CrowCompat
         static long began, ticks;
         static int frameGotos;
         // -crow-tween-detail: the callbacks' time.
-        static bool Detail;
+        static bool detail;
         static int callDepth, calls;
         static long callStart, callTicks;
 
         // TweenManager.Update's start and end.
+        static bool timing;
+
         public static void Begin()
         {
-            began = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (timing) began = System.Diagnostics.Stopwatch.GetTimestamp();
         }
 
         public static void End()
         {
-            ticks += System.Diagnostics.Stopwatch.GetTimestamp() - began;
+            if (timing) ticks += System.Diagnostics.Stopwatch.GetTimestamp() - began;
         }
 
         // Tween.OnTweenCallback's start and end (a callback inside a callback counts in the outer one).
         public static void CallBegin()
         {
-            if (!Detail) return;
+            if (!detail) return;
             if (callDepth++ == 0) callStart = System.Diagnostics.Stopwatch.GetTimestamp();
             calls++;
         }
 
         public static void CallEnd()
         {
-            if (!Detail || callDepth == 0) return;
+            if (!detail || callDepth == 0) return;
             if (--callDepth == 0) callTicks += System.Diagnostics.Stopwatch.GetTimestamp() - callStart;
         }
 
@@ -122,7 +108,7 @@ namespace CrowCompat
         {
             if (frames <= 0) frames = 1;
             string line = label + Ms(ticks, frames) + "/" + ((float)(Gotos - frameGotos) / frames).ToString("0.0", CultureInfo.InvariantCulture);
-            if (Detail) line += " cb=" + Ms(callTicks, frames) + "/" + ((float)calls / frames).ToString("0.0", CultureInfo.InvariantCulture);
+            if (detail) line += " cb=" + Ms(callTicks, frames) + "/" + ((float)calls / frames).ToString("0.0", CultureInfo.InvariantCulture);
             ticks = callTicks = 0;
             calls = 0;
             frameGotos = Gotos;
@@ -152,7 +138,7 @@ namespace CrowCompat
             if (log && now - logAt >= 10f)
             {
                 logAt = now;
-                Debug.Log("CROW_TWEENS " + PerFrame("ms/moved=", Time.frameCount - logFrame) + " hold=" + Hold);
+                Debug.Log("CROW_TWEENS " + PerFrame("ms/moved=", Time.frameCount - logFrame));
                 reportFrame = logFrame = Time.frameCount;
             }
             if (censusAt > 0f && now >= censusAt)
@@ -162,79 +148,17 @@ namespace CrowCompat
             }
         }
 
-        // ---------------------------------------------------------------- experiments
-
-        // tweenhold=: a tween of a held kind (by its Decor state: Tween.crowDecor) gets no time.
-        public static bool Held(int state)
-        {
-            int kind;
-            View view = Views.Of(state);
-            if (view == null) kind = HoldOther;
-            else
-                switch (view.Kind)
-                {
-                    case View.Breath:
-                        kind = HoldBreath;
-                        break;
-                    case View.EnemyFree:
-                    case View.EnemyFixed:
-                        kind = HoldEnemy;
-                        break;
-                    case View.Prop:
-                        kind = HoldProp;
-                        break;
-                    default:
-                        kind = HoldDecor;
-                        break;
-                }
-            return (Hold & kind) != 0;
-        }
-
-        static void RigStill(bool still)
-        {
-            int found = 0;
-            foreach (Behaviour follow in UnityEngine.Object.FindObjectsOfType<Behaviour>())
-            {
-                if (follow == null || follow.GetType().Name != "PMFollow" || follow.gameObject.name != "camera follow player") continue;
-                follow.enabled = !still;
-                found++;
-                Transform rig = follow.transform;
-                Debug.Log("CROW_TWEENS rigstill=" + still + " " + Perf.Path(rig, 3) + " transforms=" + rig.GetComponentsInChildren<Transform>(true).Length +
-                          " active=" + rig.GetComponentsInChildren<Transform>(false).Length + " renderers=" + rig.GetComponentsInChildren<Renderer>(false).Length +
-                          " root=" + rig.root.hierarchyCount + Subtrees(rig, 0));
-            }
-            if (found == 0) Debug.Log("CROW_TWEENS rigstill=" + still + ": no PMFollow on camera follow player");
-        }
-
-        // The rig's subtrees of 50 transforms or more, down to where they branch: name=transforms/active.
-        static string Subtrees(Transform node, int depth)
-        {
-            var line = new StringBuilder();
-            foreach (Transform child in node)
-            {
-                int size = child.GetComponentsInChildren<Transform>(true).Length;
-                if (size < 50) continue;
-                line.Append(" | ").Append(new string('>', depth)).Append(child.name.Replace(' ', '_')).Append('=').Append(size).Append('/')
-                    .Append(child.gameObject.activeInHierarchy ? child.GetComponentsInChildren<Transform>(false).Length : 0);
-                if (depth < 14) line.Append(Subtrees(child, depth + 1));
-            }
-            return line.ToString();
-        }
-
         // ---------------------------------------------------------------- census
 
         const BindingFlags Fields = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
         static Type tweenType;
         static FieldInfo targetField, loopsField, loopTypeField, easeField, updateField, decorField, completeField, stepField, updateCallback, delayField, sequencedField;
-        static MethodInfo playing;
-
         static void Census()
         {
             if (tweenType == null)
             {
-                tweenType = Type.GetType("DG.Tweening.Tween, DOTween");
-                Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween");
-                if (tweenType == null || dotween == null) return;
+                tweenType = GameTypes.Tween;
+                if (tweenType == null || GameTypes.DOTween == null) return;
                 targetField = tweenType.GetField("target", Fields);
                 loopsField = tweenType.GetField("loops", Fields);
                 loopTypeField = tweenType.GetField("loopType", Fields);
@@ -246,9 +170,8 @@ namespace CrowCompat
                 updateCallback = tweenType.GetField("onUpdate", Fields);
                 delayField = tweenType.GetField("delay", Fields);
                 sequencedField = tweenType.GetField("isSequenced", Fields);
-                playing = dotween.GetMethod("PlayingTweens");
             }
-            var list = playing.Invoke(null, new object[] { null }) as IList;
+            IList list = GameTypes.PlayingTweens();
             if (list == null) return;
             var groups = new Dictionary<string, int>();
             var owners = new Dictionary<string, int>();
@@ -295,8 +218,8 @@ namespace CrowCompat
             var component = target as Component;
             Transform t = component != null ? component.transform : target is GameObject ? ((GameObject)target).transform : null;
             if (t == null) return target == null ? "none" : target.GetType().Name;
-            if (t.gameObject.scene.name == "DontDestroyOnLoad") return "player";
-            if (Cuts.EnemyRoot(t) != null) return "enemy";
+            if (t.gameObject.scene.name == Scenes.Kept) return "player";
+            if (EnemyNames.RootOf(t) != null) return "enemy";
             if (t.GetComponentInParent<Canvas>() != null) return "ui";
             return "scene";
         }

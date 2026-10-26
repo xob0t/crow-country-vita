@@ -65,13 +65,13 @@ namespace CrowCompat
         // reach, so Now is UTC too (with Kind Utc: CrowCountrySave's ToFileTimeUtc keeps it as it is).
         // Other players read the system clock as before.
         // The stopwatch is the process's time (IL2CPP's PSP2 GetTicks100NanosecondsMonotonic is
-        // sceKernelGetProcessTime), which stands still while the console sleeps, so until 21 Oct a
-        // save after a night's sleep was dated the evening before. The file is written again on each
+        // sceKernelGetProcessTime), which stands still while the console sleeps: on it alone a save after
+        // a night's sleep would be dated the evening before. The file is written again on each
         // call that isn't part of a burst (calls are rare: the log's start, each save, the Driving
         // Intro's year), and when the file's time is ahead of the clock by over 2 s the clock moves on
         // to it. It only moves forward, so the slots' times keep their order (Continue takes the
-        // latest). Until 22 Oct the re-read waited for 10 s of the process's time since the last,
-        // which the sleep doesn't add to: a save soon after waking kept the old date.
+        // latest). The re-read doesn't wait on the process's time, which the sleep doesn't add to (a save
+        // soon after waking would keep the old date).
         public static DateTime Now()
         {
 #if CROW_VITA

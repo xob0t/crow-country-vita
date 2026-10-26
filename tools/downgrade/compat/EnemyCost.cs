@@ -4,14 +4,15 @@ using UnityEngine;
 using UnityEngine.SceneManagement;
 
 // What the game's enemies cost per frame, and the PS Vita's cuts of it. Every enemy is an "Enemy <Type>"
-// GameObject with a Rigidbody, all of it PlayMaker (Fight.cs has the anatomy).
+// GameObject with a Rigidbody (EnemyNames), all of it PlayMaker.
 // PS Vita defaults:
 //   -crow-audio-velocity dynamic|game
 //                     every AudioSource's velocityUpdateMode Dynamic (the PS Vita's default; game keeps
 //                     Auto): an Auto source under a rigidbody takes its velocity (for Doppler) in every
 //                     physics step (FixedUpdate.AudioFixedUpdate), and the enemies have 7-15 sources
 //                     each; Dynamic takes it once a frame from the source's movement. Station Square's
-//                     fight: AudioFixedUpdate 3.8 -> 2.5 ms a frame with 6 enemies awake, 32 -> 7 with 18.
+//                     fight before the 19-22 Oct cuts: AudioFixedUpdate 3.8 -> 2.5 ms a frame with 6 enemies
+//                     awake, 32 -> 7 with 18.
 //                     Set on the loaded scenes' sources (and the player's) a second after each load, and on
 //                     the AudioListener: it is under Mara's rigidbody, so Auto updated it per physics step
 //                     while her own sources, Dynamic, moved per frame, and the frames with no step or two
@@ -19,30 +20,20 @@ using UnityEngine.SceneManagement;
 //                     as she moved, 0 with both per step); with both per frame they move together again.
 //   -crow-corpses off|game
 //                     a dead enemy's scripts off once it lies still (off; game, the default, keeps them:
-//                     on the PS Vita it saved ~0.3 ms once the Blob trail's exceptions were gone). A corpse keeps its FSMs running for the rest of the area (a dead Grinner 11:
-//                     leg twitches that no longer move anything, its "player in front?" check, moan and
+//                     on the PS Vita it saved ~0.3 ms once the Blob trail's exceptions were gone, before
+//                     the 19-22 Oct cuts). A corpse keeps its FSMs running for the rest of the area (a dead
+//                     Grinner 11: leg twitches that no longer move anything, its "player in front?" check, moan and
 //                     pain, 4 PlayMakerFixedUpdate proxies a physics step; a dead Blob its look-at), and
 //                     stays visible. Every half second: an enemy whose Pause/Cull FSM has been in "KO"
-//                     for 8 s (and whose spawn/kill FSM no longer says "currently alive"), whose enabled renderers kept their place, rotation and scale over the last
-//                     check, with no sound playing (but silent ones: a dead Grinner's moan and pain loops
-//                     play on at volume 0, and are stopped) and no particles alive, gets its PlayMaker FSMs (but
+//                     for 8 s (and whose spawn/kill FSM no longer says "currently alive"), whose enabled
+//                     renderers kept their place, rotation and scale over the last check, with no sound playing
+//                     (but silent ones: a dead Grinner's moan and pain loops play on at volume 0, and are
+//                     stopped) and no particles alive, gets its PlayMaker FSMs (but
 //                     ExplorationMode?, which removes enemies when that mode is chosen), PlayMaker's
 //                     proxies and the Blob trail's scripts (BlobTrailSpawn, BlobTrailPiece,
 //                     TransformLock) switched off. Its renderers, colliders and bodies stay as they are.
-// Experiments, as -crow-ab / -crow-cycle / -crow-fight-cycle changes (Quality.Change), each reversible
-// (they act on the enemies alive when applied; for measurements, not play):
-//   eaudio=off|on     the enemies' enabled AudioSources off, and back on
-//   erender=off|on    the enemies' enabled renderers off, and back on
-//   etrig=off|on      the enemies' enabled trigger colliders off, and back on
-//   ekin=on|off       the enemies' non-kinematic root bodies kinematic, and back (they stop moving)
-//   eprobes=off|on    the enemies' renderers' light probe use off (and back to what it was)
-//   erefl=off|on      the same for reflection probes (both log the scene's probe counts)
-//   edebrissleep=on|off every dynamic body but the player's, the live enemies' roots and the bullets (the
-//                     death debris: Grinner spikes and shards, Blob chunks, Spindle limbs) gets a sleep
-//                     threshold of 0.5 instead of its own, so a settled piece sleeps; and back
-//   eslice=on|off     awake enemies' FSMs (but Pause/Cull, spawn/kill, the damage FSMs and any with delayed
-//                     events) update every other frame, half the enemies on even frames, half on odd
-//                     (Fsm.ManualUpdate; no time correction yet: a measurement of what slicing saves)
+// The cost experiments of 19 Oct (eaudio=, erender=, etrig=, ekin=, eprobes=, erefl=, edebrissleep=, eslice=) are
+// gone; ekin='s result is in docs/status-log.md (Enemy physics, 19 Oct).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -129,7 +120,7 @@ namespace CrowCompat
         {
             if (fsmType == null)
             {
-                fsmType = Type.GetType("PlayMakerFSM, PlayMaker");
+                fsmType = GameTypes.PlayMakerFsm;
                 if (fsmType == null) return;
                 activeState = fsmType.GetProperty("ActiveStateName");
             }
@@ -137,8 +128,8 @@ namespace CrowCompat
             foreach (Component fsm in enemy.GetComponentsInChildren(fsmType, true))
             {
                 string owner = fsm.gameObject.name;
-                if (owner == "Pause/Cull" || owner == "Pause/Cull?") cull = fsm;
-                if (owner == "spawn/kill") spawnKill = fsm;
+                if (EnemyNames.IsCull(owner)) cull = fsm;
+                if (owner == EnemyNames.SpawnKill) spawnKill = fsm;
             }
             if (cull != null) watched.Add(new Watched { Root = enemy, Cull = cull, SpawnKill = spawnKill });
         }
@@ -241,257 +232,18 @@ namespace CrowCompat
                 if (!scene.isLoaded) continue;
                 foreach (GameObject root in scene.GetRootGameObjects())
                     foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
-                        if (body.name.StartsWith("Enemy ", StringComparison.Ordinal)) found.Add(body.gameObject);
+                        if (EnemyNames.Named(body.name)) found.Add(body.gameObject);
             }
             return found;
         }
-
-        static readonly Dictionary<string, List<Behaviour>> offBehaviours = new Dictionary<string, List<Behaviour>>();
-        static readonly List<Renderer> offRenderers = new List<Renderer>();
-        static readonly List<Collider> offTriggers = new List<Collider>();
-
-        // Quality.Change's last resort: true when the key is one of these.
-        internal static bool Change(string key, string value)
-        {
-            if (EnemyRebuild.Change(key, value)) return true;  // eatlas=, eflatten=, edebrisout= (EnemyRebuild.cs)
-            if (PhysCost.Change(key, value)) return true;  // pcensus=, psolid=, pnone=, pstatic=, ptrigstatic= (PhysCost.cs)
-            if (Merge.ChangePlayer(key, value)) return true;  // pmerge=, pmergetest= (PlayerMerge.cs)
-            switch (key)
-            {
-                case "eaudio":
-                    Toggle(key, value, enemy => enemy.GetComponentsInChildren<AudioSource>(false));
-                    return true;
-                case "erender":
-                    if (value == "off")
-                    {
-                        foreach (GameObject enemy in Enemies())
-                            foreach (Renderer renderer in enemy.GetComponentsInChildren<Renderer>(false))
-                                if (renderer.enabled)
-                                {
-                                    renderer.enabled = false;
-                                    offRenderers.Add(renderer);
-                                }
-                    }
-                    else
-                    {
-                        foreach (Renderer renderer in offRenderers)
-                            if (renderer != null) renderer.enabled = true;
-                        offRenderers.Clear();
-                    }
-                    Debug.Log("CROW_ENEMY erender=" + value + " (" + offRenderers.Count + " off)");
-                    return true;
-                case "etrig":
-                    if (value == "off")
-                    {
-                        foreach (GameObject enemy in Enemies())
-                            foreach (Collider collider in enemy.GetComponentsInChildren<Collider>(false))
-                                if (collider.enabled && collider.isTrigger)
-                                {
-                                    collider.enabled = false;
-                                    offTriggers.Add(collider);
-                                }
-                    }
-                    else
-                    {
-                        foreach (Collider collider in offTriggers)
-                            if (collider != null) collider.enabled = true;
-                        offTriggers.Clear();
-                    }
-                    Debug.Log("CROW_ENEMY etrig=" + value + " (" + offTriggers.Count + " off)");
-                    return true;
-                case "ekin":
-                    if (value == "on")
-                    {
-                        foreach (GameObject enemy in Enemies())
-                        {
-                            var body = enemy.GetComponent<Rigidbody>();
-                            if (body == null || body.isKinematic || !enemy.activeInHierarchy) continue;
-                            body.isKinematic = true;
-                            madeKinematic.Add(body);
-                        }
-                    }
-                    else
-                    {
-                        foreach (Rigidbody body in madeKinematic)
-                            if (body != null) body.isKinematic = false;
-                        madeKinematic.Clear();
-                    }
-                    Debug.Log("CROW_ENEMY ekin=" + value + " (" + madeKinematic.Count + " kinematic)");
-                    return true;
-                case "eprobes":
-                case "erefl":
-                    Probes(key == "eprobes", value == "off");
-                    return true;
-                case "edebrissleep":
-                    if (value == "on")
-                    {
-                        foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
-                        {
-                            if (!Debris(body) || sleepSaved.ContainsKey(body)) continue;
-                            sleepSaved[body] = body.sleepThreshold;
-                            body.sleepThreshold = 0.5f;
-                        }
-                    }
-                    else
-                    {
-                        foreach (KeyValuePair<Rigidbody, float> pair in sleepSaved)
-                            if (pair.Key != null) pair.Key.sleepThreshold = pair.Value;
-                        sleepSaved.Clear();
-                    }
-                    Debug.Log("CROW_ENEMY edebrissleep=" + value + " (" + sleepSaved.Count + " bodies)");
-                    return true;
-                case "eslice":
-                    slicing = value == "on";
-                    if (!slicing) Unslice();
-                    else if (!sliceHooked)
-                    {
-                        sliceHooked = true;
-                        CrowEvents.Canvases("EnemyCost.SliceFrame", SliceFrame);
-                    }
-                    Debug.Log("CROW_ENEMY eslice=" + value);
-                    return true;
-            }
-            return false;
-        }
-
-        static readonly List<Rigidbody> madeKinematic = new List<Rigidbody>();
-
-        // eslice: per enemy, its sliceable FSMs' ManualUpdate setters and DelayedEvents lists.
-        static bool slicing, sliceHooked;
-        static float sliceScanAt;
-        class Sliced
-        {
-            public GameObject Enemy;
-            public Component Cull;
-            public List<Action<bool>> Manual = new List<Action<bool>>();
-            public List<System.Collections.ICollection> Delayed = new List<System.Collections.ICollection>();
-            public int Parity;
-        }
-        static readonly List<Sliced> sliced = new List<Sliced>();
-        static readonly string[] NeverSliced = { "Pause/Cull", "Pause/Cull?", "spawn/kill", "ExplorationMode?", "shoot me" };
-
-        static void SliceFrame()
-        {
-            if (!slicing) return;
-            if (Time.realtimeSinceStartup >= sliceScanAt)
-            {
-                sliceScanAt = Time.realtimeSinceStartup + 2f;
-                SliceScan();
-            }
-            int frame = Time.frameCount + 1;  // set now for the next frame's Update
-            foreach (Sliced enemy in sliced)
-            {
-                if (enemy.Enemy == null) continue;
-                bool awake = enemy.Enemy.activeInHierarchy && enemy.Cull != null &&
-                             (string)activeStateProperty.GetValue(enemy.Cull, null) == "visible";
-                bool skip = awake && (frame & 1) == enemy.Parity;
-                for (int i = 0; i < enemy.Manual.Count; i++)
-                    enemy.Manual[i](skip && (enemy.Delayed[i] == null || enemy.Delayed[i].Count == 0));
-            }
-        }
-
-        static System.Reflection.PropertyInfo activeStateProperty;
-
-        static void SliceScan()
-        {
-            Type fsmType = Type.GetType("PlayMakerFSM, PlayMaker");
-            if (fsmType == null) return;
-            activeStateProperty = fsmType.GetProperty("ActiveStateName");
-            System.Reflection.PropertyInfo fsmProperty = fsmType.GetProperty("Fsm");
-            var known = new HashSet<GameObject>();
-            foreach (Sliced s in sliced) known.Add(s.Enemy);
-            foreach (GameObject enemy in Enemies())
-            {
-                if (known.Contains(enemy)) continue;
-                var entry = new Sliced { Enemy = enemy, Parity = sliced.Count & 1 };
-                foreach (Component fsm in enemy.GetComponentsInChildren(fsmType, true))
-                {
-                    string owner = fsm.gameObject.name;
-                    if (owner == "Pause/Cull" || owner == "Pause/Cull?") entry.Cull = fsm;
-                    if (Array.IndexOf(NeverSliced, owner) >= 0 || owner.StartsWith("damage / kill", StringComparison.Ordinal)) continue;
-                    object inner = fsmProperty.GetValue(fsm, null);
-                    System.Reflection.PropertyInfo manual = inner.GetType().GetProperty("ManualUpdate");
-                    System.Reflection.PropertyInfo delayed = inner.GetType().GetProperty("DelayedEvents");
-                    if (manual == null) continue;
-                    entry.Manual.Add((Action<bool>)Delegate.CreateDelegate(typeof(Action<bool>), inner, manual.GetSetMethod()));
-                    entry.Delayed.Add(delayed == null ? null : delayed.GetValue(inner, null) as System.Collections.ICollection);
-                }
-                sliced.Add(entry);
-            }
-        }
-
-        static void Unslice()
-        {
-            foreach (Sliced enemy in sliced)
-                foreach (Action<bool> manual in enemy.Manual) manual(false);
-        }
-        static readonly Dictionary<Rigidbody, float> sleepSaved = new Dictionary<Rigidbody, float>();
 
         // Death debris, roughly: a dynamic body that isn't the player's, an enemy's root or a bullet.
         internal static bool Debris(Rigidbody body)
         {
             if (body == null || body.isKinematic || !body.gameObject.activeInHierarchy) return false;
             string name = body.name;
-            if (name.StartsWith("Enemy ", StringComparison.Ordinal) || FixedStep.IsBullet(name)) return false;
-            return body.transform.root.name.IndexOf("CharacterCameraPrefab", StringComparison.Ordinal) < 0;
-        }
-
-        static readonly Dictionary<Renderer, int> probeUsage = new Dictionary<Renderer, int>(), reflectionUsage = new Dictionary<Renderer, int>();
-
-        static void Probes(bool light, bool off)
-        {
-            Dictionary<Renderer, int> saved = light ? probeUsage : reflectionUsage;
-            int changed = 0;
-            if (off)
-            {
-                foreach (GameObject enemy in Enemies())
-                    foreach (Renderer renderer in enemy.GetComponentsInChildren<Renderer>(true))
-                    {
-                        int usage = light ? (int)renderer.lightProbeUsage : (int)renderer.reflectionProbeUsage;
-                        if (usage == 0 || saved.ContainsKey(renderer)) continue;
-                        saved[renderer] = usage;
-                        if (light) renderer.lightProbeUsage = UnityEngine.Rendering.LightProbeUsage.Off;
-                        else renderer.reflectionProbeUsage = UnityEngine.Rendering.ReflectionProbeUsage.Off;
-                        changed++;
-                    }
-            }
-            else
-            {
-                foreach (KeyValuePair<Renderer, int> pair in saved)
-                {
-                    if (pair.Key == null) continue;
-                    if (light) pair.Key.lightProbeUsage = (UnityEngine.Rendering.LightProbeUsage)pair.Value;
-                    else pair.Key.reflectionProbeUsage = (UnityEngine.Rendering.ReflectionProbeUsage)pair.Value;
-                    changed++;
-                }
-                saved.Clear();
-            }
-            LightProbes probes = LightmapSettings.lightProbes;
-            Debug.Log("CROW_ENEMY " + (light ? "eprobes" : "erefl") + "=" + (off ? "off" : "on") + " on " + changed + " renderers; light probes in the scene: " +
-                      (probes == null ? 0 : probes.count) + ", reflection probes: " + UnityEngine.Object.FindObjectsOfType<ReflectionProbe>().Length);
-        }
-
-        static void Toggle(string key, string value, Func<GameObject, Behaviour[]> find)
-        {
-            List<Behaviour> off;
-            if (!offBehaviours.TryGetValue(key, out off)) offBehaviours[key] = off = new List<Behaviour>();
-            if (value == "off")
-            {
-                foreach (GameObject enemy in Enemies())
-                    foreach (Behaviour behaviour in find(enemy))
-                        if (behaviour.enabled)
-                        {
-                            behaviour.enabled = false;
-                            off.Add(behaviour);
-                        }
-            }
-            else
-            {
-                foreach (Behaviour behaviour in off)
-                    if (behaviour != null) behaviour.enabled = true;
-                off.Clear();
-            }
-            Debug.Log("CROW_ENEMY " + key + "=" + value + " (" + off.Count + " off)");
+            if (EnemyNames.Named(name) || FixedStep.IsBullet(name)) return false;
+            return !MaraScene.IsPlayerRoot(body.transform.root.gameObject);
         }
     }
 }

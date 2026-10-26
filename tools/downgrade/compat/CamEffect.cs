@@ -15,12 +15,13 @@ using UnityEngine.SceneManagement;
 //   -crow-post full|half  full is the original chain, half the Vita's; Windows players default to
 //                         full, the Vita to half.
 // The same Awake sets vSyncCount 1 (a frame every vertical blank, at most 60 fps). The PS Vita
-// draws its title at about 40 fps that way, frames of 16.7 and 33.3 ms in turn, and gameplay at
-// 15-25: there it takes vSyncCount 2, an even 30 fps where the frame fits in 33 ms and the same
-// rate as before where it doesn't (a 50 ms frame waits for the third blank either way).
+// draws its title at about 40 fps that way, frames of 16.7 and 33.3 ms in turn, and gameplay frames
+// take more than one blank (most areas fit in 33.4 ms now, a fight 38-39): there it takes
+// vSyncCount 2, an even 30 fps where the frame fits in 33 ms and the same rate as before where it
+// doesn't (a 50 ms frame waits for the third blank either way).
 //   -crow-vsync <n>       vSyncCount after the game's (1 is the game's; Vita default 2)
-//   -crow-camera 624|550|416  with half, the camera's own picture (624x351, 550x351 or 416x234; the
-//                         PS Vita's default is 550, other players' 624)
+//   -crow-camera 624|550  with half, the camera's own picture (624x351 or 550x351; the PS Vita's
+//                         default is 550, other players' 624)
 // The chain itself (CrowCountryCamEffect.OnRenderImage asks RenderImage first, rewriter Patches.cs
 // PatchCamEffect): the game's, unless one of these changes it:
 //   -crow-post-filters all|none|<names>  the filters drawn: sfb, psx, blur, crt, joined by '+' (psx+crt),
@@ -28,11 +29,10 @@ using UnityEngine.SceneManagement;
 //                         next reads the picture before it; whatever is last goes to the screen
 //                         nearest-neighbour, so none shows the camera's own 550x351 picture as it is.
 //                         all (every player's default) draws them as the game does.
-//   -crow-post-vita on|off|exact  at half size, the chain in three passes of vita_shaders/CrowPost.shader
+//   -crow-post-vita on|off  at half size, the chain in three passes of vita_shaders/CrowPost.shader
 //                         instead of the game's four (the PS Vita's default; off elsewhere): SFB and
 //                         PSX in one pass at 550x400, the blur straight from it (no 624x351 PSX
-//                         texture), the CRT pass with its noise from a random texture; exact keeps the
-//                         game's noise hash (for pixel comparisons). With filters left out it draws
+//                         texture), the CRT pass with its noise from a random texture. With filters left out it draws
 //                         those of its passes that still apply (sfb+psx: pass 0 only).
 //   -crow-post-bundle <path>  CrowVita/Post from an asset bundle (for a build without it)
 // -crow-cycle, -crow-fight-cycle and -crow-ab take postfilters=<value> and postvita=<value>
@@ -75,12 +75,12 @@ namespace CrowCompat
 
         static int? cameraWidth;
 
-        // -crow-camera <width>: the camera's own picture: 624 (624x351, the game's Switch size), 550
+        // -crow-camera <width>: the camera's own picture: 624 (624x351, the game's Switch size) or 550
         // (550x351 at the same 16:9 view: the chain's first pass reads 550 columns, point-sampled, so
-        // it takes one in about 1.13 of a 624-wide picture anyway) or 416 (416x234, the size the last
-        // pass draws; it loses detail: the last pass reads 351 rows, bilinear, and thin lines break up).
-        // The PS Vita takes 550: Roadside at the GPU's 222 MHz 53.9 -> 51 ms a frame, its screenshots
-        // the same as 624's (416: 43 ms, but edges stair-step).
+        // it takes one in about 1.13 of a 624-wide picture anyway). The PS Vita takes 550: Roadside at
+        // the GPU's 222 MHz 53.9 -> 51 ms a frame, its screenshots the same as 624's. (416x234, the size
+        // the last pass draws, made 43 ms but stair-stepped the edges: the last pass reads 351 rows.)
+        const int GameWidth = 624, Rows = 351;
         public static int CameraWidth
         {
             get
@@ -88,7 +88,7 @@ namespace CrowCompat
                 if (cameraWidth == null)
                 {
                     int value = CrowFlags.Int(ProbeFiles.Args, "-crow-camera", 0);
-                    cameraWidth = Height(value) > 0 ? value : Application.platform == RuntimePlatform.PSP2 ? 550 : 624;
+                    cameraWidth = Allowed(value) ? value : Application.platform == RuntimePlatform.PSP2 ? 550 : GameWidth;
                 }
                 return cameraWidth.Value;
             }
@@ -99,7 +99,7 @@ namespace CrowCompat
         // -crow-ab and -crow-cycle's camera=<width>: every half-size effect's camera picture at that size.
         internal static void SetCameraWidth(int width)
         {
-            if (Height(width) == 0) return;
+            if (!Allowed(width)) return;
             cameraWidth = width;
             effects.RemoveAll(e => e == null);
             foreach (Component effect in effects) CameraTarget(effect, effect.GetType());
@@ -112,17 +112,17 @@ namespace CrowCompat
             var current = field == null ? null : field.GetValue(effect) as RenderTexture;
             int width = CameraWidth;
             if (current == null || current.width == width) return;
-            Replace(effect, type, "camRenderTexture2", new RenderTexture(width, Height(width), 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
+            Replace(effect, type, "camRenderTexture2", new RenderTexture(width, Rows, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB));
             // The camera's aspect follows its target; 550x351 keeps the 624x351 view.
             var camera = effect.GetComponent<Camera>();
             if (camera == null) return;
-            if (width * 351 != Height(width) * 624) camera.aspect = 624f / 351f;
+            if (width != GameWidth) camera.aspect = (float)GameWidth / Rows;
             else camera.ResetAspect();
         }
 
-        static int Height(int width)
+        static bool Allowed(int width)
         {
-            return width == 624 ? 351 : width == 550 ? 351 : width == 416 ? 234 : 0;
+            return width == GameWidth || width == 550;
         }
 
         // Called at the end of CrowCountryCamEffect.Awake (rewriter Patches.cs, PatchCamEffect).
@@ -203,7 +203,7 @@ namespace CrowCompat
             get
             {
                 if (vitaMode == null)
-                    vitaMode = CrowFlags.Value(ProbeFiles.Args, "-crow-post-vita") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
+                    vitaMode = CrowFlags.Value(ProbeFiles.Args, "-crow-post-vita", "on", "off");
                 return vitaMode;
             }
         }
@@ -274,8 +274,8 @@ namespace CrowCompat
             return FindChain(effect);
         }
 
-        // The chain read from the effect's fields: a method of its own, since its lambda's closure (effect, type) was
-        // made at the start of ChainOf, in every frame (until 22 Oct), the fast path's too.
+        // The chain read from the effect's fields: a method of its own, so its lambda's closure (effect, type) is made
+        // only here, not at the start of ChainOf in every frame.
         static Chain FindChain(Component effect)
         {
             Type type = effect.GetType();
@@ -372,7 +372,7 @@ namespace CrowCompat
             }
             if ((mask & Crt) != 0)
             {
-                if (vita) Draw(current, chain.d, post, VitaMode == "exact" ? 3 : 2);
+                if (vita) Draw(current, chain.d, post, 2);
                 else
                 {
                     // The CRT pass reads the blur's texture as _BlurTex too.
@@ -405,7 +405,7 @@ namespace CrowCompat
         // CrowVita/Post, the noise and dither textures; the chain's sizes as the half-size chain makes
         // them and the game's _switch on (the passes are its Switch forms). The sizes are checked once per
         // chain: its textures are made once, by the game's Awake and AfterAwake, and nothing sets a size
-        // after (Half is read once too); until 22 Oct six engine reads every frame, and _switch by name.
+        // after (Half is read once too), so a frame makes no engine reads for them.
         static bool VitaReady(Chain chain)
         {
             string reason = null;

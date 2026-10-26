@@ -1,6 +1,6 @@
 """Paths, constants and small helpers shared by pipeline.py, its rule modules (asset_rules.py,
-shader_rules.py) and the other tools. Tools that import pipeline also reach the names pipeline.py
-imports from here as pipeline.<name>."""
+material_rules.py, shader_rules.py, video_rules.py, code_trim.py) and the other tools. Tools that
+import pipeline also reach the names pipeline.py imports from here as pipeline.<name>."""
 
 import concurrent.futures
 import contextlib
@@ -14,6 +14,7 @@ import sys
 import time
 import types
 from pathlib import Path
+from typing import NamedTuple
 
 import progress
 import truststore
@@ -82,6 +83,7 @@ def default_game():
 DEFAULT_GAME = default_game()
 # The newest 2018.2 release whose PS Vita build module is known to exist.
 TARGET = '2018.2.19f1'
+STEAM_APP_ID = '1996010'  # Crow Country's, from its Steam manifest
 
 
 # Where the pipeline's stages put their output, per target platform ('vita' or 'windows'); the other
@@ -141,25 +143,35 @@ def run(command):
 
 
 def unity_files(version):
-    """Where setup.py extracts, without installing anything, the parts of Unity's editor and PS Vita
-    module installers the pipeline and the editor-free build read (laid out as the editor's folder)."""
+    """A folder of Unity's files extracted from its installers, which earlier setups of The Drifter's port
+    made. Nothing reads it any more: every stage reads the installed editor (editor_data), which the
+    editor's own build uses too, so quickcode's linker and IL2CPP are the full build's. doctor.py still
+    names it."""
     return EXTERNAL / f'unity-{version}'
 
 
+def editor_folder(version):
+    """The installed editor's Editor folder (setup.py installs it there)."""
+    return EDITORS / version / 'Editor'
+
+
 def editor_data(version):
-    """Unity's Editor/Data folder: the files setup.py extracted from Unity's installers, or else an
-    installed editor's (the same files)."""
-    extracted = unity_files(version) / 'Editor' / 'Data'
-    return extracted if extracted.exists() else EDITORS / version / 'Editor' / 'Data'
+    """The installed editor's Editor/Data folder."""
+    return editor_folder(version) / 'Data'
+
+
+def editor_exe(version):
+    return editor_folder(version) / 'Unity.exe'
 
 
 def download(url, destination: Path, digest: str | None):
-    """Download url to destination and check its hash: SHA-256, or SHA-1 for a 40-digit pin (archive.org
-    lists only SHA-1 and MD5 for an item's files). A file already there with that hash is kept.
+    """Download url to destination and check its hash: SHA-256, SHA-1 for a 40-digit pin (archive.org
+    lists only SHA-1 and MD5 for an item's files) or SHA-512 for a 128-digit one (Microsoft lists only
+    SHA-512 for .NET's files). A file already there with that hash is kept.
     Timeouts, dropped connections and server errors are retried a few times. Stops on a mismatch
     and leaves nothing behind. digest None: a file its publisher updates in place, which the caller
     checks another way (its signature)."""
-    algorithm = 'sha1' if digest and len(digest) == 40 else 'sha256'
+    algorithm = {40: 'sha1', 128: 'sha512'}.get(len(digest or ''), 'sha256')
     if digest and destination.exists() and file_hash(destination, algorithm) == digest:
         return destination
     import http.client
@@ -324,16 +336,16 @@ def remove_path(path: Path, function):
     return False
 
 
-def replace_path(source: Path, target: Path):
-    """os.replace, tried again on PermissionError as remove_path does: on Windows a file just written
-    (Defender or the indexer reading it) or a target open elsewhere without delete sharing refuses the
-    rename for a moment. Raises the last error when it never goes through."""
-    for attempt in range(REMOVE_ATTEMPTS):
+def replace_path(source: Path, target: Path, attempts=REMOVE_ATTEMPTS):
+    """os.replace, tried again on PermissionError as remove_path does: on Windows a file or folder just
+    written (Defender or the indexer reading it) or a target open elsewhere without delete sharing refuses
+    the rename for a moment. Raises the last error when it never goes through."""
+    for attempt in range(attempts):
         try:
             os.replace(source, target)
             return
         except PermissionError:
-            if attempt == REMOVE_ATTEMPTS - 1:
+            if attempt == attempts - 1:
                 raise
             time.sleep(0.5)
 
@@ -412,6 +424,31 @@ NATIVE_ASSETS = {
 }
 # ... and with scenes, every serialized YAML file of a project: what can reference other files by GUID.
 YAML_FILES = NATIVE_ASSETS | {'.unity'}
+
+# Pieces of Unity's YAML the rules read and write. A number as the export writes it, for float(): the
+# particle materials' _CameraFadeParams is {r: 0, g: Infinity, ...}, and a pattern without Infinity
+# matched no such material, so the Fade particles lost _ALPHABLEND_ON (drawn opaque).
+NUMBER = r'([-+\d.eE]+|-?Infinity|NaN)'
+VECTOR = rf'\{{r: {NUMBER}, g: {NUMBER}, b: {NUMBER}, a: {NUMBER}\}}'  # a colour (Vector4 alike)
+SHADER_LINE = re.compile(r'^  m_Shader: (\{.*\})$', re.M)  # a material's shader reference
+NAME_LINE = re.compile(r'^  m_Name: ?(.*)$', re.M)  # the first is the main object's name
+
+
+def builtin_shader(file_id):
+    """A reference to a built-in shader: Standard 46, Legacy Shaders/Diffuse 7, Particles/Standard Surface 210."""
+    return f'{{fileID: {file_id}, guid: 0000000000000000f000000000000000, type: 0}}'
+
+
+BUILTIN_STANDARD = builtin_shader(46)
+BUILTIN_LEGACY_DIFFUSE = builtin_shader(7)
+BUILTIN_PARTICLES_SURFACE = builtin_shader(210)
+
+
+def require(match, path, what):
+    """match, or stop with the file's name when a rule's pattern found nothing in it."""
+    if match is None:
+        sys.exit(f'{path}: no {what}; the export changed, or the rule reads this file wrong')
+    return match
 
 
 def game_data(game: Path) -> Path:
@@ -535,8 +572,7 @@ def scan(name: str, folder: Path, select, function, version=''):
     The results are kept in work/scan-cache/<name>.json under each file's size and modification time,
     so a rerun reads only the files that changed. function's result must be JSON; version names what
     else it depends on (a change discards the cache). So does a change to function itself or to what
-    code_fingerprint sees of it: before (21 Oct) an edited function, or a constant it reads such as
-    asset_rules.NAME_SEARCH_BYTES, went on with the results of the old one."""
+    code_fingerprint sees of it (a constant it reads, such as asset_rules.NAME_SEARCH_BYTES)."""
     version = f'{version} code {hashlib.sha256(code_fingerprint(function).encode()).hexdigest()[:16]}'
     cache_path = SCAN_CACHE / f'{name}.json'
     try:
@@ -574,9 +610,101 @@ def expect(count: int, minimum: int, what: str):
     """Stop when a rule that must apply matched fewer than minimum (its count on the export it was
     written for): a game update or another AssetRipper can turn it into a no-op that only logs 0, and
     the console then shows the result (L and R doing nothing, a VideoPlayer hole that crashes the
-    player). Until 21 Oct these rules only logged their counts."""
+    player)."""
     if count < minimum:
         sys.exit(
             f'{what}: {count}, expected at least {minimum}. The export changed or the rule no longer matches '
             'it; fix the rule, or lower its minimum where fewer is right.'
         )
+
+
+# ---------------------------------------------------------------- build switches
+
+
+class Switch(NamedTuple):
+    """A CROW_* environment variable that changes what a stage writes.
+    stage: 'code' (the rewriter: code, project, quickcode), 'project' (the asset rules), 'build' (the editor
+    scripts in unity/, as the build writes the scenes), 'player' (written into the PS Vita build by build and
+    quickcode), 'check' (the build's checks; writes nothing).
+    values: the allowed values, space-separated, or '' for a whole number.
+    vita, other: the default with the PS Vita's scene data (the PS Vita, or CROW_VITA_DATA=1) and without; the
+    name of another switch takes its value; '' leaves it unset (the code's own default).
+    platforms: where it applies."""
+
+    stage: str
+    values: str
+    vita: str
+    other: str
+    platforms: tuple = ('vita', 'windows')
+
+
+# Every build switch, checked and resolved here (build_switches), logged by the stages and recorded with
+# the project (pipeline.PROJECT_INPUTS) and the PS Vita build's code stage (pipeline.NON_CODE_INPUTS), so
+# that build and quickcode warn when one differs from what the project or the build had. The editor gets
+# each build switch's value explicitly (unity/BuildUtil.cs: Switch). docs/build.md describes them.
+BUILD_SWITCHES = {
+    # 1: a Windows player with the PS Vita's scene data (the defaults below as on the PS Vita), for measurements.
+    'CROW_VITA_DATA': Switch('build', '0 1', '0', '0'),
+    # The Enemy Puddle's random looks picked at build time (unity/PuddleBake.cs): on, Haunted Hilltop's; all.
+    'CROW_PUDDLE_BAKE': Switch('build', 'on all off', 'on', 'off'),
+    # The player's ProBuilder meshes built at build time (unity/ProBuilderMeshes.cs); bake keeps the components.
+    'CROW_PROBUILDER': Switch('build', 'on bake off', 'on', 'off'),
+    # The static merge (unity/MergeScenes.cs, compat/Merge.cs); ab keeps the parts' meshes for -crow-merge off.
+    'CROW_MERGE': Switch('build', 'on ab off', 'on', 'off'),
+    # The merge's largest part in vertices and its budget per scene in KB; unset: Merge's own.
+    'CROW_MERGE_MAX_VERTICES': Switch('build', '', '', ''),
+    'CROW_MERGE_MAX_KB': Switch('build', '', '', ''),
+    # The scene split after the merge (Merge.Split): on, the still parts; movers, also those that move on their own.
+    'CROW_SPLIT': Switch('build', 'movers on off', 'movers', 'off'),
+    # The player merge (unity/PlayerMerge.cs); ab keeps the parts for -crow-player-merge off. PARTIAL=1 merges
+    # with the uses of the scenes there are (a test build before any full one).
+    'CROW_PLAYER_MERGE': Switch('build', 'on ab off', 'on', 'off'),
+    'CROW_PLAYER_MERGE_PARTIAL': Switch('build', '0 1', '0', '0'),
+    # MeshCombineStudio's run-time combining done at build time, and the combined sources' renderers left out
+    # (unity/MeshCombineBake.cs).
+    'CROW_MCS_BAKE': Switch('build', 'on off', 'on', 'off'),
+    'CROW_MCS_STRIP': Switch('build', 'on off', 'CROW_MCS_BAKE', 'CROW_MCS_BAKE'),
+    # The inert scripts left out of the scenes (unity/StripScenes.cs).
+    'CROW_STRIP': Switch('build', 'on off', 'on', 'off'),
+    # The materials saved with CrowVita/Lit (asset_rules.vita_lit_overlay); off leaves the swap to run time.
+    'CROW_LIT_BAKE': Switch('project', 'on off', 'on', 'on', ('vita',)),
+    # on: the FSMs' compiled bodies only (rewriter/FsmCompile.cs); off keeps the originals beside them.
+    'CROW_FSM_COMPILE': Switch('code', 'on off', 'off', 'off'),
+    # 1: PlayMaker's actions and the behaviours timed, for -crow-action-profile (rewriter/ActionProfile.cs).
+    'CROW_ACTION_PROFILE': Switch('code', '0 1', '0', '0'),
+    # The PS Vita player's graphics jobs, in Media/boot.config (pipeline.boot_config; docs/vita.md).
+    'CROW_GFX_JOBS': Switch('player', 'on off', 'on', 'on', ('vita',)),
+    # 1: a build whose editor scripts failed in a scene, or with errors, goes through, for experiments.
+    'CROW_ALLOW_SCENE_FAILURES': Switch('check', '0 1', '0', '0'),
+}
+
+
+def build_switches(platform, stages=None):
+    """{name: value} of the build switches that apply on platform (and to stages, all if None): the
+    environment's value, else the default. Stops on a value the switch doesn't take."""
+    given = {}
+    for name, switch in BUILD_SWITCHES.items():
+        value = os.environ.get(name, '').strip()
+        if value and not (value in switch.values.split() if switch.values else value.isdigit()):
+            allowed = ', '.join(switch.values.split()) if switch.values else 'a whole number'
+            sys.exit(f'{name}={value}: {name} takes {allowed} (common.BUILD_SWITCHES, docs/build.md)')
+        given[name] = value
+    vita_data = platform == 'vita' or given['CROW_VITA_DATA'] == '1'
+
+    def resolved(name):
+        switch = BUILD_SWITCHES[name]
+        default = switch.vita if vita_data else switch.other
+        return given[name] or (resolved(default) if default in BUILD_SWITCHES else default)
+
+    return {
+        name: resolved(name)
+        for name, switch in BUILD_SWITCHES.items()
+        if platform in switch.platforms and (stages is None or switch.stage in stages)
+    }
+
+
+def describe_switches(values: dict):
+    """The switches as name=value, those set in the environment marked with *."""
+    return ' '.join(
+        f'{name}={value or "(unset)"}{"*" if os.environ.get(name) else ""}' for name, value in values.items()
+    )

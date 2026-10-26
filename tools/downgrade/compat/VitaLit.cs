@@ -23,39 +23,32 @@ using UnityEngine.SceneManagement;
 // range, angle, position and enabled state every frame, and the key set is chosen again every
 // 0.25 s and in the frame a spot light comes on (the guns' laser sights as aiming starts). On the
 // PS Vita in Roadside: 61-62 -> 38 ms a frame, the main thread 34-35 -> 24 ms.
-// Which lights are keys (25 Oct, LOUNGE): Unity picks each object's pixel lights by the object, but the
-// key lights are one set for the whole frame, so a light that drops out of it goes from per pixel to
-// per vertex (on the big combined walls next to nothing) at once: its pool of light on a wall or a
-// pillar vanishes. The set used to be scored from the camera, 15 m away from everything it shows, so
-// range and intensity decided, the spot lights first wherever they were: in Corridor B's north walkway
-// the window spot 17 m away in the south-west wing (behind walls) took a slot, and the wall lamps a few
-// metres from Mara swapped in and out as the camera turned through a few degrees (the walls and
-// pilasters by the lamp lit, then not). view (the default) scores each light by what it gives the
-// ground the camera shows: the player's body (else a point 15 m along the camera's view), lights whose
-// range doesn't reach within -crow-lit-view metres (4) of it out, the others by intensity x range,
-// attenuated as Unity does over their distance past that radius; spots only first when the player is
-// inside their range (the laser sights, daylight pools); the last choice counts 1.5 times, each light is scored on
-// its highest intensity and range since the load (the game's flicker doesn't reorder them), a key the
-// game switches off keeps its slot for up to 2 s (a candle going out and back for a moment), and
-// keys change by a fade (a light Select drops for half a second keeps its slot, then its slot fades out
-// over -crow-lit-fade seconds, 0.35, and the
-// new one fades in; a spot light coming on, a laser sight, takes its slot at once).
+// Which lights are keys: Unity picks each object's pixel lights by the object, but the key lights are one
+// set for the whole frame, so a light that drops out of it goes from per pixel to per vertex (on the big
+// combined walls next to nothing) at once: its pool of light on a wall or a pillar vanishes. Scored from the
+// camera, 15 m away from everything it shows, range and intensity decide, the spot lights first wherever
+// they are: in Corridor B's north walkway the window spot 17 m away in the south-west wing (behind walls)
+// took a slot, and the wall lamps a few metres from Mara swapped in and out as the camera turned through a
+// few degrees. So each light is scored by what it gives the ground the camera shows: the player's body (else
+// a point 15 m along the camera's view), lights whose range doesn't reach within -crow-lit-view metres (4)
+// of it out, the others by intensity x range, attenuated as Unity does over their distance past that radius;
+// spots only first when the player is inside their range (the laser sights, daylight pools); the last choice
+// counts 1.5 times, each light is scored on its highest intensity and range since the load (the game's
+// flicker doesn't reorder them), a key the game switches off keeps its slot for up to 2 s (a candle going
+// out and back for a moment), and keys change by a fade (a light Select drops for half a second keeps its
+// slot, then its slot fades out over -crow-lit-fade seconds, 0.35, and the new one fades in; a spot light
+// coming on, a laser sight, takes its slot at once).
 //   -crow-lit game|vita    game keeps Standard and the game's lights (the default on other players);
 //                          vita as above (the PS Vita's default)
 //   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 4; 8 slots cost Mansion
 //                          8 ms for nothing seen)
-//   -crow-lit-soa on|off   on (the default): the shader works out the key lights side by side, a light
-//                          in each lane of its vectors (CROW_KEYS_2/4); off: one after another, the
-//                          4-slot form it had before (CROW_KEYS_LOOP), for comparisons
 //   -crow-lit-min-range <m>  point lights with a shorter range stay Unity's, per vertex (default 0)
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
-//   -crow-lit-select view|camera  how key lights are scored: view (the default, above) or camera (from the
-//                          camera's position, spots first: the scoring before 25 Oct, with no fade)
 //   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
 //   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
-//   -crow-lit-debug <n>    a value for the shader's _CrowDebug (for a debugging build of it)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m>, litsoa=on|off, litsel=view|camera,
+//   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off)
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m>,
 // litfade=<s> and litview=<m>.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
@@ -81,36 +74,43 @@ namespace CrowCompat
         static int swapPasses;
         static string lastLog, bundle;
         static int maxKeys = 4;
-        static bool soa = true;
         static float minRange = 0f;
-        static bool viewSelect = true;
         static float fadeTime = 0.35f, viewRadius = 4f;
 
-        // -crow-cycle's litkeys= and litrange=.
-        internal static void SetLimits(string key, float value)
+        // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litrange=, litfade=, litview=;
+        // false for other keys (Quality.Change asks the next module).
+        internal static bool Change(string key, string value)
         {
-            if (key == "litkeys") maxKeys = Mathf.Clamp((int)value, 0, Keys);
-            else if (key == "litsoa") soa = value != 0f;
-            else if (key == "litsel") viewSelect = value != 0f;
-            else if (key == "litfade") fadeTime = Mathf.Max(0f, value);
-            else if (key == "litview") viewRadius = Mathf.Max(0f, value);
-            else minRange = value;
+            if (key == "lit")
+            {
+                Set(value);
+                return true;
+            }
+            float number;
+            float.TryParse(value, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out number);
+            switch (key)
+            {
+                case "litkeys": maxKeys = Mathf.Clamp((int)number, 0, Keys); break;
+                case "litrange": minRange = number; break;
+                case "litfade": fadeTime = Mathf.Max(0f, number); break;
+                case "litview": viewRadius = Mathf.Max(0f, number); break;
+                default: return false;
+            }
             nextSelect = 0f;
+            return true;
         }
         static UnityEngine.Object[] bundleAssets;
 
         public static void Install(string[] args)
         {
-            log = Array.IndexOf(args, "-crow-lit-log") >= 0;
+            log = CrowFlags.Has(args, "-crow-lit-log");
             bundle = CrowFlags.Value(args, "-crow-lit-bundle");
             maxKeys = Mathf.Clamp((int)CrowFlags.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
             minRange = CrowFlags.Number(args, "-crow-lit-min-range", minRange);
-            soa = CrowFlags.Value(args, "-crow-lit-soa") != "off";
-            viewSelect = CrowFlags.Value(args, "-crow-lit-select") != "camera";
-            fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", viewSelect ? fadeTime : 0f));
+            fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", fadeTime));
             viewRadius = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-view", viewRadius));
             Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
-            string value = CrowFlags.Value(args, "-crow-lit") ?? (Application.platform == RuntimePlatform.PSP2 ? "vita" : null);
+            string value = CrowFlags.Value(args, "-crow-lit", "vita");
             if (value != null) Set(value);
         }
 
@@ -154,6 +154,7 @@ namespace CrowCompat
                     peaks.Clear();
                     offSince.Clear();
                     dropped.Clear();
+                    Destroyed.Forget(forced);  // an unloaded area's directional lights
                     swapPasses = 0;
                     nextSelect = 0f;
                     nextList = 0f;
@@ -262,21 +263,17 @@ namespace CrowCompat
         // them so): the later passes, for what the game creates or loads late, are then left out
         // (what it loads is saved so too).
         static bool baked;
-        // Since 21 Oct, once a first pass has found that, the first passes after later loads leave the
-        // material scan out too: Resources.FindObjectsOfTypeAll<Material> makes a managed object, held
-        // by one of IL2CPP's pinned GC handles (Memory.cs, GcHandles), for every material in memory, and
-        // in such a build it found none to swap (every logged pass on the PS Vita: "0 materials to
-        // CrowVita/Lit", 139 to 419 saved so). Haunted Hilltop's first frame took handle 65,537 there,
-        // which made the handle table grow, and crash, on 21 Oct. The renderer pass below then looks at
-        // the first material of every renderer it lists (FindObjectsOfType: those on active
-        // GameObjects), and one on a shader the scan swaps (Standard, SFBStandard, Legacy Diffuse; until
-        // 22 Oct Standard only) brings the scan back at once; other slots, and materials no such renderer
-        // has, aren't seen. Every slot (GetSharedMaterials) made the post-load pass 2.5 to 7.5 times as
-        // long on the PS Vita (Ocean Kingdom 31 -> 235 ms, P1-verify 22 Oct): a managed Material per slot.
-        // Restore (lit=game) clears it. (A cache of the layer mask
-        // by the scenes loaded and the renderer counts, also 21 Oct, went on 22 Oct: on the PS Vita only
-        // the first pass after a load runs, and the counts differed on most revisits, Haunted Hilltop's
-        // on every one, so it saved next to nothing.)
+        // Once a first pass has found that, the first passes after later loads leave the material scan out
+        // too: Resources.FindObjectsOfTypeAll<Material> makes a managed object, held by one of IL2CPP's
+        // pinned GC handles (Memory.cs, GcHandles), for every material in memory, and in such a build it
+        // finds none to swap (every logged pass on the PS Vita: "0 materials to CrowVita/Lit", 139 to 419
+        // saved so); Haunted Hilltop's first frame took handle 65,537 there, which made the handle table
+        // grow, and crash. The renderer pass below then looks at the first material of every renderer it
+        // lists (FindObjectsOfType: those on active GameObjects), and one on a shader the scan swaps
+        // (Standard, SFBStandard, Legacy Diffuse) brings the scan back at once; other slots, and materials
+        // no such renderer has, aren't seen: every slot (GetSharedMaterials) made the post-load pass 2.5 to
+        // 7.5 times as long on the PS Vita (Ocean Kingdom 31 -> 235 ms), a managed Material per slot.
+        // Restore (lit=game) clears it.
         static bool bakedBuild;
         static readonly Material[] NoMaterials = new Material[0];
         // Per shader (instance ID): whether the material scan swaps it.
@@ -450,13 +447,12 @@ namespace CrowCompat
         // the layers most of them are on qualify (the game keeps some lights to a few layers: Pool's
         // "only below" and "only Object" spots, Mansion's ghosts' lights, the car's lamps in Driving
         // Intro); the others stay Unity's, per vertex or in the harmonics.
-        static int majorLayers = ~(1 << 5);
+        static int majorLayers = ~(1 << MaraScene.UiLayer);
 
         // Select runs every 0.25 s in play, so it allocates nothing (strings only with -crow-lit-log): the
         // scene's lights are listed again every 2 s and after each load, the buffers are reused, and the
         // key lights are picked by hand. A 2 s listing that finds another periodic scan in its frame
-        // (CrowEvents.Turn) waits for the next Select; until 22 Oct it came in the same frame as the
-        // camera's 2 s Camera.main every time.
+        // (CrowEvents.Turn) waits for the next Select.
         // The list has the lights that are off too, and the spot lights among them that would be key
         // lights are watched every frame (Woken): a spot light that isn't a key light is Unity's, per
         // vertex, where Unity drops its cone and lights everything in its range as a point light. The
@@ -485,14 +481,13 @@ namespace CrowCompat
             foreach (Light light in lights)
             {
                 if (light == null || light.type != LightType.Directional || !light.isActiveAndEnabled || keyed.ContainsKey(light)) continue;
-                if (light.cullingMask == 0 || (light.cullingMask & ~(1 << 5)) == 0) continue;
+                if (light.cullingMask == 0 || (light.cullingMask & ~(1 << MaraScene.UiLayer)) == 0) continue;
                 if (main == null || light.intensity * Luminance(light.color) > main.intensity * Luminance(main.color)) main = light;
             }
             int world = majorLayers;
             Camera view = MainCamera(now);
-            Vector3 camera = view != null ? view.transform.position : Vector3.zero;
             if (view != null) GeometryUtility.CalculateFrustumPlanes(view, frustum);
-            Vector3 focus = viewSelect ? Focus(view, now) : camera;
+            Vector3 focus = Focus(view, now);
             candidates.Clear();
             scores.Clear();
             excluded.Clear();
@@ -512,7 +507,7 @@ namespace CrowCompat
                 KeyValuePair<int, LightShadows> saved;
                 int mask = keyed.TryGetValue(light, out saved) ? saved.Key : light.cullingMask;
                 bool off = !light.isActiveAndEnabled || light.intensity <= 0f;
-                if (off && viewSelect && keyed.ContainsKey(light))
+                if (off && keyed.ContainsKey(light))
                 {
                     // A key the game switched off for a moment (Mansion's candles flicker by going out
                     // and back): its slot is kept for up to 2 s (it draws nothing meanwhile), so the next
@@ -530,7 +525,7 @@ namespace CrowCompat
                 }
                 if ((mask & world) != world)
                 {
-                    if (log) excluded.Add(light.type + ":" + Perf.Path(light.transform, 2) + "@" + light.range.ToString("F1") + "/mask=" + mask.ToString("X"));
+                    if (log) excluded.Add(light.type + ":" + Hierarchy.Path(light.transform, 2) + "@" + light.range.ToString("F1") + "/mask=" + mask.ToString("X"));
                     continue;
                 }
                 if (light.type == LightType.Directional)
@@ -546,33 +541,23 @@ namespace CrowCompat
                 // its candles 33.3 ms a frame, 8 slots 41.9, the game 66); -crow-lit-min-range leaves
                 // short-range point lights to Unity (per vertex) instead.
                 if (light.type == LightType.Point && light.range < minRange) continue;
-                float score;
-                if (viewSelect)
-                {
-                    // What it gives the ground around the player: out if its range ends short of the
-                    // radius, else intensity x range, attenuated as Unity's lights are over the distance
-                    // past the radius; a spot first only when the player is inside its range.
-                    // Its peak intensity and range since the load: the game's flicker (candles, fires,
-                    // a fireplace's glow, LightFlicker and the "light flicker" FSMs) doesn't reorder them.
-                    Vector2 peak;
-                    peaks.TryGetValue(light, out peak);
-                    peak = new Vector2(Mathf.Max(peak.x, light.intensity), Mathf.Max(peak.y, light.range));
-                    peaks[light] = peak;
-                    float reach = peak.y, away = Vector3.Distance(focus, position), beyond = Mathf.Max(0f, away - viewRadius);
-                    if (beyond >= reach) continue;
-                    float x = beyond / Mathf.Max(reach, 0.0001f);
-                    score = peak.x * Luminance(light.color) * reach / (1f + 25f * x * x);
-                    if (light.type == LightType.Spot && away < reach) score += 1e6f;
-                    // The last choice keeps its slot against a near tie (not every keyed light: one fading out
-                    // is keyed too, and three equal candles all so marked swapped places at every pass).
-                    if (desired.Contains(light)) score *= 1.5f;
-                }
-                else
-                {
-                    float distance = Mathf.Max(0f, Vector3.Distance(camera, position) - light.range);
-                    score = light.range * Mathf.Sqrt(light.intensity * Luminance(light.color)) / (1f + distance);
-                    if (light.type == LightType.Spot) score += 1e6f;
-                }
+                // What it gives the ground around the player: out if its range ends short of the
+                // radius, else intensity x range, attenuated as Unity's lights are over the distance
+                // past the radius; a spot first only when the player is inside its range.
+                // Its peak intensity and range since the load: the game's flicker (candles, fires,
+                // a fireplace's glow, LightFlicker and the "light flicker" FSMs) doesn't reorder them.
+                Vector2 peak;
+                peaks.TryGetValue(light, out peak);
+                peak = new Vector2(Mathf.Max(peak.x, light.intensity), Mathf.Max(peak.y, light.range));
+                peaks[light] = peak;
+                float reach = peak.y, away = Vector3.Distance(focus, position), beyond = Mathf.Max(0f, away - viewRadius);
+                if (beyond >= reach) continue;
+                float x = beyond / Mathf.Max(reach, 0.0001f);
+                float score = peak.x * Luminance(light.color) * reach / (1f + 25f * x * x);
+                if (light.type == LightType.Spot && away < reach) score += 1e6f;
+                // The last choice keeps its slot against a near tie (not every keyed light: one fading out
+                // is keyed too, and three equal candles all so marked swapped places at every pass).
+                if (desired.Contains(light)) score *= 1.5f;
                 candidates.Add(light);
                 scores.Add(score);
             }
@@ -597,10 +582,10 @@ namespace CrowCompat
                 foreach (Light light in desired)
                 {
                     Vector3 at = light.transform.position;
-                    line.Append(' ').Append(light.type).Append(':').Append(Perf.Path(light.transform, 2)).Append('@').Append(light.range.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
+                    line.Append(' ').Append(light.type).Append(':').Append(Hierarchy.Path(light.transform, 2)).Append('@').Append(light.range.ToString("F1", System.Globalization.CultureInfo.InvariantCulture))
                         .Append('(').Append(at.x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(';').Append(at.z.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(')');
                 }
-                line.Append(main == null ? " main=none" : " main=" + Perf.Path(main.transform, 2) + "/mask=" + main.cullingMask.ToString("X"));
+                line.Append(main == null ? " main=none" : " main=" + Hierarchy.Path(main.transform, 2) + "/mask=" + main.cullingMask.ToString("X"));
                 if (excluded.Count > 0) line.Append(" other-layers ").Append(string.Join(" ", excluded.ToArray()));
                 string text = line.ToString();
                 if (text != lastLog) Debug.Log(text);
@@ -611,8 +596,8 @@ namespace CrowCompat
         // The key slots: keys (with keyTransforms and weights, 0 to 1) are what the shader is given;
         // desired is Select's choice. A key Select no longer wants fades out and is given back to
         // Unity at 0; a wanted light takes a free slot and fades in; a spot light coming on (urgent:
-        // a laser sight) takes the slot of a leaving key at once, at full strength. With no fade, as
-        // before 25 Oct: every change at once.
+        // a laser sight) takes the slot of a leaving key at once, at full strength. With no fade
+        // (-crow-lit-fade 0): every change at once.
         static readonly List<Light> desired = new List<Light>();
         static readonly List<float> weights = new List<float>();
         // Each light's highest intensity and range seen since the load (the view scoring's).
@@ -715,7 +700,7 @@ namespace CrowCompat
             if ((body == null || !body.gameObject.activeInHierarchy) && now >= nextBody)
             {
                 nextBody = now + 2f;
-                GameObject found = GameObject.Find("character RIGIDBODY");
+                GameObject found = MaraScene.FindBody();
                 body = found != null ? found.transform : null;
             }
             if (body != null && body.gameObject.activeInHierarchy) return body.position + Vector3.up * 0.3f;
@@ -779,7 +764,7 @@ namespace CrowCompat
             light.shadows = saved.Value;
         }
 
-        static readonly string[] keywords = { "CROW_KEYS_2", "CROW_KEYS_4", "CROW_KEYS_LOOP" };
+        static readonly string[] keywords = { "CROW_KEYS_2", "CROW_KEYS_4" };
         static readonly int[] laneIds =
         {
             Shader.PropertyToID("_CrowKeyX"), Shader.PropertyToID("_CrowKeyY"), Shader.PropertyToID("_CrowKeyZ"), Shader.PropertyToID("_CrowKeyW"),
@@ -787,11 +772,10 @@ namespace CrowCompat
         };
         static readonly Vector4[] lanes = new Vector4[8];
         static string keyword;
-        static readonly int KeyPosId = Shader.PropertyToID("_CrowKeyPos"), KeyDirId = Shader.PropertyToID("_CrowKeyDir"),
-            KeyColorId = Shader.PropertyToID("_CrowKeyColor"), FillId = Shader.PropertyToID("_CrowFill"), FillColorId = Shader.PropertyToID("_CrowFillColor");
+        static readonly int KeyColorId = Shader.PropertyToID("_CrowKeyColor"), FillId = Shader.PropertyToID("_CrowFill"), FillColorId = Shader.PropertyToID("_CrowFillColor");
         // The key lights' transforms (Select; a light's transform is an engine call), the colour space, and what the
         // globals were last given: a global is set again only when its value changed (exactly; NaN always), and all of
-        // them when VitaLit comes on and after each load (sendAll). Until 22 Oct all 13 every frame, the 5 arrays and
+        // them when VitaLit comes on and after each load (sendAll). Until 22 Oct all of them every frame, the arrays and
         // vectors by name (a string to ID lookup each: a third of Upload's samples in the 18 Oct profile).
         static readonly List<Transform> keyTransforms = new List<Transform>();
         static bool linear, sendAll = true;
@@ -818,7 +802,7 @@ namespace CrowCompat
 
         // The key lights in the shader's slots, the ones that are on first; the rest far away and
         // black. CROW_KEYS_2/4: how many slots the shader reads, side by side (_CrowKeyX...: slot k in
-        // lane k); CROW_KEYS_LOOP: 4 slots one after another (-crow-lit-soa off).
+        // lane k; the 4-slot loop it had before took 129 cycles a pixel against 82, status-log.md).
         static void Upload()
         {
             Vector4 fill = Vector4.zero, fillColor = Vector4.zero;
@@ -866,8 +850,6 @@ namespace CrowCompat
             if (Changed(colors, sentColors) || all) Shader.SetGlobalVectorArray(KeyColorId, colors);
             if (positionsChanged || directionsChanged || all)
             {
-                Shader.SetGlobalVectorArray(KeyPosId, positions);
-                Shader.SetGlobalVectorArray(KeyDirId, directions);
                 for (int k = 0; k < Keys; k++)
                 {
                     lanes[0][k] = positions[k].x;
@@ -883,7 +865,7 @@ namespace CrowCompat
             }
             if (!Same(fill, sentFill) || all) Shader.SetGlobalVector(FillId, sentFill = fill);
             if (!Same(fillColor, sentFillColor) || all) Shader.SetGlobalVector(FillColorId, sentFillColor = fillColor);
-            string wanted = used == 0 ? null : !soa ? keywords[2] : used <= 2 ? keywords[0] : keywords[1];
+            string wanted = used == 0 ? null : used <= 2 ? keywords[0] : keywords[1];
             if (wanted == keyword) return;
             foreach (string name in keywords)
                 if (name == wanted) Shader.EnableKeyword(name);

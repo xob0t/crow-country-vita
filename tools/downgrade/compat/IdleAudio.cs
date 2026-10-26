@@ -9,8 +9,8 @@ using UnityEngine.SceneManagement;
 // that wait for a sound, Mansion 392. With them off, Roadside's audio update took 0.57 ms instead of
 // 0.90 and the main thread 23.1 ms instead of 23.4 (PS Vita, standing). IdleAudio disables a source
 // once it has been idle (not playing, at the start of its clip) for 2 s, and enables it again before
-// the game plays it: the rewriter (rewriter/IdleAudio.cs) sends every AudioSource.Play, PlayDelayed,
-// PlayScheduled, PlayOneShot and UnPause call in the game's code here first (Wake), and every
+// the game plays it: the rewriter (rewriter/IdleAudio.cs) sends every AudioSource.Play and PlayOneShot
+// call in the game's code here first (Wake; it has no PlayDelayed, PlayScheduled or UnPause), and every
 // Behaviour.enabled read and write too, so the game still reads true for a source IdleAudio
 // disabled, and a source the game itself disables or enables is the game's again.
 // Left alone: sources that play on enable (playOnAwake: enabling one starts it), sources the game's
@@ -41,10 +41,9 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            string mode = CrowFlags.Value(args, "-crow-idle-audio");
-            on = mode == null ? Application.platform == RuntimePlatform.PSP2 : mode == "on";
+            on = CrowFlags.On(args, "-crow-idle-audio");
             if (!on) return;
-            log = args.Contains("-crow-idle-audio-log");
+            log = CrowFlags.Has(args, "-crow-idle-audio-log");
             CrowEvents.Loaded("IdleAudio.sceneLoaded", (scene, loadMode) => rescanAt = Time.realtimeSinceStartup + 2f);
             CrowEvents.Canvases("IdleAudio.Frame", Frame);
             Debug.Log("CROW_IDLE_AUDIO on: idle sources off after " + IdleSeconds + " s");
@@ -80,18 +79,6 @@ namespace CrowCompat
 #pragma warning restore 618
         }
 
-        public static void PlayDelayed(AudioSource source, float delay)
-        {
-            Wake(source);
-            source.PlayDelayed(delay);
-        }
-
-        public static void PlayScheduled(AudioSource source, double time)
-        {
-            Wake(source);
-            source.PlayScheduled(time);
-        }
-
         public static void PlayOneShot(AudioSource source, AudioClip clip)
         {
             Wake(source);
@@ -106,6 +93,13 @@ namespace CrowCompat
             source.PlayOneShot(clip, volumeScale);
         }
 
+        // CrowCompat's VideoPlayer (Video.cs) resuming its sound; the game has no UnPause call.
+        internal static void UnPause(AudioSource source)
+        {
+            Wake(source);
+            source.UnPause();
+        }
+
         // A one-shot's sound may not show in isPlaying: the source counts as busy for the clip's length.
         static void Hold(AudioSource source, AudioClip clip)
         {
@@ -114,12 +108,6 @@ namespace CrowCompat
             float pitch = Mathf.Abs(source.pitch);
             float until = Time.realtimeSinceStartup + clip.length / (pitch > 0.01f ? pitch : 0.01f);
             if (until > idleSince[at]) idleSince[at] = until;
-        }
-
-        public static void UnPause(AudioSource source)
-        {
-            Wake(source);
-            source.UnPause();
         }
 
         // Behaviour.enabled as the game sees it: a source IdleAudio disabled reads as enabled, and a

@@ -20,8 +20,6 @@ using Mono.Cecil.Cil;
 //     GetJoystickButtonValueByJoystickId false for such a joystick; ThreadSafeUnityInput.Mouse.Update returns at once while
 //     Cuts.RewiredNoMouse; InputManager_Base's Update, FixedUpdate and LateUpdate start with
 //     RewiredProbe.Begin() and call RewiredProbe.End() before each return (their time, for -crow-cuts-log).
-//   (CutsRewiredSites, the probing builds' RewiredProbe.Mark after every call in Rewired's update, keyed on its
-//     obfuscated method names, went on 21 Oct: the pad reader skips that update on the PS Vita.)
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {

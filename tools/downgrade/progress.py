@@ -1,21 +1,19 @@
 """What the tools show while they work: a bar for each step that takes a while, a line for each thing done.
 
-    with progress.display():                      # make.py, build.py: one display for the whole build
-        with progress.step('Compiling shaders', total=len(shaders), eta=True) as step:
-            for s in shaders:
-                step.note(s.name)                 # shown after the step's name
-                ...
-                step.advance()
-        for o in progress.track(objects, 'Objects'):  # or a step for a list
+    with progress.step('Packaging the VPK', total=total, eta=True, count='MB') as step:  # pipeline.py
+        for name, source in files:
+            step.note(name)                       # shown after the step's name
             ...
-        progress.written('level0', len(data), seconds, note)
-    with progress.following('IL2CPP', log):       # a tool writing a log: its last line as the note
+            step.advance(size)
+    for path in progress.track(files, 'Reading the game materials'):  # a step for a list
+        ...
+    with progress.following('Unity: building', log):  # a tool writing a log: its last line as the note
         subprocess.run(...)
 
-A step outside display() shows a display of its own while it runs (check_audio.py calling
-audio.build, setup.py's downloads), so the modules don't need to know who called them. The bars only
-show on an interactive terminal and are gone when the step ends; the lines, and anything printed
-meanwhile, stay above them, and are all that a redirected output gets. Lines are never wrapped, so a
+Each step shows a display of its own while it runs; steps inside `with progress.display():` share one,
+so the modules don't need to know who called them. The bars only show on an interactive terminal and
+are gone when the step ends; the lines, and anything printed meanwhile, stay above them, and are all
+that a redirected output gets. Lines are never wrapped, so a
 log keeps them whole. A tool run under a step must not write to the terminal itself (its output to a
 log file or captured): it would print through the bars.
 """
@@ -35,7 +33,6 @@ from rich.text import Text
 
 console = Console(highlight=False, soft_wrap=True)
 errors = Console(stderr=True, highlight=False, soft_wrap=True)  # for messages outside a display
-NAME_WIDTH = 34  # written(): sharedassets59.assets.resS and Resources/unity_builtin_extra fit
 NOTE_WIDTH = 70  # characters of a log's last line following() shows
 POLL_SECONDS = 0.5  # how often following() reads the log
 TAIL_BYTES = 4096  # how much of the log's end last_line() reads
@@ -182,22 +179,6 @@ def last_line(log, start=0):
         lines = lines[1:]
     line = next((x.strip() for x in reversed(lines) if x.strip()), '')
     return line if len(line) <= NOTE_WIDTH else line[: NOTE_WIDTH - 3] + '...'
-
-
-def written(name, size, seconds=None, note='', missing=None):
-    """The line for a file the build wrote: its size, how long it took, the --compare result and
-    the classes it lacks ({class ID: objects}) because they cannot be built yet."""
-    line = Text(f'{name:<{NAME_WIDTH}} {size:>12,} bytes')
-    if seconds is not None:
-        line.append(f'  {seconds:6.1f} s', 'dim')
-    elif note or missing:
-        line.append(' ' * 10)  # where the time would be, so the notes line up
-    if note:
-        style = 'green' if note == 'identical' else 'yellow'
-        line.append(f'  {note}', style)
-    if missing:
-        line.append(f'  not built yet: {dict(missing)}', 'red')
-    console.print(line)
 
 
 def done(text):

@@ -1,5 +1,5 @@
 # Mutes every audio session of the game's players on this PC at the Windows level (the mixer's
-# per-app mute), whatever the game does with its own volume. -Watch keeps doing it every second;
+# per-app mute), whatever the game does with its own volume. -Watch keeps doing it twice a second;
 # -Until <pid> stops watching once that process is gone (run_player.py starts one per run).
 #   powershell -NoProfile -ExecutionPolicy Bypass -File tools/downgrade/mute_players.ps1 [-Watch] [-Name CrowCountry] [-Until <pid>]
 param([switch]$Watch, [string]$Name = 'CrowCountry', [int]$Until = 0)

@@ -15,9 +15,10 @@ import re
 from pathlib import Path
 
 import progress
-from common import WORK, game_data, log
+from asset_rules import current_text
+from common import BUILTIN_STANDARD, NAME_LINE, NUMBER, VECTOR, WORK, game_data, log, require
 
-STANDARD = re.compile(r'^  m_Shader: \{fileID: 46, guid: 0000000000000000f000000000000000, type: 0\}$', re.M)
+STANDARD = re.compile(rf'^  m_Shader: {re.escape(BUILTIN_STANDARD)}$', re.M)
 CACHE = WORK / 'material-keywords.json'
 
 
@@ -80,15 +81,10 @@ def original_keywords(game: Path):
     return materials
 
 
-# A number as the export writes it: the particle materials' _CameraFadeParams is {r: 0, g: Infinity, ...}, and a
-# key without it matched nothing, so those Fade particles lost _ALPHABLEND_ON (drawn opaque). float() reads all three.
-NUMBER = r'([-\d.e]+|-?Infinity|NaN)'
-VECTOR = rf'\{{r: {NUMBER}, g: {NUMBER}, b: {NUMBER}, a: {NUMBER}\}}'
-
-
-def exported_properties(text):
-    """(name, floats, colors, textures) of an exported material's YAML."""
-    name = re.search(r'^  m_Name: ?(.*)$', text, re.M)[1]
+def exported_properties(text, path):
+    """(name, floats, colors, textures) of an exported material's YAML, its numbers read with
+    common.NUMBER (which takes the export's Infinity and NaN)."""
+    name = require(NAME_LINE.search(text), path, 'm_Name')[1]
     floats = {m[1]: float(m[2]) for m in re.finditer(r'^      (\w+): ' + NUMBER + '$', text, re.M)}
     colors = {
         m[1]: [float(m[i]) for i in range(2, 6)] for m in re.finditer(r'^      (\w+): ' + VECTOR + '$', text, re.M)
@@ -96,8 +92,8 @@ def exported_properties(text):
     textures = {}
     for m in re.finditer(
         r'^      (\w+):\n        m_Texture: \{fileID: (-?\d+)[^\n]*\n'
-        r'        m_Scale: \{x: ([-\d.e]+), y: ([-\d.e]+)\}\n'
-        r'        m_Offset: \{x: ([-\d.e]+), y: ([-\d.e]+)\}',
+        rf'        m_Scale: \{{x: {NUMBER}, y: {NUMBER}\}}\n'
+        rf'        m_Offset: \{{x: {NUMBER}, y: {NUMBER}\}}',
         text,
         re.M,
     ):
@@ -136,8 +132,8 @@ def material_keyword_overlay(exported: Path, game: Path, overlay: dict):
     result, matched, derived, unknown, agree, disagree = {}, 0, 0, 0, 0, []
     for path in (exported / 'Assets').rglob('*.mat'):
         relative = path.relative_to(exported)
-        text = overlay[relative].decode('utf-8') if relative in overlay else path.read_text(encoding='utf-8')
-        name, floats, colors, textures = exported_properties(text)
+        text = current_text(exported, overlay, relative)
+        name, floats, colors, textures = exported_properties(text, relative)
         candidates = originals.get(key(name, floats, colors, textures), [])
         standard = STANDARD.search(text) is not None
         if len(candidates) == 1:

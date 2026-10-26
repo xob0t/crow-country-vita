@@ -13,9 +13,8 @@ using UnityEngine;
 // CrowMara, written last, reads those of every scene in the build settings, from this build or an earlier
 // one (a test build of a few scenes uses the full build's), and is left as it is when one is missing
 // (CROW_PLAYER_MERGE_PARTIAL=1 merges anyway, for test players of the scenes there are uses of).
-// From CROW_PLAYER_MERGE: on (the PS Vita's default), ab (the parts' meshes and the atlas records kept, so
-// -crow-player-merge off and noatlas work), off (other platforms' default; CROW_VITA_DATA=1 takes the PS
-// Vita's).
+// From CROW_PLAYER_MERGE (common.BUILD_SWITCHES): on (the default with the PS Vita's scene data), ab (the
+// parts' meshes and the atlas records kept, so -crow-player-merge off and noatlas work), off.
 class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
 {
     static Type merge;
@@ -23,13 +22,6 @@ class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
     public int callbackOrder
     {
         get { return 5; }  // after CrowProBuilderMeshes (the player's meshes) and CrowMergeScenes
-    }
-
-    internal static string Mode()
-    {
-        string mode = Environment.GetEnvironmentVariable("CROW_PLAYER_MERGE");
-        if (!string.IsNullOrEmpty(mode)) return mode;
-        return DowngradeBuild.VitaData ? "on" : "off";
     }
 
     static string UsesFolder
@@ -40,7 +32,7 @@ class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        string mode = Mode();
+        string mode = BuildUtil.Switch("CROW_PLAYER_MERGE");
         if (mode == "off") return;
         if (merge == null)
         {
@@ -66,7 +58,7 @@ class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
                 else missing.Add(name);
             }
             // CROW_PLAYER_MERGE_PARTIAL=1: merge with the uses there are (a test build's scenes before any full build).
-            if (missing.Count > 0 && Environment.GetEnvironmentVariable("CROW_PLAYER_MERGE_PARTIAL") == "1")
+            if (missing.Count > 0 && BuildUtil.Switch("CROW_PLAYER_MERGE_PARTIAL") == "1")
                 Debug.Log("DOWNGRADE_PLAYER_MERGE partial: no uses of " + missing.Count + " scenes; the merge reads the other " + (EditorBuildSettings.scenes.Count(s => s.enabled) - missing.Count));
             else if (missing.Count > 0)
             {
@@ -74,20 +66,20 @@ class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
                 return;
             }
             SetUpAtlas();
-            Func<Mesh, bool> canRead = Readable;
+            Func<Mesh, bool> canRead = BuildUtil.CanRead;
             var clock = System.Diagnostics.Stopwatch.StartNew();
             string result = (string)merge.GetMethod("PlayerProcess").Invoke(null, new object[] { scene, lines, mode == "ab", canRead });
             // The merged meshes and the atlases go to the GPU only, as the parts' meshes do.
             var unreadable = (System.Collections.IList)merge.GetField("Unreadable").GetValue(null);
             int count = 0;
-            foreach (UnityEngine.Object made in unreadable) if (MarkUnreadable(made)) count++;
+            foreach (UnityEngine.Object made in unreadable) if (BuildUtil.MarkUnreadable(made)) count++;
             unreadable.Clear();
             Type part = Type.GetType("CrowCompat.MergedRenderer, CrowCompat");
             foreach (GameObject root in scene.GetRootGameObjects())
                 foreach (Component merged in root.GetComponentsInChildren(part, true))
                 {
                     var filter = merged.GetComponent<MeshFilter>();
-                    if (filter != null && MarkUnreadable(filter.sharedMesh)) count++;
+                    if (filter != null && BuildUtil.MarkUnreadable(filter.sharedMesh)) count++;
                 }
             foreach (string line in result.Split('\n'))
                 if (line.Length > 0) Debug.Log("DOWNGRADE_" + line);
@@ -102,35 +94,11 @@ class CrowPlayerMerge : UnityEditor.Build.IProcessSceneWithReport
     // The atlas' source images, compression and variants: CrowMergeScenes' (set there too when the areas merge).
     static void SetUpAtlas()
     {
-        const System.Reflection.BindingFlags Static = System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic;
         if (merge.GetField("SourceImage").GetValue(null) == null)
-            merge.GetField("SourceImage").SetValue(null, Delegate.CreateDelegate(typeof(Func<Texture, Texture2D>), typeof(CrowMergeScenes).GetMethod("SourceImage", Static)));
+            merge.GetField("SourceImage").SetValue(null, (Func<Texture, Texture2D>)CrowMergeScenes.SourceImage);
         if (merge.GetField("CompressTexture").GetValue(null) == null)
-            merge.GetField("CompressTexture").SetValue(null, Delegate.CreateDelegate(typeof(Action<Texture2D, bool>), typeof(CrowMergeScenes).GetMethod("CompressTexture", Static)));
+            merge.GetField("CompressTexture").SetValue(null, (Action<Texture2D, bool>)CrowMergeScenes.CompressTexture);
         if (merge.GetField("VariantSets").GetValue(null) == null)
-            merge.GetField("VariantSets").SetValue(null, typeof(CrowMergeScenes).GetMethod("VariantSets", Static).Invoke(null, null));
-    }
-
-    static bool MarkUnreadable(UnityEngine.Object asset)
-    {
-        if (asset == null) return false;
-        var serialized = new SerializedObject(asset);
-        SerializedProperty readable = serialized.FindProperty("m_IsReadable");
-        if (readable == null) return false;
-        readable.boolValue = false;
-        serialized.ApplyModifiedPropertiesWithoutUndo();
-        return true;
-    }
-
-    static bool Readable(Mesh mesh)
-    {
-        try
-        {
-            return mesh.vertices.Length == mesh.vertexCount;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+            merge.GetField("VariantSets").SetValue(null, CrowMergeScenes.VariantSets());
     }
 }

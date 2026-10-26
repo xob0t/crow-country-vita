@@ -495,7 +495,7 @@ partial class DowngradeAssemblies
     //   handler bounds there take in the inserted code); also BeforeRets.
     // - InsertBefore: before an instruction whose operands are already on the stack, such as a
     //   call's added arguments (branches to the anchor skip the inserted code).
-    // - InsertAfter and CallAfter: after an instruction, with its value on the stack.
+    // - InsertAfter: after an instruction, with its value on the stack.
 
     static void Prepend(MethodDefinition method, params Instruction[] added)
     {
@@ -516,16 +516,6 @@ partial class DowngradeAssemblies
             il.InsertAfter(anchor, instruction);
             anchor = instruction;
         }
-    }
-
-    // Inserts "call target" after each instruction of a method that matches (where it leaves a
-    // value, the call takes it and leaves its own); the number of calls inserted.
-    static int CallAfter(MethodDefinition method, Func<Instruction, bool> match, MethodReference target)
-    {
-        ILProcessor il = method.Body.GetILProcessor();
-        Instruction[] found = method.Body.Instructions.Where(match).ToArray();
-        foreach (Instruction instruction in found) il.InsertAfter(instruction, il.Create(OpCodes.Call, target));
-        return found.Length;
     }
 
     // Inserts code before each ret of a method (branches to a ret run it too); the number of rets.

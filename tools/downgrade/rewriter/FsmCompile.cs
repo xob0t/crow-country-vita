@@ -35,6 +35,8 @@ using Mono.Cecil.Cil;
 partial class DowngradeAssemblies
 {
     const int MaxTemplate = 24, MaxDepth = 4;
+    // How deep the per-frame paths are followed from the actions' update methods into what they call.
+    const int MaxUpdatePathDepth = 4;
 
     // CROW_FSM_COMPILE=on when the assemblies are rewritten: the compiled bodies only (no original body, no
     // switch: FsmCompile.Mode does nothing); the default keeps both and the check body on Windows.
@@ -97,9 +99,9 @@ partial class DowngradeAssemblies
             foreach (MethodDefinition method in type.Methods)
                 if (method.HasBody && UpdateRoots.Contains(method.Name) && method.Parameters.Count <= 1 && seen.Add(method)) found.Add(method);
         }
-        // what they call in action classes of this module, to a depth of 4
+        // what they call in action classes of this module, to MaxUpdatePathDepth
         int from = 0;
-        for (int depth = 0; depth < 4; depth++)
+        for (int depth = 0; depth < MaxUpdatePathDepth; depth++)
         {
             int to = found.Count;
             for (int i = from; i < to; i++)

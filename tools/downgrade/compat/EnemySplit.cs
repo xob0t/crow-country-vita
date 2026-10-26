@@ -24,7 +24,7 @@ using UnityEngine.SceneManagement;
 // GetWorldDistance's 14.7 in Station Square's fight (19 Oct, profiling build, debris in and out per
 // window): a filter of a bit per identity hash, set for every transform that goes into either set and
 // cleared only when rebuilt from them, answers no for nearly all of them first (Filter; FsmCompile's
-// splitfilter=on|off; status.md, FSM compile).
+// splitfilter=on|off; status-log.md, FSM compile).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -102,8 +102,8 @@ namespace CrowCompat
             Array.Clear(filter, 0, filter.Length);
             foreach (Transform t in moved.Keys) Mark(t);
             foreach (Transform t in inside) Mark(t);
-            // The parked groups' ancestors (TouchAncestor asks the filter first; before 20 Oct a rebuild dropped them,
-            // so a child lookup on an ancestor after one no longer brought its parked UI back).
+            // The parked groups' ancestors (TouchAncestor asks the filter first: a rebuild that dropped them would stop a
+            // child lookup on an ancestor from bringing its parked UI back).
             foreach (Transform t in uiAncestors.Keys) Mark(t);
             foreach (Transform[] below in rigBelow.Values)
                 for (int i = 1; i < below.Length; i++) Mark(below[i]);
@@ -249,7 +249,7 @@ namespace CrowCompat
         // Switched-off subtrees of the overlay canvases parked below a holder outside any canvas. They go
         // back as the enemies' parts do (switched on, reparented, a world pose or a parent read on them or
         // inside them) and also when the game's code looks at their old parent's children or at any
-        // ancestor's (GetChild, childCount, foreach, Find, sibling indices, GetComponent(s)InChildren with
+        // ancestor's (GetChild, childCount, foreach, Find, sibling indices, GetComponentsInChildren<T> with
         // inactive ones): all the parked children of an old parent go back together, in their order.
         // The camera rig's switched-off subtrees (RigPark, UiPark.cs) are parked and come back the same way.
         static readonly Dictionary<Transform, List<Transform>> uiByParent = new Dictionary<Transform, List<Transform>>(Same.Comparer);
@@ -599,19 +599,7 @@ namespace CrowCompat
             return t.GetSiblingIndex();
         }
 
-        public static void SetSiblingIndex(Transform t, int index)
-        {
-            Touch(t, false);
-            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "SetSiblingIndex");
-            t.SetSiblingIndex(index);
-        }
 
-        public static void SetAsFirstSibling(Transform t)
-        {
-            Touch(t, false);
-            if (!ReferenceEquals(t, null) && uiAncestors.Count != 0) TouchAncestor(t.parent, "SetAsFirstSibling");
-            t.SetAsFirstSibling();
-        }
 
         public static void SetAsLastSibling(Transform t)
         {
@@ -636,29 +624,9 @@ namespace CrowCompat
             return ReferenceEquals(g, null) ? null : g.transform;
         }
 
-        public static Component[] ComponentsInChildren(Component c, Type type, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentsInChildren");
-            return c.GetComponentsInChildren(type, includeInactive);
-        }
 
-        public static Component[] ComponentsInChildren(GameObject g, Type type, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentsInChildren");
-            return g.GetComponentsInChildren(type, includeInactive);
-        }
 
-        public static Component ComponentInChildren(Component c, Type type, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentInChildren");
-            return c.GetComponentInChildren(type, includeInactive);
-        }
 
-        public static Component ComponentInChildren(GameObject g, Type type, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentInChildren");
-            return g.GetComponentInChildren(type, includeInactive);
-        }
 
         public static T[] ComponentsInChildrenT<T>(Component c, bool includeInactive)
         {
@@ -672,42 +640,12 @@ namespace CrowCompat
             return g.GetComponentsInChildren<T>(includeInactive);
         }
 
-        public static void ComponentsInChildrenList<T>(Component c, bool includeInactive, List<T> result)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentsInChildren");
-            c.GetComponentsInChildren(includeInactive, result);
-        }
 
-        public static void ComponentsInChildrenList<T>(GameObject g, bool includeInactive, List<T> result)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentsInChildren");
-            g.GetComponentsInChildren(includeInactive, result);
-        }
 
-        public static T ComponentInChildrenT<T>(Component c, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(c), "GetComponentInChildren");
-            return c.GetComponentInChildren<T>(includeInactive);
-        }
 
-        public static T ComponentInChildrenT<T>(GameObject g, bool includeInactive)
-        {
-            if (includeInactive && uiAncestors.Count != 0) TouchAncestor(Of(g), "GetComponentInChildren");
-            return g.GetComponentInChildren<T>(includeInactive);
-        }
 
         // The parent side: a moved part (or anything inside it) looking up its parents.
-        public static Component ComponentInParent(Component c, Type type)
-        {
-            Touch(Of(c), false);
-            return c.GetComponentInParent(type);
-        }
 
-        public static Component ComponentInParent(GameObject g, Type type)
-        {
-            Touch(Of(g), false);
-            return g.GetComponentInParent(type);
-        }
 
         public static T ComponentInParentT<T>(Component c)
         {
@@ -721,41 +659,11 @@ namespace CrowCompat
             return g.GetComponentInParent<T>();
         }
 
-        public static Component[] ComponentsInParent(Component c, Type type, bool includeInactive)
-        {
-            Touch(Of(c), false);
-            return c.GetComponentsInParent(type, includeInactive);
-        }
 
-        public static Component[] ComponentsInParent(GameObject g, Type type, bool includeInactive)
-        {
-            Touch(Of(g), false);
-            return g.GetComponentsInParent(type, includeInactive);
-        }
 
-        public static T[] ComponentsInParentT<T>(Component c, bool includeInactive)
-        {
-            Touch(Of(c), false);
-            return c.GetComponentsInParent<T>(includeInactive);
-        }
 
-        public static T[] ComponentsInParentT<T>(GameObject g, bool includeInactive)
-        {
-            Touch(Of(g), false);
-            return g.GetComponentsInParent<T>(includeInactive);
-        }
 
-        public static T[] ComponentsInParentT0<T>(Component c)
-        {
-            Touch(Of(c), false);
-            return c.GetComponentsInParent<T>();
-        }
 
-        public static T[] ComponentsInParentT0<T>(GameObject g)
-        {
-            Touch(Of(g), false);
-            return g.GetComponentsInParent<T>();
-        }
 
         // A summary for Fight's windows: subtrees out, put back (switched on / touched / touched inside),
         // misses (check).

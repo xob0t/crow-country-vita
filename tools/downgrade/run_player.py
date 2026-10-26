@@ -4,13 +4,13 @@ launcher asks, but a window on another desktop (CreateDesktop) cannot come in fr
 The player runs windowed at 960x544 (-crow-windowed) and muted: -crow-mute, and Windows' per-app
 mute of its audio sessions for the whole run (mute_players.ps1). The project keeps
 runInBackground on. The player's log goes to <log>: its standard output and error are a handle to
-the file it inherits (standard handles don't depend on the desktop). Until 21 Oct cmd's redirection
-did that, and cmd took >, |, &, ^ and % in the player's arguments for its own: `-crow-scene
-Pool>Roadside` ran Pool and wrote a file named Roadside.
+the file it inherits (standard handles don't depend on the desktop), so no shell sees the player's
+arguments (cmd's redirection took the > of `-crow-scene Pool>Roadside` for its own).
 
     uv run tools/downgrade/run_player.py <exe> <log> [--timeout s] -- <player arguments...>
 
-Exits with the player's exit code; a player still running after --timeout seconds is killed.
+Exits with the player's exit code; a player still running after --timeout seconds (default 600) is
+killed, with whatever it started, and the exit code is 124 (TIMED_OUT).
 
 The test tools run a copy of a build (player_copy) without Steam's steam_api library and
 steam_appid.txt.
@@ -33,6 +33,7 @@ DESKTOP = 'crow-country-runs'
 GENERIC_ALL = 0x10000000
 CREATE_NO_WINDOW = 0x08000000
 WAIT_TIMEOUT = 0x102
+TIMED_OUT = 124  # run's code for a player killed at the timeout (as timeout(1) has it)
 
 
 class StartupInfo(ctypes.Structure):
@@ -125,7 +126,7 @@ kernel32.CloseHandle.argtypes = [wt.HANDLE]
 
 
 def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
-    """Runs the player on DESKTOP; returns its exit code (1 if it was killed at the timeout).
+    """Runs the player on DESKTOP; returns its exit code (TIMED_OUT if it was killed at the timeout).
     on_start(pid), if given, is called with the player's process id once it runs and may return a
     function to call when the run ends (fightbench.py's vitalike duty cycle)."""
     desktop = user32.CreateDesktopW(DESKTOP, None, None, 0, GENERIC_ALL, None)
@@ -221,7 +222,7 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
         if waited == WAIT_TIMEOUT:
             # The player and anything it started (a crash handler).
             subprocess.run(['taskkill', '/T', '/F', '/PID', str(info.dwProcessId)], capture_output=True)
-            return 1
+            return TIMED_OUT
         code = wt.DWORD()
         kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))
         return code.value

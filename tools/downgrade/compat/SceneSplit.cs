@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -194,7 +195,7 @@ namespace CrowCompat
                     if (!place.Logged && count > 0)
                     {
                         place.Logged = true;
-                        Debug.Log("CROW_SPLIT_FOLLOW " + Perf.Path(place.Old, 4) + " moved: " + count + " parts taken out from below it follow it");
+                        Debug.Log("CROW_SPLIT_FOLLOW " + Hierarchy.Path(place.Old, 4) + " moved: " + count + " parts taken out from below it follow it");
                     }
                 }
                 float time = Time.realtimeSinceStartup;
@@ -203,7 +204,7 @@ namespace CrowCompat
                     summaryAt = time + 30f;
                     Debug.Log("CROW_SPLIT_FOLLOW " + places.Count + " old parents watched, " + moves + " moves, " + followed + " parts placed; most: " +
                               string.Join(" ", places.Where(p => p.Moves > 0 && p.Old != null).OrderByDescending(p => p.Moves).Take(4)
-                                  .Select(p => Perf.Path(p.Old, 3) + "=" + p.Moves).ToArray()));
+                                  .Select(p => Hierarchy.Path(p.Old, 3) + "=" + p.Moves).ToArray()));
                     moves = followed = 0;
                     foreach (Place p in places) p.Moves = 0;
                 }
@@ -231,8 +232,9 @@ namespace CrowCompat
         internal static void Install(string[] args)
         {
             string value = CrowFlags.Value(args, "-crow-scene-split");
-            Merge.MoverDebug = Array.IndexOf(args, "-crow-split-mover-log") >= 0;
+            Merge.MoverDebug = CrowFlags.Has(args, "-crow-split-mover-log");
             SplitFollow.Install(args);  // first: its frame step runs before the check's
+            MoverFinder.Install(args);
             if (value != null) Set(value);
         }
 
@@ -379,7 +381,7 @@ namespace CrowCompat
             if (active == wanted && placed) return;
             differences++;
             if (!reported.Add(part)) return;
-            Debug.Log("CROW_SPLIT_CHECK " + Perf.Path(part.transform, 3) + " (from " + Perf.Path(part.parent, 3) + "): " +
+            Debug.Log("CROW_SPLIT_CHECK " + Hierarchy.Path(part.transform, 3) + " (from " + Hierarchy.Path(part.parent, 3) + "): " +
                       (active == wanted ? "" : "active " + active + " where it would be " + wanted + " ") + (placed ? "" : "moved from its place (" + (here.GetColumn(3) - there.GetColumn(3)).magnitude.ToString("0.###", CultureInfo.InvariantCulture) + " m, parent " + (part.transform.parent == null ? "none" : part.transform.parent.name) + ")"));
         }
     }
@@ -409,6 +411,192 @@ namespace CrowCompat
         void OnDestroy()
         {
             if (part != null) Destroy(part);
+        }
+    }
+
+    // -crow-find-movers <name> [s]: what names a part that Merge.Split's movers would take out. s seconds (default 5)
+    // after each area load, every action of every state of every FSM whose GameObject parameters name an object
+    // called name (as they resolve then: variables by their current value), with the variable's name
+    // (CROW_FIND_MOVER).
+    static class MoverFinder
+    {
+        const BindingFlags Fields = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
+        static Type fsmComponent, ownerType, fsmGameObjectType;
+        static PropertyInfo fsmProperty, statesProperty, stateName, actionsProperty, valueProperty, ownerGameObject, useVariable, variableName, fsmName;
+        static MethodInfo ownerTarget;
+        static readonly Dictionary<Type, FieldInfo[]> actionFields = new Dictionary<Type, FieldInfo[]>();
+
+        internal static void Install(string[] args)
+        {
+            string name = CrowFlags.Value(args, "-crow-find-movers");
+            if (name == null) return;
+            float after = CrowFlags.NumberAt(args, "-crow-find-movers", 2, 5f), due = -1f;
+            CrowEvents.Loaded("MoverFinder.sceneLoaded", (scene, mode) =>
+            {
+                if (Scenes.IsArea(scene)) due = Time.realtimeSinceStartup + after;
+            });
+            CrowEvents.Canvases("MoverFinder.willRenderCanvases", () =>
+            {
+                if (due < 0f || Time.realtimeSinceStartup < due) return;
+                due = -1f;
+                Find(name);
+            });
+        }
+
+        static bool Reflect()
+        {
+            if (fsmComponent != null) return true;
+            Type component = GameTypes.PlayMakerFsm;
+            ownerType = Type.GetType("HutongGames.PlayMaker.FsmOwnerDefault, PlayMaker");
+            fsmGameObjectType = Type.GetType("HutongGames.PlayMaker.FsmGameObject, PlayMaker");
+            if (component == null || ownerType == null || fsmGameObjectType == null) return false;
+            fsmProperty = component.GetProperty("Fsm");
+            statesProperty = fsmProperty.PropertyType.GetProperty("States");
+            PropertyInfo activeState = fsmProperty.PropertyType.GetProperty("ActiveState");
+            stateName = activeState.PropertyType.GetProperty("Name");
+            actionsProperty = activeState.PropertyType.GetProperty("Actions");
+            valueProperty = fsmGameObjectType.GetProperty("Value");
+            ownerGameObject = ownerType.GetProperty("GameObject");
+            useVariable = fsmGameObjectType.GetProperty("UseVariable");
+            variableName = fsmGameObjectType.GetProperty("Name");
+            ownerTarget = fsmProperty.PropertyType.GetMethod("GetOwnerDefaultTarget");
+            fsmName = fsmProperty.PropertyType.GetProperty("Name");
+            fsmComponent = component;
+            return true;
+        }
+
+        static void Find(string name)
+        {
+            if (!Reflect()) return;
+            int found = 0;
+            foreach (UnityEngine.Object component in Resources.FindObjectsOfTypeAll(fsmComponent))
+            {
+                var behaviour = component as MonoBehaviour;
+                if (behaviour == null || !behaviour.gameObject.scene.IsValid()) continue;
+                object fsm = fsmProperty.GetValue(component, null);
+                var all = fsm == null ? null : statesProperty.GetValue(fsm, null) as Array;
+                if (all == null) continue;
+                foreach (object state in all)
+                {
+                    var actions = actionsProperty.GetValue(state, null) as Array;
+                    if (actions == null) continue;
+                    foreach (object action in actions)
+                    {
+                        if (action == null) continue;
+                        foreach (FieldInfo field in FieldsOf(action.GetType()))
+                        {
+                            object value = field.GetValue(action);
+                            GameObject target = null;
+                            object variable = value;
+                            try
+                            {
+                                if (value != null && field.FieldType == ownerType)
+                                {
+                                    target = ownerTarget.Invoke(fsm, new[] { value }) as GameObject;
+                                    variable = ownerGameObject.GetValue(value, null);
+                                }
+                                else if (value != null) target = valueProperty.GetValue(value, null) as GameObject;
+                            }
+                            catch (Exception)
+                            {
+                                continue;
+                            }
+                            if (target == null || target.name != name) continue;
+                            string via = variable != null && (bool)useVariable.GetValue(variable, null) ? " variable=" + variableName.GetValue(variable, null) : "";
+                            Debug.Log("CROW_FIND_MOVER " + name + " <- " + Hierarchy.Path(behaviour.transform, 5) + " fsm=" + fsmName.GetValue(fsm, null) +
+                                      " state=" + stateName.GetValue(state, null) + " action=" + action.GetType().Name + " field=" + field.Name + via);
+                            found++;
+                        }
+                    }
+                }
+            }
+            Debug.Log("CROW_FIND_MOVER " + name + ": " + found + " actions");
+        }
+
+        // An action type's FsmOwnerDefault and FsmGameObject fields.
+        static FieldInfo[] FieldsOf(Type type)
+        {
+            FieldInfo[] fields;
+            if (actionFields.TryGetValue(type, out fields)) return fields;
+            fields = type.GetFields(Fields).Where(f => f.FieldType == ownerType || f.FieldType == fsmGameObjectType).ToArray();
+            return actionFields[type] = fields;
+        }
+    }
+
+    // The player's prefab instance (CharacterCameraPrefab, kept across areas) is one transform hierarchy
+    // of 10,251 transforms; 6,304 of them are its menus' canvases (UI Canvases: the gameplay UI, pause,
+    // map and inventory; screen-space overlays, nearly all inactive). Mara's breathing moves about 560
+    // of the others every frame, and each engine system that follows transform changes (renderers,
+    // particle systems...) then walks the whole hierarchy. On the PS Vita, UI Canvases becomes a root of
+    // its own once the player is kept (in DontDestroyOnLoad), right after the player's root, so the
+    // overlay canvases sort as before. A placeholder in its old place (SplitMirror) makes it follow the
+    // player's activation (CharacterAndCamera's Activate, Deactivate and Reset) and destruction. No FSM
+    // looks children up from the player's root (180 child lookups checked in Roadside), and the game's
+    // scripts reach the menus through references. Roadside: UpdateAllRenderers 2.7 -> 1.9 ms,
+    // ParticleSystemBeginUpdateAll 1.6 -> 0.8 ms, the main thread's work per frame 40.4 -> 39.5 ms.
+    // Checked on the PS Vita: the pause menu, examining, a dialogue, Roadside -> Station Square.
+    // Not split: the camera rig (camera_follow_player, 2,890 transforms). With it a root of its own, a
+    // Title FSM's Rewired action (RewiredGetJoystickCount) threw on the way back to the title.
+    static class PlayerSplit
+    {
+        static readonly List<string> parts = new List<string>();
+        static bool hooked;
+
+        public static void Install(string[] args)
+        {
+            string value = CrowFlags.Value(args, "-crow-player-split", "ui");
+            if (value != null) Set(value);
+        }
+
+        internal static void Set(string value)
+        {
+            foreach (string name in value.Split('+'))
+            {
+                // Children's names with '_' for a space.
+                string part = name == "ui" ? "UI_Canvases" : name == "camera" ? "camera_follow_player" : null;
+                if (part != null && !parts.Contains(part)) parts.Add(part);
+            }
+            if (parts.Count == 0) return;
+            if (!hooked)
+            {
+                hooked = true;
+                CrowEvents.Loaded("PlayerSplit.sceneLoaded", (scene, mode) => Split());
+            }
+            Split();
+        }
+
+        // At each scene load: an area's MaraLoader has activated the player in its Awake by then.
+        static void Split()
+        {
+            GameObject player = MaraScene.FindPlayer();
+            Transform root = player == null ? null : player.transform.root;
+            if (root == null || root.gameObject.scene.name != Scenes.Kept) return;
+            if (root.position != Vector3.zero || root.rotation != Quaternion.identity || root.lossyScale != Vector3.one)
+            {
+                Debug.Log("CROW_SPLIT the player's root isn't at the origin; left whole");
+                return;
+            }
+            // The last child first, each made the root after the player's: they keep their order.
+            var children = new List<Transform>();
+            foreach (Transform child in root)
+                if (parts.Contains(child.name.Replace(' ', '_'))) children.Add(child);
+            foreach (Transform part in children.OrderByDescending(t => t.GetSiblingIndex()))
+            {
+                int before = root.hierarchyCount;
+                var holder = new GameObject(part.name + " (split)");
+                holder.SetActive(false);
+                holder.transform.SetParent(root, false);
+                holder.transform.SetSiblingIndex(part.GetSiblingIndex());
+                var mirror = holder.AddComponent<SplitMirror>();
+                mirror.part = part.gameObject;
+                mirror.active = part.gameObject.activeSelf;
+                part.SetParent(null, true);
+                UnityEngine.Object.DontDestroyOnLoad(part.gameObject);
+                part.SetSiblingIndex(root.GetSiblingIndex() + 1);
+                if (!root.gameObject.activeInHierarchy) part.gameObject.SetActive(false);
+                holder.SetActive(true);
+                Debug.Log("CROW_SPLIT " + part.name + " a root of its own: the player's hierarchy " + before + " -> " + root.hierarchyCount + " transforms");
+            }
         }
     }
 }

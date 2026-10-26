@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
@@ -21,8 +20,9 @@ using UnityEngine;
 //     Awake and OnEnable; its DoRandom is private and no FSM or script calls it).
 // No game script looks these up (GetComponent and the like), and no FSM names them in a string.
 // A candidate stays if anything that stays references it (any serialized object reference of the
-// scene's other behaviours, FSMs included, and of candidates that stay). From CROW_STRIP: on (the PS
-// Vita's default) or off (other platforms' default). The project's scene files don't change.
+// scene's other behaviours, FSMs included, and of candidates that stay; strings don't count, as no FSM
+// names these). From CROW_STRIP (common.BUILD_SWITCHES): on (the default with the PS Vita's scene data) or
+// off. The project's scene files don't change.
 class CrowStripScenes : UnityEditor.Build.IProcessSceneWithReport
 {
     static readonly HashSet<string> Inert = new HashSet<string>
@@ -34,33 +34,10 @@ class CrowStripScenes : UnityEditor.Build.IProcessSceneWithReport
     {
         "RandomRotation", "RandomScale", "RandomPosition", "RandomMaterial", "RandomFlip", "RandomRotationState",
     };
-    static readonly HashSet<string> Primitive = new HashSet<string>
-    {
-        "int", "unsigned int", "SInt8", "UInt8", "SInt16", "UInt16", "SInt64", "UInt64", "float", "double", "bool", "char", "string",
-        "Vector2f", "Vector3f", "Vector4f", "Quaternionf", "ColorRGBA", "Rectf",
-    };
-    static readonly string[] Skipped = { "Logos", "Title", "CrowMara" };
 
     public int callbackOrder
     {
         get { return 20; }  // after the merge (which bakes the random scripts), the split and the MeshCombineStudio bake
-    }
-
-    static string Mode()
-    {
-        string mode = Environment.GetEnvironmentVariable("CROW_STRIP");
-        if (!string.IsNullOrEmpty(mode)) return mode;
-        return EditorUserBuildSettings.activeBuildTarget == BuildTarget.PSP2 ? "on" : "off";
-    }
-
-    static object Field(object target, string name)
-    {
-        for (Type type = target.GetType(); type != null; type = type.BaseType)
-        {
-            FieldInfo field = type.GetField(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-            if (field != null) return field.GetValue(target);
-        }
-        return null;
     }
 
     static bool Candidate(MonoBehaviour behaviour)
@@ -68,33 +45,13 @@ class CrowStripScenes : UnityEditor.Build.IProcessSceneWithReport
         string name = behaviour.GetType().Name;
         if (Inert.Contains(name)) return true;
         if (!Baked.Contains(name)) return false;
-        return !(bool)(Field(behaviour, "onAwake") ?? true) && !(bool)(Field(behaviour, "onEnable") ?? true);
-    }
-
-    // Every object a behaviour's serialized data references (arrays of plain values skipped).
-    static void References(UnityEngine.Object behaviour, HashSet<UnityEngine.Object> into)
-    {
-        var serialized = new SerializedObject(behaviour);
-        SerializedProperty property = serialized.GetIterator();
-        bool enter = true;
-        while (property.Next(enter))
-        {
-            enter = true;
-            if (property.propertyType == SerializedPropertyType.ObjectReference)
-            {
-                UnityEngine.Object target = property.objectReferenceValue;
-                if (target != null) into.Add(target);
-                enter = false;
-            }
-            else if (property.propertyType == SerializedPropertyType.String) enter = false;
-            else if (property.isArray && Primitive.Contains(property.arrayElementType)) enter = false;
-        }
+        return !(bool)(BuildUtil.Field(behaviour, "onAwake") ?? true) && !(bool)(BuildUtil.Field(behaviour, "onEnable") ?? true);
     }
 
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        if (Mode() != "on" || Skipped.Contains(scene.name)) return;
+        if (BuildUtil.Switch("CROW_STRIP") != "on" || BuildUtil.SkippedScenes.Contains(scene.name)) return;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         var candidates = new HashSet<MonoBehaviour>();
         var others = new List<MonoBehaviour>();
@@ -107,7 +64,7 @@ class CrowStripScenes : UnityEditor.Build.IProcessSceneWithReport
             }
         if (candidates.Count == 0) return;
         var referenced = new HashSet<UnityEngine.Object>();
-        foreach (MonoBehaviour behaviour in others) References(behaviour, referenced);
+        foreach (MonoBehaviour behaviour in others) BuildUtil.Walk(behaviour, referenced, null, false, null);
         // Candidates that stay keep what they reference.
         var kept = new HashSet<MonoBehaviour>();
         bool grew = true;
@@ -118,7 +75,7 @@ class CrowStripScenes : UnityEditor.Build.IProcessSceneWithReport
                 if (!kept.Contains(candidate) && referenced.Contains(candidate))
                 {
                     kept.Add(candidate);
-                    References(candidate, referenced);
+                    BuildUtil.Walk(candidate, referenced, null, false, null);
                     grew = true;
                 }
         }

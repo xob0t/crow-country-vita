@@ -29,25 +29,9 @@ using UnityEngine.SceneManagement;
 //     tweens on a Transform (the fixed and manual updates keep theirs).
 //   -crow-decor-log           every 10 s (CROW_DECOR): targets looked at, the share slowed, runs and
 //                             skips, what was refused and why
-// -crow-cycle / -crow-ab take decor=on|off, decorhidden=, decorfar=, decorfarrate=. -crow-decor-visible <n>
-// (Cuts.cs parses it; decorvisible=, the PS Vita's 2): decoration that was drawn runs on one frame in n too,
-// with the frames' time.
-// The probe:
-//   -crow-motion-report <s>   every s seconds, for 6 frames in a row, every transform in the loaded
-//                             scenes that changed in the frame (Transform.hasChanged, cleared each
-//                             frame at onBeforeRender), grouped by where the change starts (a changed
-//                             transform whose parent didn't change) and by what drives it there: a
-//                             DOTween tween on it (loop: infinite loops), the game's animation scripts
-//                             and TransformLock, a PlayMaker action of the FSM's active state that names
-//                             it, an Animator or Animation above it (with its culling mode), a
-//                             non-kinematic rigidbody above it, enemies, or else its components; player/
-//                             before those of the DontDestroyOnLoad roots. CROW_MOTION: per frame, the
-//                             changed transforms, the starts, the hierarchies they are in and those
-//                             hierarchies' transforms (the dispatch walks a changed hierarchy whole);
-//                             CROW_MOTION_SRC per source: starts and changed transforms a frame, the
-//                             share of starts with a renderer drawn (any camera) below them, the share
-//                             written with the value they had (a write that changes nothing still
-//                             counts as a change), the hierarchies; CROW_MOTION_EX: examples.
+// -crow-cycle / -crow-ab take decor=on|off, decorhidden=, decorfar=, decorfarrate=, decorvisible=. -crow-decor-visible <n>
+// (the PS Vita's 2; Cuts' cuts= sets it too): decoration that was drawn runs on one frame in n too, with the frames'
+// time.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -56,70 +40,30 @@ namespace CrowCompat
         // The rules (see the top): on by default on the PS Vita, off elsewhere (-crow-decor on|off).
         internal static bool On = Application.platform == RuntimePlatform.PSP2;
         internal static int HiddenDivisor = 4, FarDivisor = 2;
-        // -crow-decor-visible <n> (Cuts.cs sets the PS Vita's 2): decoration that was drawn runs on one frame in n.
+        // -crow-decor-visible <n> (decorvisible=; the PS Vita's default 2, also set by Cuts' cuts=): decoration that was
+        // drawn runs on one frame in n.
         internal static int VisibleDivisor = 1;
         internal static float Far;  // metres from the camera; 0: no far rule
         static bool log;
 
         internal static void Install(string[] args)
         {
-            float report = CrowFlags.Number(args, "-crow-motion-report", -1f);
-            if (report > 0f) MotionReport.Install(report);
             string mode = CrowFlags.Value(args, "-crow-decor");
             if (mode != null) On = mode == "on";
             DecorTweens.Active = On;
             HiddenDivisor = Divisor(CrowFlags.Number(args, "-crow-decor-hidden", HiddenDivisor));
             FarDivisor = Divisor(CrowFlags.Number(args, "-crow-decor-far-rate", FarDivisor));
             Far = CrowFlags.Number(args, "-crow-decor-far", Far);
-            log = Array.IndexOf(args, "-crow-decor-log") >= 0;
+            SetVisible(CrowFlags.Value(args, "-crow-decor-visible", "2", "1"));
+            log = CrowFlags.Has(args, "-crow-decor-log");
             CrowEvents.Unloaded("Decor.sceneUnloaded", scene => Views.Clear());
             if (log) CrowEvents.Canvases("Views.Log", Views.Log);
-            string moverName = CrowFlags.Value(args, "-crow-find-movers");
-            if (moverName != null)
-            {
-                float after = 5f;
-                int at = Array.IndexOf(args, "-crow-find-movers");
-                if (at + 2 < args.Length) float.TryParse(args[at + 2], NumberStyles.Float, CultureInfo.InvariantCulture, out after);
-                float due = -1f;
-                CrowEvents.Loaded("Decor.sceneLoaded", (scene, loadMode) =>
-                {
-                    if (Scenes.IsArea(scene)) due = Time.realtimeSinceStartup + after;
-                });
-                CrowEvents.Canvases("Decor.willRenderCanvases", () =>
-                {
-                    if (due < 0f || Time.realtimeSinceStartup < due) return;
-                    due = -1f;
-                    MotionReport.FindMovers(moverName);
-                });
-            }
-            if (Array.IndexOf(args, "-crow-player-tree") >= 0)
-                CrowEvents.Loaded("Decor.sceneLoaded 2", (scene, loadMode) =>
-                {
-                    if (!Scenes.IsArea(scene)) return;
-                    GameObject player = MaraScene.FindPlayer();
-                    if (player == null) return;
-                    var line = new StringBuilder("CROW_PLAYER_TREE ").Append(player.transform.root.hierarchyCount);
-                    Tree(player.transform.root, 0, 10, line);
-                    Debug.Log(line.ToString());
-                    // What Merge.Split's analysis (with movers) would take out of the player's hierarchy.
-                    bool movers = Merge.SplitMovers;
-                    Merge.SplitMovers = true;
-                    Debug.Log("CROW_PLAYER_TREE " + Merge.Split(player.scene, false));
-                    Merge.SplitMovers = movers;
-                });
         }
 
-        // -crow-player-tree: the player's hierarchy below its root, subtrees of 40 transforms or more to
-        // depth levels, with their size and whether they are active.
-        static void Tree(Transform node, int level, int depth, StringBuilder line)
+        internal static void SetVisible(string value)
         {
-            foreach (Transform child in node)
-            {
-                int size = child.GetComponentsInChildren<Transform>(true).Length;
-                if (size < 40) continue;
-                line.Append(" | ").Append(new string('>', level)).Append(child.name.Replace(' ', '_')).Append('=').Append(size).Append(child.gameObject.activeInHierarchy ? "" : "(off)");
-                if (level + 1 < depth) Tree(child, level + 1, depth, line);
-            }
+            float number;
+            VisibleDivisor = Divisor(float.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out number) ? number : 1f);
         }
 
         static int Divisor(float value)
@@ -147,6 +91,9 @@ namespace CrowCompat
                     break;
                 case "decorfarrate":
                     FarDivisor = Divisor(number);
+                    break;
+                case "decorvisible":
+                    VisibleDivisor = Divisor(number);
                     break;
                 default:
                     return false;
@@ -242,13 +189,13 @@ namespace CrowCompat
         {
             kind = View.Decoration;
             enemy = null;
-            if (target.gameObject.scene.name == "DontDestroyOnLoad")
+            if (target.gameObject.scene.name == Scenes.Kept)
             {
                 if (!Cuts.IsBreath(target)) return "player";
                 kind = View.Breath;
                 return null;
             }
-            Transform root = Cuts.EnemyRoot(target);
+            Transform root = EnemyNames.RootOf(target);
             if (root != null)
             {
                 enemy = Enemies.Of(root);
@@ -266,7 +213,7 @@ namespace CrowCompat
             if (target.GetComponentInParent<Canvas>() != null || target.GetComponentsInChildren<Canvas>(true).Length > 0) return "ui";
             for (Transform t = target; t != null; t = t.parent)
             {
-                if (t.GetComponent<Rigidbody>() != null) return t.name.StartsWith("Enemy ", StringComparison.Ordinal) ? "enemy" : "body";
+                if (t.GetComponent<Rigidbody>() != null) return EnemyNames.Named(t.name) ? "enemy" : "body";
                 if (t.GetComponent<Camera>() != null) return "camera";
             }
             return null;
@@ -336,16 +283,6 @@ namespace CrowCompat
         // Whether a view with this frame's divisor (above 0) runs this frame.
         internal static bool RunsAt(View view, int frame, int divisor)
         {
-            bool runs = divisor <= 1 || (frame + view.Phase) % divisor == 0;
-            if (runs) ran++;
-            else skipped++;
-            return runs;
-        }
-
-        // Whether a view runs this frame.
-        internal static bool Runs(View view, int frame)
-        {
-            int divisor = Divisor(view, frame);
             bool runs = divisor <= 1 || (frame + view.Phase) % divisor == 0;
             if (runs) ran++;
             else skipped++;
@@ -500,518 +437,6 @@ namespace CrowCompat
                     targetField = type.GetField("target", BindingFlags.Public | BindingFlags.Instance | BindingFlags.DeclaredOnly);
             Transform target = targetField == null ? null : targetField.GetValue(script) as Transform;
             return target != null ? target : script.transform;
-        }
-    }
-
-    static class MotionReport
-    {
-        const int Samples = 6;
-        const BindingFlags Fields = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
-        static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
-        static float every, next;
-        static int sample = -1;
-        static Transform[] all;
-        static Vector3[] position, scale;
-        static Quaternion[] rotation;
-        static Dictionary<Transform, int> index;
-        static Dictionary<Transform, string> labels, details;
-        static Dictionary<Transform, bool> visible;
-        static Dictionary<Transform, string> drivers;  // exact targets: DOTween, scripts, FSM actions
-        static Dictionary<Transform, string> driverDetails, weak;
-        static int changedSum, startSum, hierarchySum, hierarchyTransformSum;
-
-        sealed class Source
-        {
-            public int Starts, Changed, Visible, Same;
-            public readonly HashSet<Transform> Roots = new HashSet<Transform>();
-            public readonly Dictionary<Transform, int> Examples = new Dictionary<Transform, int>();
-        }
-
-        static Dictionary<string, Source> sources;
-
-        public static void Install(float seconds)
-        {
-            every = seconds;
-            next = Time.realtimeSinceStartup + seconds;
-            CrowEvents.BeforeRender("MotionReport.Tick", Tick);
-            Debug.Log("CROW_MOTION on: every " + seconds + " s, " + Samples + " frames");
-        }
-
-        static void Tick()
-        {
-            try
-            {
-                Step();
-            }
-            catch (Exception exception)
-            {
-                Debug.Log("CROW_MOTION failed: " + exception);
-                sample = -1;
-                next = Time.realtimeSinceStartup + every;
-            }
-        }
-
-        static void Step()
-        {
-            if (sample < 0)
-            {
-                if (Time.realtimeSinceStartup < next) return;
-                Begin();
-                return;
-            }
-            Measure();
-            if (++sample < Samples) return;
-            Report();
-            sample = -1;
-            all = null;
-            next = Time.realtimeSinceStartup + every;
-        }
-
-        static void Begin()
-        {
-            all = Resources.FindObjectsOfTypeAll<Transform>().Where(t => t != null && t.gameObject.scene.IsValid()).ToArray();
-            position = new Vector3[all.Length];
-            scale = new Vector3[all.Length];
-            rotation = new Quaternion[all.Length];
-            index = new Dictionary<Transform, int>(all.Length);
-            for (int i = 0; i < all.Length; i++)
-            {
-                Transform t = all[i];
-                index[t] = i;
-                position[i] = t.localPosition;
-                rotation[i] = t.localRotation;
-                scale[i] = t.localScale;
-                t.hasChanged = false;
-            }
-            labels = new Dictionary<Transform, string>();
-            details = new Dictionary<Transform, string>();
-            visible = new Dictionary<Transform, bool>();
-            sources = new Dictionary<string, Source>();
-            changedSum = startSum = hierarchySum = hierarchyTransformSum = 0;
-            drivers = new Dictionary<Transform, string>();
-            driverDetails = new Dictionary<Transform, string>();
-            weak = new Dictionary<Transform, string>();
-            try { Tweens(); } catch (Exception e) { Debug.Log("CROW_MOTION tweens: " + e.GetType().Name + " " + e.Message); }
-            try { Scripts(); } catch (Exception e) { Debug.Log("CROW_MOTION scripts: " + e.GetType().Name + " " + e.Message); }
-            try { Machines(); } catch (Exception e) { Debug.Log("CROW_MOTION fsms: " + e.GetType().Name + " " + e.Message); }
-            sample = 0;
-        }
-
-        static void Measure()
-        {
-            var changed = new List<Transform>();
-            foreach (Transform t in all)
-                if (t != null && t.hasChanged) changed.Add(t);
-            // Each changed transform counted at its start: the topmost changed one above it.
-            var counts = new Dictionary<Transform, int>();
-            foreach (Transform t in changed)
-            {
-                Transform start = t;
-                while (start.parent != null && start.parent.hasChanged) start = start.parent;
-                int n;
-                counts.TryGetValue(start, out n);
-                counts[start] = n + 1;
-            }
-            var roots = new HashSet<Transform>();
-            foreach (KeyValuePair<Transform, int> pair in counts)
-            {
-                Transform start = pair.Key;
-                string label = Label(start);
-                Source source;
-                if (!sources.TryGetValue(label, out source)) sources[label] = source = new Source();
-                source.Starts++;
-                source.Changed += pair.Value;
-                if (Visible(start)) source.Visible++;
-                int i;
-                if (index.TryGetValue(start, out i) && start.localPosition == position[i] && start.localRotation == rotation[i] && start.localScale == scale[i] &&
-                    Exact(start.localPosition, position[i]) && Exact(start.localRotation, rotation[i]) && Exact(start.localScale, scale[i]))
-                    source.Same++;
-                Transform root = start.root;
-                source.Roots.Add(root);
-                roots.Add(root);
-                int seen;
-                source.Examples.TryGetValue(start, out seen);
-                source.Examples[start] = seen + pair.Value;
-            }
-            foreach (Transform t in changed)
-            {
-                int i;
-                if (index.TryGetValue(t, out i))
-                {
-                    position[i] = t.localPosition;
-                    rotation[i] = t.localRotation;
-                    scale[i] = t.localScale;
-                }
-                t.hasChanged = false;
-            }
-            changedSum += changed.Count;
-            startSum += counts.Count;
-            hierarchySum += roots.Count;
-            foreach (Transform root in roots) hierarchyTransformSum += root.hierarchyCount;
-        }
-
-        static bool Exact(Vector3 a, Vector3 b)
-        {
-            return a.x == b.x && a.y == b.y && a.z == b.z;
-        }
-
-        static bool Exact(Quaternion a, Quaternion b)
-        {
-            return a.x == b.x && a.y == b.y && a.z == b.z && a.w == b.w;
-        }
-
-        static bool Visible(Transform start)
-        {
-            bool seen;
-            if (visible.TryGetValue(start, out seen)) return seen;
-            foreach (Renderer renderer in start.GetComponentsInChildren<Renderer>())
-                if (renderer.enabled && renderer.isVisible)
-                {
-                    seen = true;
-                    break;
-                }
-            return visible[start] = seen;
-        }
-
-        static string F(float value)
-        {
-            return value.ToString("0.#", Inv);
-        }
-
-        static void Report()
-        {
-            string scene = SceneManager.GetActiveScene().name.Replace(' ', '_');
-            Camera camera = Camera.main;
-            Debug.Log("CROW_MOTION scene=" + scene + " frames=" + Samples + " transforms=" + all.Length + " changed=" + F(changedSum / (float)Samples) +
-                      " starts=" + F(startSum / (float)Samples) + " hierarchies=" + F(hierarchySum / (float)Samples) +
-                      " hierarchyTransforms=" + F(hierarchyTransformSum / (float)Samples));
-            foreach (KeyValuePair<string, Source> pair in sources.OrderByDescending(p => p.Value.Changed))
-            {
-                Source s = pair.Value;
-                int rootTransforms = s.Roots.Where(r => r != null).Sum(r => r.hierarchyCount);
-                Debug.Log("CROW_MOTION_SRC scene=" + scene + " " + pair.Key + " starts=" + F(s.Starts / (float)Samples) + " changed=" + F(s.Changed / (float)Samples) +
-                          " visible=" + (100 * s.Visible / Math.Max(1, s.Starts)) + "% same=" + (100 * s.Same / Math.Max(1, s.Starts)) + "% hierarchies=" + s.Roots.Count +
-                          " (" + rootTransforms + " transforms)");
-            }
-            int lines = 0;
-            foreach (KeyValuePair<string, Source> pair in sources.OrderByDescending(p => p.Value.Changed))
-            {
-                if (lines++ >= 25) break;
-                var text = new StringBuilder("CROW_MOTION_EX ").Append(pair.Key);
-                foreach (KeyValuePair<Transform, int> example in pair.Value.Examples.OrderByDescending(e => e.Value).Take(6))
-                {
-                    Transform t = example.Key;
-                    if (t == null) continue;
-                    text.Append(" | ").Append(Perf.Path(t, 4)).Append(" x").Append(F(example.Value / (float)Samples));
-                    bool seen;
-                    visible.TryGetValue(t, out seen);
-                    text.Append(seen ? " seen" : " unseen");
-                    if (camera != null) text.Append(' ').Append(Vector3.Distance(camera.transform.position, t.position).ToString("0", Inv)).Append('m');
-                    text.Append(" root=").Append(t.root.hierarchyCount);
-                    string detail;
-                    if (details.TryGetValue(t, out detail) && detail != null) text.Append(' ').Append(detail);
-                }
-                Debug.Log(text.ToString());
-            }
-        }
-
-        // ---------------------------------------------------------------- attribution
-
-        static string Label(Transform start)
-        {
-            string label;
-            if (labels.TryGetValue(start, out label)) return label;
-            string detail = null;
-            label = Attribute(start, ref detail);
-            details[start] = detail;
-            return labels[start] = label;
-        }
-
-        // The player and the other DontDestroyOnLoad roots get "player/" before what drives them.
-        static string Attribute(Transform start, ref string detail)
-        {
-            string label = Driven(start, ref detail);
-            return start.root.gameObject.scene.name == "DontDestroyOnLoad" ? "player/" + label : label;
-        }
-
-        // Audit.cs: what drives a change inside an enemy (its tweens, scripts, FSM actions...) instead of
-        // "enemy"; a body moves only its own transform there.
-        internal static bool InsideEnemies;
-
-        // Audit.cs: the driver tables as Begin makes them, for its own frames.
-        internal static void PrepareDrivers()
-        {
-            labels = new Dictionary<Transform, string>();
-            details = new Dictionary<Transform, string>();
-            drivers = new Dictionary<Transform, string>();
-            driverDetails = new Dictionary<Transform, string>();
-            weak = new Dictionary<Transform, string>();
-            try { Tweens(); } catch (Exception e) { Debug.Log("CROW_MOTION tweens: " + e.GetType().Name + " " + e.Message); }
-            try { Scripts(); } catch (Exception e) { Debug.Log("CROW_MOTION scripts: " + e.GetType().Name + " " + e.Message); }
-            try { Machines(); } catch (Exception e) { Debug.Log("CROW_MOTION fsms: " + e.GetType().Name + " " + e.Message); }
-        }
-
-        // Audit.cs' flatten experiment: something found moving it (a tween, an animation script, an FSM
-        // action of an active state, a script's update on it).
-        internal static bool IsDriven(Transform t)
-        {
-            return drivers != null && (drivers.ContainsKey(t) || weak.ContainsKey(t));
-        }
-
-        internal static string LabelOf(Transform start, out string detail)
-        {
-            string label = Label(start);
-            details.TryGetValue(start, out detail);
-            return label;
-        }
-
-        static string Driven(Transform start, ref string detail)
-        {
-            for (Transform t = start; t != null && !InsideEnemies; t = t.parent)
-            {
-                Rigidbody body = t.GetComponent<Rigidbody>();
-                if (body != null && t.name.StartsWith("Enemy ", StringComparison.Ordinal)) return "enemy";
-            }
-            string driver;
-            if (drivers.TryGetValue(start, out driver))
-            {
-                driverDetails.TryGetValue(start, out detail);
-                return driver;
-            }
-            Animator animator = start.GetComponentInParent<Animator>();
-            if (animator != null && animator.isActiveAndEnabled && animator.runtimeAnimatorController != null)
-            {
-                detail = animator.name.Replace(' ', '_') + ":" + animator.runtimeAnimatorController.name.Replace(' ', '_') + " params=" + animator.parameterCount +
-                         " update=" + animator.updateMode;
-                return "animator:" + animator.cullingMode;
-            }
-            Animation animation = start.GetComponentInParent<Animation>();
-            if (animation != null && animation.isActiveAndEnabled && animation.isPlaying)
-            {
-                detail = animation.name.Replace(' ', '_');
-                return "animation:" + animation.cullingType;
-            }
-            Rigidbody rigidbody = InsideEnemies ? start.GetComponent<Rigidbody>() : start.GetComponentInParent<Rigidbody>();
-            if (rigidbody != null && !rigidbody.isKinematic) return "physics";
-            if (weak.TryGetValue(start, out driver))
-            {
-                driverDetails.TryGetValue(start, out detail);
-                return driver;
-            }
-            // A driver of an ancestor that moves it by moving a part (a parent's script writing a child).
-            for (Transform t = start.parent; t != null; t = t.parent)
-                if (drivers.TryGetValue(t, out driver))
-                {
-                    detail = "above:" + t.name.Replace(' ', '_');
-                    return driver + "(above)";
-                }
-            var names = start.GetComponents<Component>().Where(c => c != null && !(c is Transform) && !(c is MeshFilter) && !(c is MeshRenderer))
-                .Select(c => c.GetType().Name).Distinct().Take(4).ToArray();
-            detail = start.parent == null ? null : "parent:" + string.Join("+", start.parent.GetComponents<Component>()
-                .Where(c => c != null && !(c is Transform)).Select(c => c.GetType().Name).Distinct().Take(4).ToArray());
-            return "other:" + (names.Length == 0 ? "-" : string.Join("+", names));
-        }
-
-        static void Driver(Transform target, string label, string detail)
-        {
-            if (target == null || drivers.ContainsKey(target)) return;
-            drivers[target] = label;
-            driverDetails[target] = detail;
-        }
-
-        // Drivers that may not move what they name (other FSM actions, scripts with an update): after
-        // the Animators and bodies.
-        static void Weak(Transform target, string label, string detail)
-        {
-            if (target == null || weak.ContainsKey(target)) return;
-            weak[target] = label;
-            if (!driverDetails.ContainsKey(target)) driverDetails[target] = detail;
-        }
-
-        static Transform TransformOf(object target)
-        {
-            var component = target as Component;
-            if (component != null) return component.transform;
-            var gameObject = target as GameObject;
-            return gameObject != null ? gameObject.transform : null;
-        }
-
-        // DOTween's playing tweens, and the tweens inside playing sequences, by target.
-        static void Tweens()
-        {
-            Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween");
-            Type tweenType = Type.GetType("DG.Tweening.Tween, DOTween");
-            if (dotween == null || tweenType == null) return;
-            FieldInfo targetField = tweenType.GetField("target", Fields), loopsField = tweenType.GetField("loops", Fields);
-            var list = dotween.GetMethod("PlayingTweens").Invoke(null, new object[] { null }) as IList;
-            if (list == null) return;
-            var pending = new Stack<object>();
-            foreach (object tween in list) pending.Push(tween);
-            while (pending.Count > 0)
-            {
-                object tween = pending.Pop();
-                FieldInfo sequenced = tween.GetType().GetField("sequencedTweens", Fields);
-                if (sequenced != null)
-                {
-                    var children = sequenced.GetValue(tween) as IList;
-                    if (children != null) foreach (object child in children) pending.Push(child);
-                }
-                object target = targetField.GetValue(tween);
-                Transform transform = TransformOf(target);
-                if (transform == null) continue;
-                int loops = (int)loopsField.GetValue(tween);
-                Driver(transform, "dotween:" + (loops == -1 ? "loop" : "once") + (target is Rigidbody ? ":body" : ""), tween.GetType().Name);
-            }
-        }
-
-        // The game's scripts that move a target of theirs every frame.
-        static void Scripts()
-        {
-            foreach (MonoBehaviour behaviour in UnityEngine.Object.FindObjectsOfType<MonoBehaviour>())
-            {
-                if (behaviour == null || !behaviour.isActiveAndEnabled) continue;
-                Type type = behaviour.GetType();
-                string name = type.Name;
-                bool animation = false;
-                for (Type t = type; t != null; t = t.BaseType)
-                    if (t.Name == "AbstractAnimationScript") animation = true;
-                if (animation)
-                {
-                    FieldInfo field = type.GetField("target", Fields);
-                    Transform target = field == null ? null : field.GetValue(behaviour) as Transform;
-                    Driver(target ?? behaviour.transform, "script:" + name, null);
-                }
-                else if (name == "PlayMakerFSM" || name.StartsWith("PlayMaker", StringComparison.Ordinal)) continue;
-                else if (type.Namespace == null || !type.Namespace.StartsWith("CrowCompat", StringComparison.Ordinal))
-                {
-                    MethodInfo update = type.GetMethod("Update", Fields) ?? type.GetMethod("LateUpdate", Fields) ?? type.GetMethod("FixedUpdate", Fields);
-                    if (update != null) Weak(behaviour.transform, "script:" + name, null);
-                }
-            }
-        }
-
-        static Type fsmComponent, ownerType, fsmGameObjectType;
-        static PropertyInfo fsmProperty, activeState, actionsProperty, enabledProperty, valueProperty, fsmName;
-        static MethodInfo ownerTarget;
-        static readonly Dictionary<Type, FieldInfo[]> actionFields = new Dictionary<Type, FieldInfo[]>();
-        static readonly System.Text.RegularExpressions.Regex Moving = new System.Text.RegularExpressions.Regex(
-            "Rotat|Position|Look|Translate|Scale|Move|Follow|Transform|Tween|Smooth|Spin|Euler|Orbit|Swing|Bob|Shake|Punch|Path|Align|Parent");
-
-        // The GameObjects the actions of each running FSM's active state name.
-        static void Machines()
-        {
-            if (fsmComponent == null)
-            {
-                fsmComponent = Type.GetType("PlayMakerFSM, PlayMaker");
-                ownerType = Type.GetType("HutongGames.PlayMaker.FsmOwnerDefault, PlayMaker");
-                fsmGameObjectType = Type.GetType("HutongGames.PlayMaker.FsmGameObject, PlayMaker");
-                if (fsmComponent == null || ownerType == null || fsmGameObjectType == null) return;
-                fsmProperty = fsmComponent.GetProperty("Fsm");
-                activeState = fsmProperty.PropertyType.GetProperty("ActiveState");
-                actionsProperty = activeState.PropertyType.GetProperty("Actions");
-                enabledProperty = Type.GetType("HutongGames.PlayMaker.FsmStateAction, PlayMaker").GetProperty("Enabled");
-                valueProperty = fsmGameObjectType.GetProperty("Value");
-                ownerTarget = fsmProperty.PropertyType.GetMethod("GetOwnerDefaultTarget");
-                fsmName = fsmProperty.PropertyType.GetProperty("Name");
-            }
-            var list = fsmComponent.GetProperty("FsmList", BindingFlags.Public | BindingFlags.Static).GetValue(null, null) as IList;
-            if (list == null) return;
-            var other = new Dictionary<Transform, string>();
-            foreach (object component in list)
-            {
-                var behaviour = component as MonoBehaviour;
-                if (behaviour == null || !behaviour.isActiveAndEnabled) continue;
-                object fsm = fsmProperty.GetValue(component, null);
-                object state = fsm == null ? null : activeState.GetValue(fsm, null);
-                var actions = state == null ? null : actionsProperty.GetValue(state, null) as Array;
-                if (actions == null) continue;
-                string where = behaviour.name.Replace(' ', '_') + "/" + ((string)fsmName.GetValue(fsm, null) ?? "").Replace(' ', '_') + "@" +
-                               ((string)activeState.PropertyType.GetProperty("Name").GetValue(state, null) ?? "").Replace(' ', '_');
-                foreach (object action in actions)
-                {
-                    if (action == null || !(bool)enabledProperty.GetValue(action, null)) continue;
-                    Type type = action.GetType();
-                    bool moving = Moving.IsMatch(type.Name);
-                    foreach (FieldInfo field in FieldsOf(type))
-                    {
-                        object value = field.GetValue(action);
-                        GameObject target = null;
-                        if (value != null && field.FieldType == ownerType) target = ownerTarget.Invoke(fsm, new[] { value }) as GameObject;
-                        else if (value != null) target = valueProperty.GetValue(value, null) as GameObject;
-                        if (target == null) continue;
-                        if (moving) Driver(target.transform, "fsm:" + type.Name, where);
-                        else if (!other.ContainsKey(target.transform)) other[target.transform] = type.Name + " " + where;
-                    }
-                }
-            }
-            foreach (KeyValuePair<Transform, string> pair in other) Weak(pair.Key, "fsm-other", pair.Value);
-        }
-
-        // -crow-find-movers <name> [s]: s seconds (default 5) after each area load, every action of every
-        // state of every FSM whose GameObject parameters name an object called name (as they resolve
-        // then: variables by their current value), with the variable's name (CROW_FIND_MOVER).
-        internal static void FindMovers(string name)
-        {
-            drivers = new Dictionary<Transform, string>();
-            driverDetails = new Dictionary<Transform, string>();
-            weak = new Dictionary<Transform, string>();
-            Machines();  // the reflection set up
-            if (fsmComponent == null) return;
-            PropertyInfo states = fsmProperty.PropertyType.GetProperty("States");
-            PropertyInfo useVariable = fsmGameObjectType.GetProperty("UseVariable");
-            PropertyInfo variableName = fsmGameObjectType.GetProperty("Name");
-            PropertyInfo stateName = activeState.PropertyType.GetProperty("Name");
-            int found = 0;
-            foreach (UnityEngine.Object component in Resources.FindObjectsOfTypeAll(fsmComponent))
-            {
-                var behaviour = component as MonoBehaviour;
-                if (behaviour == null || !behaviour.gameObject.scene.IsValid()) continue;
-                object fsm = fsmProperty.GetValue(component, null);
-                var all = fsm == null ? null : states.GetValue(fsm, null) as Array;
-                if (all == null) continue;
-                foreach (object state in all)
-                {
-                    var actions = actionsProperty.GetValue(state, null) as Array;
-                    if (actions == null) continue;
-                    foreach (object action in actions)
-                    {
-                        if (action == null) continue;
-                        foreach (FieldInfo field in FieldsOf(action.GetType()))
-                        {
-                            object value = field.GetValue(action);
-                            GameObject target = null;
-                            object variable = value;
-                            try
-                            {
-                                if (value != null && field.FieldType == ownerType)
-                                {
-                                    target = ownerTarget.Invoke(fsm, new[] { value }) as GameObject;
-                                    variable = ownerType.GetProperty("GameObject").GetValue(value, null);
-                                }
-                                else if (value != null) target = valueProperty.GetValue(value, null) as GameObject;
-                            }
-                            catch (Exception)
-                            {
-                                continue;
-                            }
-                            if (target == null || target.name != name) continue;
-                            string via = variable != null && (bool)useVariable.GetValue(variable, null) ? " variable=" + variableName.GetValue(variable, null) : "";
-                            Debug.Log("CROW_FIND_MOVER " + name + " <- " + Perf.Path(behaviour.transform, 5) + " fsm=" + fsmName.GetValue(fsm, null) +
-                                      " state=" + stateName.GetValue(state, null) + " action=" + action.GetType().Name + " field=" + field.Name + via);
-                            found++;
-                        }
-                    }
-                }
-            }
-            Debug.Log("CROW_FIND_MOVER " + name + ": " + found + " actions");
-        }
-
-        static FieldInfo[] FieldsOf(Type type)
-        {
-            FieldInfo[] fields;
-            if (actionFields.TryGetValue(type, out fields)) return fields;
-            fields = type.GetFields(Fields).Where(f => f.FieldType == ownerType || f.FieldType == fsmGameObjectType).ToArray();
-            return actionFields[type] = fields;
         }
     }
 }

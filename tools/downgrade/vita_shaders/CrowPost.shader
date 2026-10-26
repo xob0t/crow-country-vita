@@ -18,8 +18,8 @@
 //   centres give the same sums. 6-13 cycles, the 624x351 PSX texture gone.
 // - pass 2, the CRT pass with its noise from a random texture (_CrowNoise) at an offset that changes
 //   with _Time instead of the sin/cos hash: the same uniform per-pixel grain, new at every frame and
-//   still while the game's time stands still, as the game's. 24-27 cycles.
-// - pass 3, the CRT pass with the game's own hash (for exact comparisons).
+//   still while the game's time stands still, as the game's. 24-27 cycles. With the game's own hash
+//   instead, the console's frames were 88-95% identical to the game's chain (docs/status-log.md, 19 Oct).
 // _MainTex_TexelSize's sign flips the picture as the game's vertex programs do.
 Shader "CrowVita/Post"
 {
@@ -220,48 +220,6 @@ Shader "CrowVita/Post"
                 c = mul((half3x3)colorMat, c) + (half3)colorMat._m03_m13_m23;
                 half vignette = saturate((1.0 - sqrt(dot(i.vignette, i.vignette)) * 1.414213) * 4.0);
                 return half4(c * (vignette * 0.25 + 0.75), 1.0);
-            }
-            ENDCG
-        }
-
-        // 3: the CRT pass with the game's noise hash, for exact comparisons.
-        Pass
-        {
-            CGPROGRAM
-            #pragma vertex vert
-            #pragma fragment frag
-
-            float4x4 colorMat;
-
-            struct v2f
-            {
-                float4 position : SV_POSITION;
-                float2 uv : TEXCOORD0;
-            };
-
-            v2f vert(appdata v)
-            {
-                v2f o;
-                o.position = UnityObjectToClipPos(v.vertex);
-                o.uv = (v.texcoord - 0.5) * 0.9967109 + 0.4991;
-                return o;
-            }
-
-            float4 frag(v2f i) : SV_Target
-            {
-                float3 c = tex2D(_MainTex, i.uv).rgb;
-                float t = _Time.y * 0.01666667;
-                t = (t >= -t ? frac(abs(t)) : -frac(abs(t))) * 60.0;
-                float2 p = i.uv.yx * float2(702.0, 1248.0);
-                float2 s = sin(p.yx);
-                float2 h = cos((s * p + t) * 89.42) * 343.42;
-                float3 n = float3(frac(h), frac(cos((s.x * s.y + t) * 89.42) * 343.42));
-                c = c * 0.96 + saturate(c * n) * 0.04;
-                c = c * 0.96 + saturate(c * n.r) * 0.04;
-                float4 m = mul(colorMat, float4(c, 1.0));
-                float2 v = 0.5 - i.uv;
-                float vignette = saturate((1.0 - sqrt(dot(v, v)) * 1.414213) * 4.0);
-                return float4(m.rgb * (vignette * 0.25 + 0.75), m.w);
             }
             ENDCG
         }

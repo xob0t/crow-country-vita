@@ -4,8 +4,8 @@
 // drew with its fallback, VertexLit: opaque quads (the Crypt's water rings, bubbles, splashes, leaves and
 // blobs, the crows' feathers, the enemies' death puffs, Scamper's prints). The PS Vita build saves those
 // materials with this one (asset_rules.vita_particle_bake). It draws what they use: the texture times the
-// particle's colour and _Color, alpha blended (Fade), cut out or premultiplied as the material's mode
-// says, lit per vertex as Particles/Standard Surface's forward base pass lights a particle (the main
+// particle's colour and _Color, alpha blended (Fade: all 9 of the game's such materials; the cut-out,
+// premultiplied and emission variants serve any other material), lit per vertex as Particles/Standard Surface's forward base pass lights a particle (the main
 // directional light, the harmonics, the four point lights Unity gives each object per vertex; diffuse
 // only, Standard's dielectric factor) plus CrowVita/Lit's fill and key lights (compat/VitaLit.cs: those
 // lights' culling masks are 0, so Unity gives them to no shader), and fog. Left out (no material uses
@@ -18,7 +18,6 @@ Shader "CrowVita/Particles Lit"
         _Color("Color", Color) = (1,1,1,1)
         _Cutoff("Alpha Cutoff", Range(0.0, 1.0)) = 0.5
         [Gamma] _Metallic("Metallic", Range(0.0, 1.0)) = 0.0
-        _Glossiness("Smoothness", Range(0.0, 1.0)) = 0.5
         _EmissionColor("Color", Color) = (0,0,0)
 
         [HideInInspector] _Mode ("__mode", Float) = 0.0
@@ -70,6 +69,9 @@ Shader "CrowVita/Particles Lit"
             half4 _CrowKeyColor[4];
             half4 _CrowFill;
             half4 _CrowFillColor;
+            // CrowLit.shader's key light falloff.
+            #define CROW_KEY_ATTEN 25.0
+            #define CROW_KEY_FADE 2.7778
 
             struct appdata
             {
@@ -113,7 +115,7 @@ Shader "CrowVita/Particles Lit"
                 half4 ndl = (tx * n.x + ty * n.y + tz * n.z) * r;
                 half4 cone = _CrowKeyDW - (tx * _CrowKeyDX + ty * _CrowKeyDY + tz * _CrowKeyDZ) * r;
                 half4 x = d2 * _CrowKeyW;
-                half4 w = saturate((1.0 - x) * 2.7778) / (1.0 + 25.0 * x) * saturate(cone) * saturate(ndl);
+                half4 w = saturate((1.0 - x) * CROW_KEY_FADE) / (1.0 + CROW_KEY_ATTEN * x) * saturate(cone) * saturate(ndl);
                 light += _CrowKeyColor[0].rgb * w.x + _CrowKeyColor[1].rgb * w.y + _CrowKeyColor[2].rgb * w.z + _CrowKeyColor[3].rgb * w.w;
                 o.light = light * OneMinusReflectivityFromMetallic(_Metallic);
                 UNITY_TRANSFER_FOG(o, o.pos);

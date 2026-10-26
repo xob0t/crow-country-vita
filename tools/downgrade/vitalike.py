@@ -2,7 +2,7 @@
 measurements while the console is away. The mechanics are The Drifter port's (its docs/vitalike.md
 has the calibration, measured on this PC's CPU, a Ryzen 7 5800X3D).
 
-    uv run tools/downgrade/vitalike.py <tag> [--cap 5.5] [--period 4] [--cores 3] [--timeout 600]
+    uv run tools/downgrade/vitalike.py <tag> [--cap 5.5] [--period 4] [--cores 3] [--timeout 900]
                             [--build dir] [--no-guard] -- <-crow-* flags...>
     uv run tools/downgrade/vitalike.py summary <tag>...
 
@@ -18,20 +18,21 @@ GPU and file reads are not slowed: the runs predict script and game logic costs,
 Output goes to artifacts/vitalike/<tag>/: player.log (the player's output, with the probe's
 HEARTBEAT lines) and vitalike.txt (the setup and the measured duty). The player runs unsynchronized
 (-crow-no-vsync). `summary` averages the heartbeats in the last scene, the first one after the load
-left out. fightbench.py --vitalike slows its player the same way (slow_down).
+left out. fightbench.py --vitalike and cpuprofile.py slow their players the same way (slow_down).
 """
 
 import argparse
 import ctypes
 import ctypes.wintypes as wt
-import re
 import subprocess
 import sys
 import threading
 import time
 from pathlib import Path
 
-from common import ROOT, WORK, build_folder, number, split_at_dashes
+from common import ROOT, WORK, build_folder, split_at_dashes
+from playerlog import heartbeats
+from winapi import CREATE_SUSPENDED, HIGH_PRIORITY_CLASS, PROCESS_ALL_ACCESS, check, kernel32, kill_on_close_job
 
 BUILD = build_folder('windows', 'il2cpp')
 COPY = WORK / 'vitalike' / 'player'
@@ -40,9 +41,7 @@ DEFAULT_CAP = 5.5
 DEFAULT_PERIOD_MS = 4.0
 DEFAULT_CORES = 3
 
-kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
 ntdll = ctypes.WinDLL('ntdll')
-kernel32.CreateJobObjectW.restype = wt.HANDLE
 kernel32.GetCurrentThread.restype = wt.HANDLE
 kernel32.CreateWaitableTimerExW.restype = wt.HANDLE
 kernel32.SetThreadAffinityMask.argtypes = [wt.HANDLE, ctypes.c_size_t]
@@ -50,12 +49,6 @@ kernel32.SetThreadAffinityMask.restype = ctypes.c_size_t
 ntdll.NtSuspendProcess.argtypes = [wt.HANDLE]
 ntdll.NtResumeProcess.argtypes = [wt.HANDLE]
 kernel32.SetThreadPriority.argtypes = [wt.HANDLE, ctypes.c_int]
-kernel32.SetInformationJobObject.argtypes = [wt.HANDLE, ctypes.c_int, ctypes.c_void_p, wt.DWORD]
-kernel32.AssignProcessToJobObject.argtypes = [wt.HANDLE, wt.HANDLE]
-kernel32.TerminateJobObject.argtypes = [wt.HANDLE, wt.UINT]
-kernel32.CloseHandle.argtypes = [wt.HANDLE]
-kernel32.SetProcessAffinityMask.argtypes = [wt.HANDLE, ctypes.c_size_t]
-kernel32.SetPriorityClass.argtypes = [wt.HANDLE, wt.DWORD]
 kernel32.SetWaitableTimer.argtypes = [
     wt.HANDLE,
     ctypes.POINTER(ctypes.c_longlong),
@@ -65,55 +58,13 @@ kernel32.SetWaitableTimer.argtypes = [
     wt.BOOL,
 ]
 kernel32.WaitForSingleObject.argtypes = [wt.HANDLE, wt.DWORD]
-
-
-class IoCounters(ctypes.Structure):
-    _fields_ = [
-        (name, ctypes.c_ulonglong)
-        for name in (
-            'ReadOperationCount',
-            'WriteOperationCount',
-            'OtherOperationCount',
-            'ReadTransferCount',
-            'WriteTransferCount',
-            'OtherTransferCount',
-        )
-    ]
-
-
-class BasicLimits(ctypes.Structure):
-    _fields_ = [
-        ('PerProcessUserTimeLimit', ctypes.c_longlong),
-        ('PerJobUserTimeLimit', ctypes.c_longlong),
-        ('LimitFlags', wt.DWORD),
-        ('MinimumWorkingSetSize', ctypes.c_size_t),
-        ('MaximumWorkingSetSize', ctypes.c_size_t),
-        ('ActiveProcessLimit', wt.DWORD),
-        ('Affinity', ctypes.c_size_t),
-        ('PriorityClass', wt.DWORD),
-        ('SchedulingClass', wt.DWORD),
-    ]
-
-
-class ExtendedLimits(ctypes.Structure):
-    _fields_ = [
-        ('BasicLimitInformation', BasicLimits),
-        ('IoInfo', IoCounters),
-        ('ProcessMemoryLimit', ctypes.c_size_t),
-        ('JobMemoryLimit', ctypes.c_size_t),
-        ('PeakProcessMemoryUsed', ctypes.c_size_t),
-        ('PeakJobMemoryUsed', ctypes.c_size_t),
-    ]
+THREAD_PRIORITY_TIME_CRITICAL = 15
+CREATE_WAITABLE_TIMER_HIGH_RESOLUTION = 0x2
+TIMER_ALL_ACCESS = 0x1F0003
 
 
 class ProcessorInfo(ctypes.Structure):  # SYSTEM_LOGICAL_PROCESSOR_INFORMATION
     _fields_ = [('ProcessorMask', ctypes.c_size_t), ('Relationship', wt.DWORD), ('Reserved', ctypes.c_ulonglong * 2)]
-
-
-def check(ok, what):
-    if not ok:
-        raise OSError(ctypes.get_last_error(), f'{what} failed')
-    return ok
 
 
 def physical_cores():
@@ -137,26 +88,11 @@ def pick_cpus(count):
     return game, cores[-1] & -cores[-1]
 
 
-JOB_KILL_ON_CLOSE = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-EXTENDED_LIMITS = 9  # JOBOBJECTINFOCLASS
-
-
-def job_object(limit_flags, affinity=0):
-    """A new Job Object with these basic limits."""
-    job = check(kernel32.CreateJobObjectW(None, None), 'CreateJobObject')
-    limits = ExtendedLimits()
-    limits.BasicLimitInformation.LimitFlags = limit_flags
-    limits.BasicLimitInformation.Affinity = affinity
-    check(
-        kernel32.SetInformationJobObject(job, EXTENDED_LIMITS, ctypes.byref(limits), ctypes.sizeof(limits)),
-        'SetInformationJobObject(limits)',
-    )
-    return job
-
-
 class Duty(threading.Thread):
     """Runs the process <fraction> of the wall time in slices of <period> seconds. The off time
-    follows the measured run time, so timer and suspend overheads do not change the fraction."""
+    follows the measured run time, so timer and suspend overheads do not change the fraction.
+    Subclasses do their own work in each pause (paused: cpuprofile.py's stack sample); that time
+    counts as off time."""
 
     def __init__(self, handle, fraction, period, cpu_mask, guards=()):
         super().__init__(daemon=True)
@@ -181,10 +117,15 @@ class Duty(threading.Thread):
         finally:
             ntdll.NtResumeProcess(self.handle)
 
+    def paused(self):
+        """Called in each pause, the process suspended, before the guards run."""
+
     def cycle(self):
         kernel32.SetThreadAffinityMask(kernel32.GetCurrentThread(), self.cpu_mask)
-        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 15)  # THREAD_PRIORITY_TIME_CRITICAL
-        self.timer = kernel32.CreateWaitableTimerExW(None, None, 0x2, 0x1F0003)  # HIGH_RESOLUTION
+        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL)
+        self.timer = kernel32.CreateWaitableTimerExW(
+            None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS
+        )
         run_slice = self.period * self.fraction
         ntdll.NtResumeProcess(self.handle)  # created suspended
         while not self.stop.is_set():
@@ -192,11 +133,12 @@ class Duty(threading.Thread):
             self.wait(run_slice)
             if ntdll.NtSuspendProcess(self.handle) != 0:
                 break
-            for guard in self.guards:
-                ntdll.NtResumeProcess(guard)
             suspended = time.perf_counter()
             self.ran += suspended - start
-            target = self.ran * (1 - self.fraction) / self.fraction - self.off
+            self.paused()
+            for guard in self.guards:
+                ntdll.NtResumeProcess(guard)
+            target = self.ran * (1 - self.fraction) / self.fraction - self.off - (time.perf_counter() - suspended)
             self.wait(min(max(target, 0.0), 4 * self.period))
             for guard in self.guards:
                 ntdll.NtSuspendProcess(guard)
@@ -214,12 +156,14 @@ class Duty(threading.Thread):
 def start_guards(mask):
     """One busy loop per game processor, pinned there at high priority, that the controller runs only
     while the game is suspended. Returns (job, process handles); the job kills them with this script."""
-    job = job_object(JOB_KILL_ON_CLOSE)
+    job = kill_on_close_job()
     interpreter = getattr(sys, '_base_executable', sys.executable)
     handles = []
     for bit in range(64):
         if mask >> bit & 1:
-            guard = subprocess.Popen([interpreter, '-I', '-c', 'while True: pass'], creationflags=0x80 | 0x4)
+            guard = subprocess.Popen(
+                [interpreter, '-I', '-c', 'while True: pass'], creationflags=HIGH_PRIORITY_CLASS | CREATE_SUSPENDED
+            )
             handle = wt.HANDLE(int(guard._handle))
             check(kernel32.AssignProcessToJobObject(job, handle), 'AssignProcessToJobObject(guard)')
             check(kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(1 << bit)), 'SetProcessAffinityMask')
@@ -227,29 +171,30 @@ def start_guards(mask):
     return job, handles
 
 
-def slow_down(pid, cap, period_ms=DEFAULT_PERIOD_MS, cores=DEFAULT_CORES, guard=True):
+def slow_down(pid, cap, period_ms=DEFAULT_PERIOD_MS, cores=DEFAULT_CORES, guard=True, duty_class=Duty, **duty_kwargs):
     """Slows a running player (run_player's on_start): <cores> processors after core 0, high
     priority, and at a cap under 100 the duty cycle (cap percent of the wall time, busy guards between
-    slices). Returns (the Duty, a function that stops it and the guards), or None when the player
-    can't be opened."""
-    handle = ctypes.windll.kernel32.OpenProcess(0x1F0FFF, False, pid)  # PROCESS_ALL_ACCESS
+    slices). duty_class: a Duty subclass with work of its own in the pauses (given duty_kwargs), which
+    runs at any cap. Returns (the Duty, a function that stops it and the guards), or None when the
+    player can't be opened."""
+    handle = kernel32.OpenProcess(PROCESS_ALL_ACCESS, False, pid)
     if not handle:
         print(f'vitalike: cannot open the player ({pid})')
         return None
     handle = wt.HANDLE(handle)
     game_mask, controller_mask = pick_cpus(cores)
     kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(game_mask))
-    kernel32.SetPriorityClass(handle, 0x80)  # HIGH_PRIORITY_CLASS
-    slowed = cap < 100
-    guards = start_guards(game_mask) if guard and slowed else None
-    duty = Duty(handle, cap / 100, period_ms / 1000, controller_mask, guards[1] if guards else ())
-    if slowed:
+    kernel32.SetPriorityClass(handle, HIGH_PRIORITY_CLASS)
+    cycling = cap < 100 or duty_class is not Duty
+    guards = start_guards(game_mask) if guard and cycling else None
+    duty = duty_class(handle, cap / 100, period_ms / 1000, controller_mask, guards[1] if guards else (), **duty_kwargs)
+    if cycling:
         duty.start()
 
     def stop():
         duty.stop.set()
         if duty.is_alive():
-            duty.join(2)
+            duty.join(5)
         if guards is not None:
             kernel32.TerminateJobObject(guards[0], 0)
             kernel32.CloseHandle(guards[0])
@@ -298,30 +243,26 @@ def launch(args, flags):
     return out
 
 
-HEARTBEAT = re.compile(r'^HEARTBEAT (.*)$', re.M)
-
-
 def summary(tag):
     """The mean of the heartbeats in the last scene, the first after its load left out."""
     out = OUT / tag
-    beats = [
-        dict(pair.split('=', 1) for pair in m[1].split() if '=' in pair)
-        for m in HEARTBEAT.finditer((out / 'player.log').read_text(encoding='utf-8', errors='replace'))
-    ]
+    beats = list(heartbeats((out / 'player.log').read_text(encoding='utf-8', errors='replace')))
     if not beats:
         return f'{tag}: no heartbeats'
-    scene = beats[-1]['scene']
-    last = [b for b in beats if b['scene'] == scene][1:]
+    scene = beats[-1].get('scene')
+    last = [b for b in beats if b.get('scene') == scene][1:]
     if not last:
         return f'{tag}: one heartbeat in {scene}'
 
-    def mean(key):
-        return sum(number(b[key]) for b in last) / len(last)
+    def mean(key, form):
+        values = [b[key] for b in last if isinstance(b.get(key), float)]
+        return format(sum(values) / len(values), form) if values else '-'
 
+    worst = max((b['worst'] for b in last if isinstance(b.get('worst'), float)), default=None)
     return (
-        f'{tag}: {scene}, {len(last)} heartbeats: fps {mean("fps"):.1f}, ms {mean("ms"):.1f}, '
-        f'worst {max(number(b["worst"]) for b in last):.0f}, gc {mean("gc"):.2f} per beat, '
-        f'visible {mean("visible"):.0f}'
+        f'{tag}: {scene}, {len(last)} heartbeats: fps {mean("fps", ".1f")}, ms {mean("ms", ".1f")}, '
+        f'worst {"-" if worst is None else f"{worst:.0f}"}, gc {mean("gc", ".2f")} per beat, '
+        f'visible {mean("visible", ".0f")}'
     )
 
 

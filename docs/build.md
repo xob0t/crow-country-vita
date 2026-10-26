@@ -141,6 +141,30 @@ The stages run under the `vita-build` (or `pc-build`) lock of `tools/downgrade/l
 
 The stages can also be run one at a time; the [README](../README.md) lists them with the quicker loops for code changes (`code`, `link`, `loadcheck`, `quickcode`).
 
+### Build switches
+
+These environment variables change what a stage writes, for experiments and measurements. Each takes the values listed, and a stage stops on any other; the stages log the values in effect. `project` records the code and project switches with the project, and `build` all of them with the PS Vita build's code stage, so `build` warns when the project was assembled with others, and `quickcode` when the full build had other project or build switches (which it can't apply). The table is `BUILD_SWITCHES` in `tools/downgrade/common.py`. "PS Vita data" is the PS Vita build, or a Windows player with `CROW_VITA_DATA=1`.
+
+| Variable | Stage | Values (default with PS Vita data, without) | What |
+| --- | --- | --- | --- |
+| `CROW_VITA_DATA` | build | `0`, `1` (`0`) | A Windows player with the PS Vita's scene data, the defaults below as on the PS Vita, for measurements. |
+| `CROW_PUDDLE_BAKE` | build | `on`, `all`, `off` (`on`, `off`) | The Enemy Puddle's random looks picked at build time (`unity/PuddleBake.cs`): Haunted Hilltop's, or every scene's. |
+| `CROW_PROBUILDER` | build | `on`, `bake`, `off` (`on`, `off`) | The player's ProBuilder meshes built at build time (`unity/ProBuilderMeshes.cs`); `bake` keeps the components. |
+| `CROW_MERGE` | build | `on`, `ab`, `off` (`on`, `off`) | The static merge (`unity/MergeScenes.cs`); `ab` keeps the parts' meshes, for `-crow-merge off`. |
+| `CROW_MERGE_MAX_VERTICES`, `CROW_MERGE_MAX_KB` | build | a whole number (unset: the merge's own) | The merge's largest part, and its budget per scene. |
+| `CROW_SPLIT` | build | `movers`, `on`, `off` (`movers`, `off`) | The scene split after the merge: the still parts (`on`), and those that move on their own (`movers`). |
+| `CROW_PLAYER_MERGE` | build | `on`, `ab`, `off` (`on`, `off`) | The player merge (`unity/PlayerMerge.cs`); `ab` keeps the parts, for `-crow-player-merge off`. |
+| `CROW_PLAYER_MERGE_PARTIAL` | build | `0`, `1` (`0`) | The player merge from the scenes there are uses of, in a test build before any full one. |
+| `CROW_MCS_BAKE`, `CROW_MCS_STRIP` | build | `on`, `off` (`on`, `off`; the strip as the bake) | MeshCombineStudio's run-time combining done at build time, and the combined sources left out (`unity/MeshCombineBake.cs`). |
+| `CROW_STRIP` | build | `on`, `off` (`on`, `off`) | The scripts that do nothing in the player left out of the scenes (`unity/StripScenes.cs`). |
+| `CROW_LIT_BAKE` | project | `on`, `off` (`on`; PS Vita only) | The materials saved with CrowVita/Lit; `off` leaves the swap to run time. |
+| `CROW_FSM_COMPILE` | code | `on`, `off` (`off`) | The FSMs' compiled bodies only, without the originals beside them (`rewriter/FsmCompile.cs`). |
+| `CROW_ACTION_PROFILE` | code | `0`, `1` (`0`) | PlayMaker's actions and the behaviours timed, for `-crow-action-profile` ([vita.md](vita.md)). |
+| `CROW_GFX_JOBS` | build, quickcode | `on`, `off` (`on`; PS Vita only) | The PS Vita player's graphics jobs, in `Media/boot.config` ([vita.md](vita.md)). |
+| `CROW_ALLOW_SCENE_FAILURES` | build | `0`, `1` (`0`) | A build with errors or failed scene steps goes through, with a warning. |
+
+The code switches apply wherever the rewriter runs (`code`, `project`, `quickcode`); `quickcode` also applies `CROW_GFX_JOBS`.
+
 ### Time, memory and disk
 
 Measured on an 8-core, 16-thread Ryzen 7 5800X3D with 32 GB and an SSD:
@@ -168,6 +192,6 @@ Install `builds/crow-2018.2.19f1-vita.vpk` with VitaShell on a console with HENk
 - **The game check**: "another release than the rules were written for" means `Assembly-CSharp.dll` differs from Steam build 18838972's. It may build; if a rule stops in `project`, update the game or have Steam verify its files.
 - **`rip`**: "AssetRipper did not start" or "produced no project": check `tools/external/assetripper-2.0.0` and `artifacts/downgrade/assetripper.log`. A run of `rip` alone always exports again.
 - **`project`**: "No .NET 8 SDK" means `tools/external/dotnet` is missing: run setup. A rewriter failure names the assemblies that don't resolve; its log is `artifacts/downgrade/rewrite-<version>-<platform>.log`.
-- **`build`**: the editor's log is `artifacts/downgrade/build-<version>-<platform>[-il2cpp].log`, and the pipeline prints a summary of its errors. A good build still counts about 3,000 errors in its summary (2,986 in the last PS Vita and Windows IL2CPP builds), so compare with that rather than with zero. "A Unity editor has ... open" means an editor still has the project open: close it. If the editor stops at once, check the license (`uv run tools/setup.py doctor --license`). If IL2CPP or the PS Vita build steps fail, check the SDK with `uv run tools/setup.py doctor --target vita`.
+- **`build`**: the editor's log is `artifacts/downgrade/build-<version>-<platform>[-il2cpp].log`, and the pipeline prints a summary of it. A good build has 0 errors (`DOWNGRADE_BUILD Succeeded errors=0`): the stage stops on any error in the build's report or any failed scene step of the editor scripts, and lists them (the report's are also in `<player>.messages.txt` beside the player). "A Unity editor has ... open" means an editor still has the project open: close it. If the editor stops at once, check the license (`uv run tools/setup.py doctor --license`). If IL2CPP or the PS Vita build steps fail, check the SDK with `uv run tools/setup.py doctor --target vita`.
 - **"Held by another run"**: another pipeline holds a build lock; `uv run tools/downgrade/lock.py status` shows who. `build.py` waits for it.
 - **`vita.py`**: "Set CROW_VITA_HOST" means the console's address is not set (`uv run tools/setup.py --vita-host <address>`).

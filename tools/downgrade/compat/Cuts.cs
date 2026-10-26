@@ -57,10 +57,11 @@ using UnityEngine.SceneManagement;
 //   -crow-input-bench              8 s after the first area load, the cost of those Unity input calls (CROW_INPUT_BENCH)
 //                                  and Rewired's players, controllers and maps (CROW_REWIRED_REPORT)
 // Test key: pmglobal=<name>:true|false (a PlayMaker global bool, e.g. pause mode: the enemies held as in a menu).
-// Also (other files): -crow-ground-cache (FixedStep.cs, groundcache=), -crow-decor-visible (Decor.cs, decorvisible=).
+// cuts=on|off also sets FixedStep's ground cache (groundcache=, -crow-ground-cache; 4 steps with the cuts) and Decor's
+// visible rate (decorvisible=, -crow-decor-visible; 2 with the cuts), which those modules own.
 //   -crow-cuts-log                 every 10 s, CROW_CUTS: frozen enemies, FSM updates skipped and run, wakes by cause;
-//                                  and the blood stains removed (until 22 Oct logged without it too: a line, with its
-//                                  managed stack trace, for each hit Mara took past the cap)
+//                                  and the blood stains removed (only with it: a line, with its managed stack trace,
+//                                  for each hit Mara took past the cap)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -87,7 +88,7 @@ namespace CrowCompat
         // From Diag.Install (every player).
         internal static void Install(string[] args)
         {
-            SetAll(Vita);
+            SetAll(Vita, false);  // FixedStep and Decor set their own PS Vita defaults and flags
             string value = CrowFlags.Value(args, "-crow-blob-trails");
             if (value != null) Change("trails", value);
             if ((value = CrowFlags.Value(args, "-crow-enemy-freeze")) != null) Change("freeze", value);
@@ -103,10 +104,8 @@ namespace CrowCompat
             if ((value = CrowFlags.Value(args, "-crow-rewired-axes")) != null) Change("rwaxes", value);
             if ((value = CrowFlags.Value(args, "-crow-rewired-mouse")) != null) Change("rwmouse", value);
             if ((value = CrowFlags.Value(args, "-crow-rewired-joysticks")) != null) Change("rwjoys", value);
-            if ((value = CrowFlags.Value(args, "-crow-ground-cache")) != null) Change("groundcache", value);
-            if ((value = CrowFlags.Value(args, "-crow-decor-visible")) != null) Change("decorvisible", value);
-            log = Array.IndexOf(args, "-crow-cuts-log") >= 0;
-            if (Array.IndexOf(args, "-crow-input-bench") >= 0) InputBench.Install();
+            log = CrowFlags.Has(args, "-crow-cuts-log");
+            if (CrowFlags.Has(args, "-crow-input-bench")) InputBench.Install();
             CrowEvents.Unloaded("Cuts.sceneUnloaded", scene => FsmGate.Clear());
             CrowEvents.Loaded("Cuts.sceneLoaded", (scene, mode) => stainsAt = Time.realtimeSinceStartup + 2f);
             CrowEvents.Canvases("Cuts.Frame", Frame);
@@ -114,7 +113,8 @@ namespace CrowCompat
         }
 
         // The PS Vita's set (on) or the game's (off).
-        static void SetAll(bool on)
+        // Every cut on or off; with others, FixedStep's ground cache and Decor's visible rate too (cuts=).
+        static void SetAll(bool on, bool others)
         {
             NoTrails = on;
             FreezeMode = on ? 2 : 0;
@@ -130,8 +130,11 @@ namespace CrowCompat
             RewiredNoMouse = on;
             RewiredProbe.FirstJoystickOnly = on;
             RewiredProbe.Rescan();
-            FixedStep.GroundCacheSteps = on ? 4 : 0;
-            Decor.VisibleDivisor = on ? 2 : 1;
+            if (others)
+            {
+                FixedStep.SetGroundCache(on ? "4" : "off");
+                Decor.SetVisible(on ? "2" : "1");
+            }
             Refresh();
         }
 
@@ -169,7 +172,7 @@ namespace CrowCompat
             switch (key)
             {
                 case "cuts":
-                    SetAll(value != "off" && value != "game");
+                    SetAll(value != "off" && value != "game", true);
                     break;
                 case "trails":
                     NoTrails = value == "off";
@@ -213,15 +216,9 @@ namespace CrowCompat
                     RewiredProbe.FirstJoystickOnly = value == "first";
                     RewiredProbe.Rescan();
                     break;
-                case "groundcache":
-                    FixedStep.GroundCacheSteps = value == "off" || value == "game" ? 0 : Math.Max(0, number);
-                    break;
                 case "pmglobal":
                     SetGlobalBool(value);
                     return true;
-                case "decorvisible":
-                    Decor.VisibleDivisor = number >= 4 ? 4 : number >= 2 ? 2 : 1;
-                    break;
                 default:
                     return false;
             }
@@ -399,12 +396,53 @@ namespace CrowCompat
             return Array.IndexOf(BreathParts, target.name) >= 0;
         }
 
-        // The enemy a transform belongs to: the nearest "Enemy <type>" with a rigidbody above it (or itself).
-        internal static Transform EnemyRoot(Transform target)
+    }
+
+    // The game's enemies by name, one rule for every module: an enemy's root is a GameObject named "Enemy <type>"
+    // ("Enemy Grinner (3)") with a Rigidbody. In the rip's scenes 124 such roots have one; the 118 "Enemy Set"
+    // holders, the title's "Enemy Arrays" and Haunted Hilltop's "Enemy Human Guest" have none.
+    static class EnemyNames
+    {
+        // The GameObjects of an enemy's FSMs: its culling (Pause/Cull, or Pause/Cull? in some types), its spawn
+        // and death, and its damage ("damage / kill ...", or "shoot me" for Blobs and Spiders).
+        internal const string Cull = "Pause/Cull", CullOther = "Pause/Cull?", SpawnKill = "spawn/kill", ShootMe = "shoot me";
+        const string DamagePrefix = "damage / kill", Prefix = "Enemy ";
+
+        internal static bool IsCull(string name)
+        {
+            return name == Cull || name == CullOther;
+        }
+
+        internal static bool IsDamage(string name)
+        {
+            return name == ShootMe || name.StartsWith(DamagePrefix, StringComparison.Ordinal);
+        }
+
+        // A Rigidbody's name: whether it is an enemy's root (for callers that have the body already).
+        internal static bool Named(string name)
+        {
+            return name.StartsWith(Prefix, StringComparison.Ordinal);
+        }
+
+        internal static bool IsRoot(Transform t)
+        {
+            return Named(t.name) && t.GetComponent<Rigidbody>() != null;
+        }
+
+        // The enemy a transform belongs to: the nearest root above it (or itself), or null.
+        internal static Transform RootOf(Transform target)
         {
             for (Transform t = target; t != null; t = t.parent)
-                if (t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.GetComponent<Rigidbody>() != null) return t;
+                if (IsRoot(t)) return t;
             return null;
+        }
+
+        // A root's enemy type: "Enemy Grinner (3)" -> "Grinner".
+        internal static string TypeOf(Transform root)
+        {
+            string type = root.name.Substring(Prefix.Length);
+            int paren = type.IndexOf(" (", StringComparison.Ordinal);
+            return paren > 0 ? type.Substring(0, paren) : type;
         }
     }
 
@@ -516,7 +554,7 @@ namespace CrowCompat
         // Never frozen: spawning and the exploration-mode removal. The damage FSMs (shoot me, damage / kill) are:
         // a held enemy's hit colliders are on its model, which Pause/Cull has switched off (or the game is in a
         // menu), and a hit's event still reaches a frozen FSM and wakes the enemy.
-        static readonly string[] Exempt = { "spawn/kill", "ExplorationMode?" };
+        static readonly string[] Exempt = { EnemyNames.SpawnKill, "ExplorationMode?" };
 
         internal static void Clear()
         {
@@ -669,10 +707,10 @@ namespace CrowCompat
             if (owner == null) return null;
             Transform t = owner.transform;
             string name = owner.gameObject.name;
-            Transform root = Cuts.EnemyRoot(t);
+            Transform root = EnemyNames.RootOf(t);
             if (root != null)
             {
-                if (name == "Pause/Cull" || name == "Pause/Cull?") return new Rec { Kind = Cull, Enemy = Enemies.Of(root) };
+                if (EnemyNames.IsCull(name)) return new Rec { Kind = Cull, Enemy = Enemies.Of(root) };
                 if (Array.IndexOf(Exempt, name) >= 0) return null;
                 return new Rec { Kind = Member, Enemy = Enemies.Of(root) };
             }
@@ -755,9 +793,7 @@ namespace CrowCompat
 
         // Rewired's InputManager updates (rewriter CutsRewired). While the pad reader serves (the PS Vita's
         // default, Pad.cs) PadUpdate returns ahead of Begin, so this reads about 0 there: Rewired's time
-        // matters only with -crow-pad rewired|compare. (Mark and Sites, the probing builds' per-call-site
-        // booking of Rewired's update, rewriter CutsRewiredSites, went on 21 Oct: they were keyed on
-        // Rewired's obfuscated method names, and the pad reader skips that update on the PS Vita.)
+        // matters only with -crow-pad rewired|compare.
         public static void Begin()
         {
             began = System.Diagnostics.Stopwatch.GetTimestamp();

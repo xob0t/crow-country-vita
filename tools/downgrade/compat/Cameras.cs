@@ -30,8 +30,6 @@ using UnityEngine.UI;
 //                          colour, so the picture is the same but where nothing was within the far
 //                          plane, black before); Pool has 53 of its 144 renderers in view there.
 //                          -crow-cycle / -crow-ab take fogfar=.
-//   player=hide|noshadow|show (-crow-cycle / -crow-ab, a cost test): the player's drawn renderers off,
-//                          or their shadow casting off, or back as they were.
 //   -crow-menu-cull on|off  on (the PS Vita's default): while a full-screen menu covers the world (the
 //                          inventory and status screen, the map, the pause menu: their canvases
 //                          "UI Canvas Inventory OFF", "UI Canvas Map OFF", "UI Canvas Pause OFF" active)
@@ -74,28 +72,25 @@ namespace CrowCompat
         static float reportEvery = -1f, nextReport = -1f;
 
         // Called from Quality.Install (after Draws' and Merge's). Each part under a Guard of its own (Diag.Guard),
-        // so the report (a probe) or one default that throws doesn't take the PS Vita defaults after it with it
-        // (one Guard for all before 21 Oct). The order is as before.
+        // so the report (a probe) or one default that throws doesn't take the PS Vita defaults after it with it.
         public static void Install(string[] args)
         {
             Diag.Guard("Cameras.SysInfo", SysInfo);
-            int index = Array.IndexOf(args, "-crow-camera-report");
-            if (index >= 0)
+            if (CrowFlags.Has(args, "-crow-camera-report"))
                 Diag.Guard("Cameras.Report", () =>
                 {
-                    float every;
-                    reportEvery = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out every) ? every : 0f;
+                    reportEvery = CrowFlags.Number(args, "-crow-camera-report", 0f);
                     nextReport = 0f;
                     Hook();
                     CrowEvents.PreCull("Cameras.Count", Count);
                 });
-            string value = CrowFlags.Value(args, "-crow-rt-cameras") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string value = CrowFlags.Value(args, "-crow-rt-cameras", "on");
             if (value != null) Diag.Guard("Cameras.RtCameras", () => Set(value));
-            string menu = CrowFlags.Value(args, "-crow-menu-cull") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string menu = CrowFlags.Value(args, "-crow-menu-cull", "on");
             if (menu != null) Diag.Guard("MenuCull", () => MenuCull.Set(menu == "on"));
             string fog = CrowFlags.Value(args, "-crow-fog-far");
             if (fog != null) Diag.Guard("FogFar", () => FogFar(fog == "on"));
-            string near = CrowFlags.Value(args, "-crow-near-plane") ?? (Application.platform == RuntimePlatform.PSP2 ? "1" : null);
+            string near = CrowFlags.Value(args, "-crow-near-plane", "1");
             if (CrowFlags.Value(args, "-crow-near-fog") == "off") NearPlane.FogMap(false);
             if (near != null) Diag.Guard("NearPlane", () => NearPlane.Set(near));
             UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens and the rig's parked (each guarded there)
@@ -126,56 +121,6 @@ namespace CrowCompat
             }
             fogCamera = null;
             setFar = -1f;
-        }
-
-        // -crow-cycle's player=hide|noshadow|show (a cost test): the player's own renderers (Mara and what
-        // she holds; not the menus' layer 5) switched off, or their shadow casting off, or back. Logs
-        // what they are: renderers drawn, their materials and vertices.
-        static readonly Dictionary<Renderer, UnityEngine.Rendering.ShadowCastingMode> playerChanged = new Dictionary<Renderer, UnityEngine.Rendering.ShadowCastingMode>();
-        static readonly List<Renderer> playerHidden = new List<Renderer>();
-
-        static void Player(string value)
-        {
-            foreach (Renderer renderer in playerHidden)
-                if (renderer != null) renderer.enabled = true;
-            playerHidden.Clear();
-            foreach (KeyValuePair<Renderer, UnityEngine.Rendering.ShadowCastingMode> pair in playerChanged)
-                if (pair.Key != null) pair.Key.shadowCastingMode = pair.Value;
-            playerChanged.Clear();
-            int drawn = 0, casters = 0, vertices = 0, skinned = 0;
-            var sizes = new int[4];  // casters by bounds diagonal: under 0.1, 0.2, 0.4 m, larger
-            var materials = new HashSet<Material>();
-            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-            {
-                if (!renderer.enabled || renderer.gameObject.layer == 5 || !(renderer is MeshRenderer || renderer is SkinnedMeshRenderer)) continue;
-                if (!renderer.transform.root.name.StartsWith("CharacterCameraPrefab")) continue;
-                if (!renderer.isVisible) continue;
-                drawn++;
-                if (renderer is SkinnedMeshRenderer) skinned++;
-                foreach (Material material in renderer.sharedMaterials) materials.Add(material);
-                MeshFilter filter = renderer.GetComponent<MeshFilter>();
-                if (filter != null && filter.sharedMesh != null) vertices += filter.sharedMesh.vertexCount;
-                bool caster = renderer.shadowCastingMode != UnityEngine.Rendering.ShadowCastingMode.Off;
-                if (caster)
-                {
-                    casters++;
-                    float size = renderer.bounds.size.magnitude;
-                    sizes[size < 0.1f ? 0 : size < 0.2f ? 1 : size < 0.4f ? 2 : 3]++;
-                }
-                if (value == "hide")
-                {
-                    renderer.enabled = false;
-                    playerHidden.Add(renderer);
-                }
-                else if (value == "noshadow" && caster)
-                {
-                    playerChanged[renderer] = renderer.shadowCastingMode;
-                    renderer.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-                }
-            }
-            Debug.Log("CROW_CAMERA player " + value + ": " + drawn + " renderers drawn (" + skinned + " skinned), " + casters + " casting, " +
-                      materials.Count + " materials, " + vertices + " vertices; casters by size <0.1m=" + sizes[0] + " <0.2m=" + sizes[1] +
-                      " <0.4m=" + sizes[2] + " more=" + sizes[3]);
         }
 
         static void FogTick(float now)
@@ -216,11 +161,6 @@ namespace CrowCompat
         // -crow-cycle's and -crow-ab's rtcams=<mode>.
         internal static bool Change(string key, string value)
         {
-            if (key == "player")
-            {
-                Player(value);
-                return true;
-            }
             if (key == "menucull")
             {
                 MenuCull.Set(value == "on");
@@ -241,7 +181,6 @@ namespace CrowCompat
                 NearPlane.FogMap(value != "off");
                 return true;
             }
-            if (RenderCost.Change(key, value) || UiPark.Change(key, value)) return true;
             if (key != "rtcams") return false;
             Set(value);
             return true;
@@ -423,7 +362,7 @@ namespace CrowCompat
                 Camera camera = pair.Key;
                 if (camera == null) continue;
                 var line = new StringBuilder("CROW_CAMERA scene=").Append(camera.gameObject.scene.name.Replace(' ', '_'));
-                line.Append(" path=").Append(Perf.Path(camera.transform, 4));
+                line.Append(" path=").Append(Hierarchy.Path(camera.transform, 4));
                 line.Append(" renders=").Append((pair.Value / (double)frames).ToString("F2", CultureInfo.InvariantCulture)).Append("/frame");
                 RenderTexture target = camera.targetTexture;
                 line.Append(" main=").Append(IsMain(camera) ? 1 : 0);
@@ -444,7 +383,7 @@ namespace CrowCompat
                 Filming entry = filming.FirstOrDefault(f => f.Camera == camera);
                 if (entry != null)
                     line.Append(" shownBy=").Append(entry.Shown.Count).Append('+').Append(entry.ShownUi.Count).Append("ui")
-                        .Append(" seen=").Append(Seen(entry) ? 1 : 0).Append(entry.Shown.Count > 0 ? " screen=" + Perf.Path(entry.Shown[0].transform, 3) : "");
+                        .Append(" seen=").Append(Seen(entry) ? 1 : 0).Append(entry.Shown.Count > 0 ? " screen=" + Hierarchy.Path(entry.Shown[0].transform, 3) : "");
                 if (IsMain(camera))
                 {
                     line.Append(" fog=").Append(RenderSettings.fog ? RenderSettings.fogMode + ":" + RenderSettings.fogStartDistance.ToString("F0", CultureInfo.InvariantCulture) +
@@ -466,7 +405,6 @@ namespace CrowCompat
             Matrix4x4 view = camera.worldToCameraMatrix;
             float fogEnd = RenderSettings.fog && RenderSettings.fogMode == FogMode.Linear ? RenderSettings.fogEndDistance : float.MaxValue;
             int inView = 0, fogged = 0, foggedDraws = 0, draws = 0;
-            var corner = new Vector3[8];
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 if (!renderer.enabled || (camera.cullingMask & (1 << renderer.gameObject.layer)) == 0) continue;
@@ -506,250 +444,10 @@ namespace CrowCompat
         }
     }
 
-    // Cost tests for the render step (-crow-cycle / -crow-fight-cycle / -crow-ab keys; each changes the
-    // picture, so they measure, they are no defaults): canvases=off|on (every enabled screen-space
-    // overlay canvas switched off), level=hide|half|show (the level's renderers drawn last frame
-    // switched off: all, or every other one; not the player's, which live in DontDestroyOnLoad, nor the
-    // enemies'), unseen=off|on (the level's enabled renderers that were not drawn switched off: what
-    // culling them costs), ulights=off|on (the lights Unity still lights objects with, the directional
-    // ones and VitaLit's key lights (culling mask 0) aside, switched off: the per-object light lists).
-    // Each logs what it switched (CROW_RENDER_COST). (uiout=, the canvases' switched-off subtrees moved out
-    // with no EnemySplit routing, went on 21 Oct: UiPark.cs does that for good.)
-    static class RenderCost
-    {
-        static readonly Dictionary<string, List<Behaviour>> offBehaviours = new Dictionary<string, List<Behaviour>>();
-        static readonly Dictionary<string, List<Renderer>> offRenderers = new Dictionary<string, List<Renderer>>();
-
-        internal static bool Change(string key, string value)
-        {
-            if (key == "unseen" && value == "report")
-            {
-                UnseenReport();
-                return true;
-            }
-            if (key == "level" && value == "report")
-            {
-                LevelReport();
-                return true;
-            }
-            switch (key)
-            {
-                case "canvases":
-                    Back(key);
-                    foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
-                    {
-                        if (!canvas.enabled || !canvas.isRootCanvas) continue;
-                        if (value == "report") Watch(canvas);
-                        else if (value == "off" && canvas.renderMode == RenderMode.ScreenSpaceOverlay) Off(key, canvas);
-                    }
-                    break;
-                case "ulights":
-                    Back(key);
-                    if (value == "off")
-                        foreach (Light light in UnityEngine.Object.FindObjectsOfType<Light>())
-                            if (light.enabled && light.type != LightType.Directional && light.cullingMask != 0) Off(key, light);
-                    break;
-                case "level":
-                case "unseen":
-                {
-                    Back(key);
-                    if (value != "hide" && value != "half" && value != "off") break;
-                    var list = offRenderers[key] = new List<Renderer>();
-                    int n = 0;
-                    foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-                    {
-                        if (!renderer.enabled || renderer.gameObject.scene.name == "DontDestroyOnLoad" || Enemy(renderer.transform)) continue;
-                        if (renderer.isVisible != (key == "level")) continue;
-                        if (value == "half" && (n++ & 1) != 0) continue;
-                        renderer.enabled = false;
-                        list.Add(renderer);
-                    }
-                    break;
-                }
-                default:
-                    return false;
-            }
-            List<Behaviour> behaviours;
-            List<Renderer> renderers;
-            int count = offBehaviours.TryGetValue(key, out behaviours) ? behaviours.Count : offRenderers.TryGetValue(key, out renderers) ? renderers.Count : 0;
-            Debug.Log("CROW_RENDER_COST " + key + "=" + value + ": " + count + " off");
-            return true;
-        }
-
-        // unseen=report: the enabled renderers not drawn last frame, by what keeps them from the picture
-        // (CROW_UNSEEN): no mesh or an empty one, no material, a layer the main camera doesn't draw,
-        // zero size, past the far plane, out of the view, or in the view (behind something: the GPU's
-        // depth test isn't culling; in view and not drawn means culled by Unity's own tests), by root.
-        static void UnseenReport()
-        {
-            Camera camera = Camera.main;
-            if (camera == null) return;
-            var planes = GeometryUtility.CalculateFrustumPlanes(camera);
-            var reasons = new Dictionary<string, int>();
-            var roots = new Dictionary<string, int>();
-            int total = 0;
-            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-            {
-                if (!renderer.enabled || !renderer.gameObject.activeInHierarchy || renderer.isVisible) continue;
-                total++;
-                string reason;
-                var filter = renderer.GetComponent<MeshFilter>();
-                Bounds bounds = renderer.bounds;
-                float far = camera.farClipPlane;
-                if (renderer is MeshRenderer && (filter == null || filter.sharedMesh == null)) reason = "nomesh";
-                else if (renderer is MeshRenderer && filter.sharedMesh.vertexCount == 0) reason = "emptymesh";
-                else if (renderer.sharedMaterials.All(m => m == null)) reason = "nomaterial";
-                else if ((camera.cullingMask & (1 << renderer.gameObject.layer)) == 0) reason = "layer" + renderer.gameObject.layer;
-                else if (bounds.size == Vector3.zero) reason = "zerosize";
-                else if (bounds.SqrDistance(camera.transform.position) > far * far) reason = "pastfar";
-                else if (!GeometryUtility.TestPlanesAABB(planes, bounds)) reason = "outofview";
-                else reason = "inview";
-                reason += renderer is MeshRenderer ? "" : ":" + renderer.GetType().Name;
-                int n;
-                reasons.TryGetValue(reason, out n);
-                reasons[reason] = n + 1;
-                string root = renderer.transform.root.name.Replace(' ', '_') + "/" + reason;
-                roots.TryGetValue(root, out n);
-                roots[root] = n + 1;
-            }
-            Debug.Log("CROW_UNSEEN total=" + total + " " + string.Join(" ", reasons.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
-            Debug.Log("CROW_UNSEEN roots " + string.Join(" ", roots.OrderByDescending(p => p.Value).Take(40).Select(p => p.Key + "=" + p.Value).ToArray()));
-        }
-
-        // level=report: the level's renderers drawn last frame (not the player's or the enemies'), each with
-        // its root, kind, queue, vertices and material (CROW_LEVEL_DRAWN), and by material (CROW_LEVEL_MATS).
-        static void LevelReport()
-        {
-            var byMaterial = new Dictionary<string, int>();
-            int n = 0;
-            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
-            {
-                if (!renderer.enabled || !renderer.isVisible || renderer.gameObject.scene.name == "DontDestroyOnLoad" || Enemy(renderer.transform)) continue;
-                n++;
-                var filter = renderer.GetComponent<MeshFilter>();
-                Material material = renderer.sharedMaterial;
-                string mat = material == null ? "none" : material.name.Replace(' ', '_') + "@" + material.renderQueue;
-                int count;
-                byMaterial.TryGetValue(mat, out count);
-                byMaterial[mat] = count + 1;
-                Bounds b = renderer.bounds;
-                Debug.Log("CROW_LEVEL_DRAWN " + Perf.Path(renderer.transform, 3) + " kind=" + renderer.GetType().Name +
-                          " verts=" + (filter != null && filter.sharedMesh != null ? filter.sharedMesh.vertexCount : -1) +
-                          " subs=" + renderer.sharedMaterials.Length + " mat=" + mat + " size=" + b.size.magnitude.ToString("F1") +
-                          " at=" + b.center.x.ToString("F0") + "," + b.center.y.ToString("F0") + "," + b.center.z.ToString("F0"));
-            }
-            Debug.Log("CROW_LEVEL_MATS drawn=" + n + " materials=" + byMaterial.Count + " " +
-                      string.Join(" ", byMaterial.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
-        }
-
-        // canvases=report: each enabled root canvas, its place, mode and content, and in how many of the
-        // next 30 frames its own transform and any of its graphics' transforms changed (CROW_CANVAS).
-        static readonly List<Canvas> watched = new List<Canvas>();
-        static readonly List<int> movedFrames = new List<int>(), dirtyFrames = new List<int>();
-        static int watchFrames = -1;
-
-        static void Watch(Canvas canvas)
-        {
-            if (watchFrames < 0)
-            {
-                watchFrames = 0;
-                CrowEvents.BeforeRender("RenderCost.WatchTick", WatchTick);
-            }
-            if (watched.Count == 0) watchFrames = 0;
-            canvas.transform.hasChanged = false;
-            foreach (Graphic graphic in canvas.GetComponentsInChildren<Graphic>(false)) graphic.transform.hasChanged = false;
-            watched.Add(canvas);
-            movedFrames.Add(0);
-            dirtyFrames.Add(0);
-        }
-
-        static void WatchTick()
-        {
-            if (watched.Count == 0) return;
-            for (int i = 0; i < watched.Count; i++)
-            {
-                Canvas canvas = watched[i];
-                if (canvas == null) continue;
-                if (canvas.transform.hasChanged) movedFrames[i]++;
-                canvas.transform.hasChanged = false;
-                bool dirty = false;
-                foreach (Graphic graphic in canvas.GetComponentsInChildren<Graphic>(false))
-                {
-                    if (graphic.transform.hasChanged) dirty = true;
-                    graphic.transform.hasChanged = false;
-                }
-                if (dirty) dirtyFrames[i]++;
-            }
-            if (++watchFrames < 30) return;
-            for (int i = 0; i < watched.Count; i++)
-            {
-                Canvas canvas = watched[i];
-                if (canvas == null) continue;
-                Graphic[] graphics = canvas.GetComponentsInChildren<Graphic>(false);
-                Debug.Log("CROW_CANVAS " + Perf.Path(canvas.transform, 8) + " mode=" + canvas.renderMode + " order=" + canvas.sortingOrder +
-                          " transforms=" + canvas.GetComponentsInChildren<RectTransform>(true).Length + " active=" + canvas.GetComponentsInChildren<RectTransform>(false).Length +
-                          " graphics=" + graphics.Length + " drawn=" + graphics.Count(g => g.enabled && g.canvasRenderer != null && !g.canvasRenderer.cull) +
-                          " canvases=" + canvas.GetComponentsInChildren<Canvas>(false).Length + " moved=" + movedFrames[i] + "/30 graphicsMoved=" + dirtyFrames[i] + "/30");
-                var parts = new StringBuilder("CROW_CANVAS_PARTS " + canvas.name.Replace(' ', '_'));
-                var subtrees = new List<KeyValuePair<Transform, int>>();
-                var level = new List<Transform> { canvas.transform };
-                for (int depth = 0; depth < 5; depth++)
-                {
-                    var next = new List<Transform>();
-                    foreach (Transform parent in level)
-                        foreach (Transform child in parent)
-                        {
-                            int size = child.GetComponentsInChildren<Transform>(true).Length;
-                            if (size < 20) continue;
-                            subtrees.Add(new KeyValuePair<Transform, int>(child, size));
-                            next.Add(child);
-                        }
-                    level = next;
-                }
-                foreach (KeyValuePair<Transform, int> pair in subtrees.OrderByDescending(p => p.Value).Take(40))
-                    parts.Append(' ').Append(Perf.Path(pair.Key, 2)).Append('=').Append(pair.Value).Append(pair.Key.gameObject.activeSelf ? "" : "(off)")
-                         .Append('/').Append(pair.Key.GetComponentsInChildren<Transform>(false).Length);
-                Debug.Log(parts.ToString());
-            }
-            watched.Clear();
-            movedFrames.Clear();
-            dirtyFrames.Clear();
-        }
-
-        static bool Enemy(Transform transform)
-        {
-            for (Transform t = transform; t != null; t = t.parent)
-                if (t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.GetComponent<Rigidbody>() != null) return true;
-            return false;
-        }
-
-        static void Off(string key, Behaviour behaviour)
-        {
-            List<Behaviour> list;
-            if (!offBehaviours.TryGetValue(key, out list)) offBehaviours[key] = list = new List<Behaviour>();
-            behaviour.enabled = false;
-            list.Add(behaviour);
-        }
-
-        static void Back(string key)
-        {
-            List<Behaviour> behaviours;
-            if (offBehaviours.TryGetValue(key, out behaviours))
-                foreach (Behaviour behaviour in behaviours)
-                    if (behaviour != null) behaviour.enabled = true;
-            offBehaviours.Remove(key);
-            List<Renderer> renderers;
-            if (offRenderers.TryGetValue(key, out renderers))
-                foreach (Renderer renderer in renderers)
-                    if (renderer != null) renderer.enabled = true;
-            offRenderers.Remove(key);
-        }
-    }
-
     // -crow-menu-cull: the Main Camera draws only the menus' layer while a full-screen menu is up.
     static class MenuCull
     {
-        const int MenuLayers = 1 << 5;  // UI: the menus' 3D objects (portrait, equipped gun, item, monitor) and lights
+        const int MenuLayers = 1 << MaraScene.UiLayer;  // the menus' 3D objects and lights
         static readonly string[] Names = { "UI Canvas Inventory OFF", "UI Canvas Map OFF", "UI Canvas Pause OFF" };
         static readonly GameObject[] canvases = new GameObject[3];
         static bool on, hooked;
@@ -794,7 +492,7 @@ namespace CrowCompat
         static void Find()
         {
             for (int i = 0; i < canvases.Length; i++) canvases[i] = null;
-            GameObject holder = GameObject.Find("UI Canvases");
+            GameObject holder = GameObject.Find(MaraScene.Canvases);
             if (holder == null) return;
             Transform root = holder.transform;
             for (int c = 0; c < root.childCount; c++)
@@ -864,9 +562,9 @@ namespace CrowCompat
                     left.RemoveWhere(c => c == null);
                 });
             }
-            // Every camera back to its own near plane, whatever comes next: PreCull starts again from the game's.
-            // (Only for "game" before 21 Oct: 1 -> 0.5 m left the cameras at 1, and 1 -> 2 took 1 m for the game's
-            // own, the fog mapped from there.)
+            // Every camera back to its own near plane, whatever comes next: PreCull starts again from the game's
+            // (restoring only for "game" left a camera at the old value when the plane moved, and took it for the
+            // game's own).
             foreach (KeyValuePair<Camera, float> pair in changed)
                 if (pair.Key != null) pair.Key.nearClipPlane = pair.Value;
             changed.Clear();

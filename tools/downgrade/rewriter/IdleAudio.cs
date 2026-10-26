@@ -4,7 +4,7 @@ using Mono.Cecil;
 using Mono.Cecil.Cil;
 
 // Idle AudioSources off: the calls CrowCompat IdleAudio (compat/IdleAudio.cs) needs to see. Every
-// AudioSource.Play, PlayDelayed, PlayScheduled, PlayOneShot and UnPause call becomes a call of
+// AudioSource.Play and PlayOneShot call becomes a call of
 // IdleAudio's static method of the same name with the source as its first argument (it enables the
 // source again if IdleAudio turned it off, then plays), and every Behaviour.enabled read and write
 // goes through IdleAudio.GetEnabled and SetEnabled (a source IdleAudio turned off still reads as
@@ -13,10 +13,10 @@ using Mono.Cecil.Cil;
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {
-    static readonly HashSet<string> AudioPlayCalls = new HashSet<string> { "Play", "PlayDelayed", "PlayScheduled", "PlayOneShot", "UnPause" };
+    // The game's plays (it has no PlayDelayed, PlayScheduled or UnPause call).
+    static readonly HashSet<string> AudioPlayCalls = new HashSet<string> { "Play", "PlayOneShot" };
 
-    // The rules a site must match, registered before the scan so that one with none fails the run. The
-    // game has no PlayDelayed, PlayScheduled or UnPause call (21 Oct 2026): those stay unregistered.
+    // The rules a site must match, registered before the scan so that one with none fails the run.
     static readonly string[] IdleAudioRules = { "AudioSource.Play", "AudioSource.PlayOneShot", "Behaviour.enabled" };
 
     static int RouteAudioSourcePlays(ModuleDefinition module)

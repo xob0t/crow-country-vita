@@ -321,10 +321,9 @@ class TrimAssemblies
         }
         foreach (ModuleDefinition module in changed.OrderBy(m => m.Name))
         {
-            // Beside, then in place: a write that fails leaves the rewriter's file as it was.
+            // Beside, then over it in one step: a write that fails leaves the rewriter's file as it was.
             module.Write(files[module] + ".trim");
-            File.Delete(files[module]);
-            File.Move(files[module] + ".trim", files[module]);
+            File.Replace(files[module] + ".trim", files[module], null);
         }
         Console.WriteLine("Trimmed: " + removed + " unused action and SmoothSave types removed, " + stubbedTypes + " kept with " +
                           bodies + " bodies that throw (serialized), " + kept.Count + " kept for references, " + rules +

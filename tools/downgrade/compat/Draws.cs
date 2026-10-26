@@ -18,11 +18,10 @@ using UnityEngine.SceneManagement;
 //                             casters, small meshes, static batches; after a scene load also the
 //                             materials used most and the duplicate groups (CROW_DRAWMAT)
 //   -crow-casters <rule>      turn shadow casting off where the rule says, at every scene load and
-//                             every 10 s (renderers come and go): off (all), flat (flat horizontal
-//                             renderers: floors, ceilings, roads), small:<m> (bounds diagonal under m
-//                             metres), player (all but the player's own: Mara keeps her shadow; the
-//                             PS Vita's default, see Quality.cs), player:<m> (the player's parts of m
-//                             metres or more keep theirs), game (none). A shadows-only renderer
+//                             every 10 s (renderers come and go): off (all), player (all but the
+//                             player's own: Mara keeps her shadow; the PS Vita's default, see
+//                             Quality.cs), game (none). The shadow pass costs a fixed 9 ms
+//                             whatever it casts (status-log.md), so there are no finer rules. A shadows-only renderer
 //                             the rule takes is switched off: with its casting off it would be drawn
 //                             with its material (Entrance's tutorial paper got its hidden caster box,
 //                             a cube with the colour atlas; Ocean Kingdom has 354 of them).
@@ -37,8 +36,7 @@ namespace CrowCompat
         static string casterRule;
         static float lastCasters = -10f;
 
-        // From Quality.Install: Install, then Merge's and Cameras', then InstallReport (Install installed those two
-        // in between until 21 Oct; the order is the same).
+        // From Quality.Install: Install, then Merge's and Cameras', then InstallReport.
         public static void Install(string[] args)
         {
             string casters = CrowFlags.Value(args, "-crow-casters");
@@ -121,7 +119,7 @@ namespace CrowCompat
             if (casterRule == null || now - lastCasters < 10f || !CrowEvents.Turn(lastCasters < 0f)) return;
             lastCasters = now;
             int changed = 0, casters = 0;
-            if (casterRule == "player" || casterRule.StartsWith("player:")) PlayerRenderers();
+            if (casterRule == "player") PlayerRenderers();
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
             {
                 if (!(renderer is MeshRenderer) && !(renderer is SkinnedMeshRenderer)) continue;
@@ -149,7 +147,7 @@ namespace CrowCompat
             bool player;
             if (playerRoots.TryGetValue(root, out player)) return player;
             if (playerRoots.Count > 4096) playerRoots.Clear();  // roots of unloaded scenes
-            return playerRoots[root] = root.name.StartsWith("CharacterCameraPrefab");
+            return playerRoots[root] = MaraScene.IsPlayerRoot(root);
         }
 
         // The player rules' renderers: those under a root named so (PlayerRoot), in a loaded scene or in
@@ -200,24 +198,7 @@ namespace CrowCompat
             // (Ladder: "casters player: 43 of 43 off"). Left so: at the PS Vita's 12 m shadow distance most of
             // them would draw none anyway (Ladder's camera is 15.3 m from the climber; the Driving Intro's and
             // the Ending's start 18.7 and 12.3 m from their scene's origin).
-            if (rule == "player") return !playerRenderers.Contains(renderer);
-            Bounds bounds = renderer.bounds;
-            Vector3 size = bounds.size;
-            // player:<m>: the player's parts of m metres (bounds diagonal) or more (Mara has 39 casters:
-            // 7 under 0.1 m, 7 under 0.2, 22 under 0.4, 3 larger).
-            if (rule.StartsWith("player:"))
-            {
-                float least;
-                return !playerRenderers.Contains(renderer) ||
-                       (float.TryParse(rule.Substring(7), NumberStyles.Float, CultureInfo.InvariantCulture, out least) && size.magnitude < least);
-            }
-            if (rule == "flat") return Flat(size);
-            if (rule.StartsWith("small:"))
-            {
-                float metres;
-                return float.TryParse(rule.Substring(6), NumberStyles.Float, CultureInfo.InvariantCulture, out metres) && size.magnitude < metres;
-            }
-            return false;
+            return rule == "player" && !playerRenderers.Contains(renderer);
         }
 
         // The vertex channels a readable mesh has (positions and the others it fills).
@@ -401,7 +382,7 @@ namespace CrowCompat
                       string.Join(" ", casterNames.OrderByDescending(p => p.Value).Take(20).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
             foreach (KeyValuePair<Renderer, Mesh> pair in big.OrderByDescending(p => p.Value.vertexCount).Take(8))
                 Debug.Log("CROW_DRAWMAT mesh " + pair.Value.name.Replace(' ', '_') + " vertices=" + pair.Value.vertexCount + " readable=" + (pair.Value.isReadable ? 1 : 0) +
-                          " path=" + Perf.Path(pair.Key.transform, 5));
+                          " path=" + Hierarchy.Path(pair.Key.transform, 5));
             Debug.Log("CROW_DRAWMAT shaders " + string.Join(" ", shaders.OrderByDescending(p => p.Value).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray()));
             foreach (KeyValuePair<Material, int> pair in materials.OrderByDescending(p => p.Value).Take(15))
                 Debug.Log("CROW_DRAWMAT uses=" + pair.Value + " " + pair.Key.name.Replace(' ', '_') + " shader=" + (pair.Key.shader == null ? "?" : pair.Key.shader.name.Replace(' ', '_')));

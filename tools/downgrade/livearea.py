@@ -59,8 +59,9 @@ def fetch():
                     data = response.read()
             except OSError as error:
                 raise RuntimeError(f'cannot download {url} ({error}); the LiveArea art needs it once') from error
-            path.with_suffix('.part').write_bytes(data)
-            path.with_suffix('.part').replace(path)
+            part = path.with_name(path.name + '.part')
+            part.write_bytes(data)
+            part.replace(path)
         actual = hashlib.sha256(path.read_bytes()).hexdigest()
         if actual != digest:
             log(f'warning: {path.name} differs from the store image the crops were made for; check work/livearea/')

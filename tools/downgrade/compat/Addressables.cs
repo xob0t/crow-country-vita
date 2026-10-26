@@ -5,11 +5,10 @@ using UnityEngine.SceneManagement;
 
 // Addressables, which the game loads its player prefab and its scenes through: the rewriter ships
 // neither Unity.Addressables nor Unity.ResourceManager (pipeline.ROOTS), so the game's calls come
-// here by the naming convention in Compat2018.cs. The assets the game's catalog names are in an
-// AddressablesTable the build lists in the player's preloaded assets (DowngradeBuild), so they load
-// at startup with dependencies the build worked out. (From Resources, the PS Vita player spent 40 s
-// in one frame on the player prefab's dependencies, ResourceManager::FindDependencies.) Other keys
-// load from Resources/Addressables/<key>; scenes are in the build settings and load by name. A key
+// here by the naming convention in Compat2018.cs. The catalog's one asset the game loads, the player
+// prefab, comes from the CrowMara scene (SceneFlow.cs MaraScene: from Resources, the PS Vita player spent
+// 40 s in one frame on its dependencies, ResourceManager::FindDependencies). Other keys load from
+// Resources/Addressables/<key>; scenes are in the build settings and load by name. A key
 // that is in no catalog (the game asks for a BGM prefab its catalog lacks) fails as it does in the
 // PC game: the handle completes with a null result.
 // Part of CrowCompat; see Compat2018.cs.
@@ -28,11 +27,10 @@ namespace CrowCompat
         {
             // The player prefab, which a build with the CrowMara scene leaves out (Loading.cs MaraScene),
             // is done at once with no asset: MaraLoader takes the scene's instance.
-            UnityEngine.Object preloaded = null;
-            if (MaraScene.Serves(key) || AddressablesTable.Assets.TryGetValue(key.ToString(), out preloaded))
+            if (MaraScene.Serves(key))
             {
                 var loaded = new Operation<T>();
-                loaded.Watch(null, () => (T)(object)preloaded);
+                loaded.Watch(null, () => default(T));
                 return new UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<T>(loaded);
             }
             string path = Folder + key;
@@ -57,7 +55,7 @@ namespace CrowCompat
             load.allowSceneActivation = activateOnLoad;
             if (priority > 0) load.priority = priority;
             operation.Watch(load, () =>
-                new UnityEngine_ResourceManagement_ResourceProviders_SceneInstance(SceneManager.GetSceneByName(name), load));
+                new UnityEngine_ResourceManagement_ResourceProviders_SceneInstance(SceneManager.GetSceneByName(name)));
             return new UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<UnityEngine_ResourceManagement_ResourceProviders_SceneInstance>(operation);
         }
 
@@ -108,28 +106,7 @@ namespace CrowCompat
                 else completed.Add(callback);
             }
 
-            public void RemoveCompleted(Action<UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<T>> callback)
-            {
-                completed.Remove(callback);
-            }
-
             public void Acquire() { references++; }
-        }
-    }
-
-    // The Addressables assets, keyed as the game's catalog keys them; the build creates one table and
-    // lists it in the player's preloaded assets, which load before the first scene.
-    public class AddressablesTable : ScriptableObject
-    {
-        public string[] keys = new string[0];
-        public UnityEngine.Object[] assets = new UnityEngine.Object[0];
-
-        internal static readonly Dictionary<string, UnityEngine.Object> Assets = new Dictionary<string, UnityEngine.Object>();
-
-        void OnEnable()
-        {
-            for (int i = 0; i < keys.Length && i < assets.Length; i++)
-                if (assets[i] != null) Assets[keys[i]] = assets[i];
         }
     }
 
@@ -145,13 +122,12 @@ namespace CrowCompat
         public bool IsValid() { return operation != null; }
         public bool IsDone { get { return operation == null || operation.done; } }
         public TObject Result { get { return operation == null ? default(TObject) : operation.result; } }
-        public float PercentComplete { get { return IsDone ? 1f : operation.request != null ? operation.request.progress : 0f; } }
         public TObject WaitForCompletion() { return operation == null ? default(TObject) : operation.Wait(); }
 
         public event Action<UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<TObject>> Completed
         {
             add { if (operation != null) operation.OnCompleted(value); }
-            remove { if (operation != null) operation.RemoveCompleted(value); }
+            remove { }  // the game never unsubscribes
         }
 
         internal void Acquire() { if (operation != null) operation.Acquire(); }
@@ -169,16 +145,13 @@ namespace CrowCompat
     public struct UnityEngine_ResourceManagement_ResourceProviders_SceneInstance
     {
         readonly Scene scene;
-        readonly AsyncOperation operation;
 
-        public UnityEngine_ResourceManagement_ResourceProviders_SceneInstance(Scene scene, AsyncOperation operation)
+        public UnityEngine_ResourceManagement_ResourceProviders_SceneInstance(Scene scene)
         {
             this.scene = scene;
-            this.operation = operation;
         }
 
         public Scene Scene { get { return scene; } }
-        public AsyncOperation ActivateAsync() { operation.allowSceneActivation = true; return operation; }
     }
 
     // A serialized reference to an addressable prefab (KeepAliveAssetLoader.prefabRef), kept with its
@@ -186,13 +159,12 @@ namespace CrowCompat
     [Serializable]
     public class UnityEngine_AddressableAssets_AssetReferenceGameObject
     {
+#pragma warning disable 0169, 0414  // serialized only
         [SerializeField] string m_AssetGUID = "";
         [SerializeField] string m_SubObjectName;
         [SerializeField] string m_SubObjectType = null;
+#pragma warning restore 0169, 0414
 
         public UnityEngine_AddressableAssets_AssetReferenceGameObject(string guid) { m_AssetGUID = guid; }
-        public string AssetGUID { get { return m_AssetGUID; } }
-        public string SubObjectName { get { return m_SubObjectName; } set { m_SubObjectName = value; } }
-        public string SubObjectType { get { return m_SubObjectType; } }
     }
 }

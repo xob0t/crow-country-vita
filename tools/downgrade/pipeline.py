@@ -21,6 +21,9 @@ Stages, each runnable alone:
            metadata in builds/crow-<version>-vita, replaying the build's linker and IL2CPP steps
            (minutes, not the editor's half hour). For code changes; then vita.py sync.
 
+CROW_* environment variables switch parts of the stages on and off: common.BUILD_SWITCHES lists them with
+their values, and docs/build.md describes them.
+
 The game installation is only read. Outputs go to work/, builds/ and artifacts/. The stages after rip
 (project, build, package) follow The Drifter's port (github.com/xob0t/the-drifter-vita) as they are
 written.
@@ -41,6 +44,7 @@ import urllib.parse
 import urllib.request
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 import progress
 from asset_rules import (
@@ -74,13 +78,15 @@ from common import (
     CECIL,
     CSC,
     DEFAULT_GAME,
-    EDITORS,
     HERE,
     TARGET,
     VITA_HOST,
     WORK,
     build_folder,
+    build_switches,
+    describe_switches,
     editor_data,
+    editor_exe,
     file_hash,
     folder_meta,
     game_data,
@@ -200,13 +206,34 @@ def post(base, path, fields):
 PLATFORM_ENGINE = {'vita': Path('PlaybackEngines') / 'PSP2Player' / 'Managed'}
 
 
+class EditorPaths(NamedTuple):
+    """The installed editor's folders that the code stages compile, rewrite and link against."""
+
+    data: Path  # Editor/Data
+    bcl: Path  # the unityaot class libraries
+    engine: Path  # the editor's UnityEngine and its modules
+    target_engine: Path  # the platform player's (PLATFORM_ENGINE), else engine
+    gui: Path  # uGUI: the editor's UnityEngine.UI.dll, and the player's in Standalone
+
+
+def editor_paths(version, platform='windows'):
+    data = editor_data(version)
+    engine = data / 'Managed' / 'UnityEngine'
+    return EditorPaths(
+        data,
+        data / 'MonoBleedingEdge' / 'lib' / 'mono' / 'unityaot',
+        engine,
+        data / PLATFORM_ENGINE[platform] if platform in PLATFORM_ENGINE else engine,
+        data / 'UnityExtensions' / 'Unity' / 'GUISystem',
+    )
+
+
 def engine_library(version, out: Path, sources, modules=(), defines=()):
     """Compile a C# 5 library from source files against the editor's unityaot class libraries,
     UnityEngine's core module and the given UnityEngine modules (e.g. 'AudioModule')."""
     check_parts()
-    data = editor_data(version)
-    bcl = data / 'MonoBleedingEdge' / 'lib' / 'mono' / 'unityaot'
-    engine = data / 'Managed' / 'UnityEngine'
+    paths = editor_paths(version)
+    bcl, engine = paths.bcl, paths.engine
     compile_csharp(
         [
             CSC,
@@ -220,7 +247,7 @@ def engine_library(version, out: Path, sources, modules=(), defines=()):
             *(f'/r:{engine / f"UnityEngine.{name}.dll"}' for name in ('CoreModule', *modules)),
             # uGUI, and the UnityEngine facade it references, for the UI members CrowCompat provides.
             f'/r:{engine / "UnityEngine.dll"}',
-            f'/r:{data / "UnityExtensions" / "Unity" / "GUISystem" / "UnityEngine.UI.dll"}',
+            f'/r:{paths.gui / "UnityEngine.UI.dll"}',
             f'/out:{out}',
             *sources,
         ]
@@ -260,24 +287,33 @@ COMPAT_SOURCES = [
             'Addressables',
             'Video',
             'ProbeFiles',
+            'Helpers',
             'Diag',
+            'CrowEvents',
+            'InputProbe',
             'CamEffect',
             'Quality',
+            'LoopProfile',
             'Window',
             'Saves',
             'RewiredPlatform',
             'Memory',
+            'MeshRelease',
             'Settings',
             'Loading',
+            'SceneFlow',
+            'RewriterRuntime',
             'ScriptCost',
             'Draws',
             'Merge',
+            'MergeSplit',
             'Perf',
+            'Particles',
             'SceneSplit',
             'MapPan',
             'Clock',
             'Audio',
-            'AudioProbe',
+            'Threads',
             'Alloc',
             'IdleAudio',
             'VitaLit',
@@ -293,8 +329,8 @@ COMPAT_SOURCES = [
             'UiPark',
             'Decor',
             'Cuts',
-            'Audit',
             'EnemyRebuild',
+            'MergeEnemies',
             'PlayerMerge',
             'FsmTrim',
             'FsmCompile',
@@ -362,9 +398,6 @@ def compat_path(platform):
 
 
 def compile_tools(version, platform):
-    data = editor_data(version)
-    bcl = data / 'MonoBleedingEdge' / 'lib' / 'mono' / 'unityaot'
-    engine = data / 'Managed' / 'UnityEngine'
     bin_dir = WORK / 'bin'
     bin_dir.mkdir(parents=True, exist_ok=True)
     cecil = bin_dir / CECIL.name  # beside the tools, which load it at run time
@@ -383,8 +416,8 @@ def compile_tools(version, platform):
     compile_csharp(
         [CSC, '/nologo', f'/r:{cecil}', f'/out:{bin_dir / "TrimAssemblies.exe"}', HERE / 'TrimAssemblies.cs']
     )
-    target_engine = data / PLATFORM_ENGINE[platform] if platform in PLATFORM_ENGINE else engine
-    return compat, rewriter, [bcl, target_engine, data / 'UnityExtensions' / 'Unity' / 'GUISystem']
+    paths = editor_paths(version, platform)
+    return compat, rewriter, [paths.bcl, paths.target_engine, paths.gui]
 
 
 # Managed wrappers of native libraries a platform lacks; their methods become no-ops
@@ -422,7 +455,9 @@ def rewrite_assemblies(plugins: Path, out: Path, version: str, platform: str, ro
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
     command = [rewriter, plugins, out, compat, ','.join(roots), *references]
     log(' '.join(str(c) for c in command))
-    env = {**os.environ, 'CROW_API_VERSION': version}
+    switches = build_switches(platform, ('code',))
+    log('Code switches: ' + describe_switches(switches))
+    env = {**os.environ, **switches, 'CROW_API_VERSION': version}
     result = subprocess.run([str(c) for c in command], capture_output=True, text=True, env=env)
     log_path.write_text(result.stdout + result.stderr, encoding='utf-8')
     for name in STUBBED_ON.get(platform, []):
@@ -442,34 +477,35 @@ def rewrite_assemblies(plugins: Path, out: Path, version: str, platform: str, ro
 
 # ---------------------------------------------------------------- link
 
+# IL2CPP's null and array bounds checks, which the PS Vita module leaves out; the build sets the same
+# (unity/DowngradeBuild.cs, SetAdditionalIl2CppArgs): keep the two in step.
+IL2CPP_CHECKS = ['--emit-null-checks', '--enable-array-bounds-check']
+
 
 def link_check(version: str, platform: str):
     """Run Unity's linker (UnityLinker, as the editor's IL2CPP build does) on the rewritten assemblies
     with the target's engine and class libraries, outside the editor: it stops at the first type,
     member or attribute that doesn't resolve, which the editor reports only after building every
     scene. Returns the linker's exit code; its output goes to artifacts/downgrade/link-<platform>.log."""
-    data = editor_data(version)
-    linker = EDITORS / version / 'Editor' / 'Data' / 'il2cpp' / 'build' / 'UnityLinker.exe'
-    if not linker.exists():
-        linker = data / 'il2cpp' / 'build' / 'UnityLinker.exe'
+    paths = editor_paths(version, platform)
+    linker = paths.data / 'il2cpp' / 'build' / 'UnityLinker.exe'
     rewritten = rewritten_folder(version, platform)
     staging = WORK / f'link-{platform}'
     if staging.exists():
         shutil.rmtree(staging)
     managed = staging / 'Managed'
     managed.mkdir(parents=True)
-    engine = data / PLATFORM_ENGINE.get(platform, Path('Managed') / 'UnityEngine')
-    bcl = data / 'MonoBleedingEdge' / 'lib' / 'mono' / 'unityaot'
-    for source in [*engine.glob('*.dll'), *bcl.glob('*.dll'), *(bcl / 'Facades').glob('*.dll')]:
+    bcl = paths.bcl
+    for source in [*paths.target_engine.glob('*.dll'), *bcl.glob('*.dll'), *(bcl / 'Facades').glob('*.dll')]:
         shutil.copy2(source, managed / source.name)
     # The player's uGUI; the editor's references UnityEditor.
-    shutil.copy2(data / 'UnityExtensions' / 'Unity' / 'GUISystem' / 'Standalone' / 'UnityEngine.UI.dll', managed)
+    shutil.copy2(paths.gui / 'Standalone' / 'UnityEngine.UI.dll', managed)
     roots = [*rewritten.glob('*.dll'), compat_path(platform)]
     for dll in roots:
         shutil.copy2(dll, managed / dll.name)
     link = staging / 'link.xml'
     link.write_text(link_xml(roots, platform), encoding='utf-8')
-    whitelists = data / 'PlaybackEngines' / 'PSP2Player' / 'Whitelists' if platform == 'vita' else None
+    whitelists = paths.data / 'PlaybackEngines' / 'PSP2Player' / 'Whitelists' if platform == 'vita' else None
     command = [
         linker,
         f'-out={staging / "out"}',
@@ -505,9 +541,8 @@ def link_check(version: str, platform: str):
         '--platform=PSP2',
         '--architecture=ARMv7',
         '--configuration=Release',
-        f'--plugin={linker.parents[2] / "PlaybackEngines" / "PSP2Player" / "Tools" / "PSP2Il2CppPlugin.dll"}',
-        '--emit-null-checks',
-        '--enable-array-bounds-check',
+        f'--plugin={paths.data / "PlaybackEngines" / "PSP2Player" / "Tools" / "PSP2Il2CppPlugin.dll"}',
+        *IL2CPP_CHECKS,
         *(f'--assembly={dll}' for dll in converted),
         f'--generatedcppdir={staging / "cpp"}',
     ]
@@ -536,9 +571,11 @@ def load_check(version: str):
     rewritten = [*rewritten_folder(version, 'windows').glob('*.dll'), compat_path('windows')]
     for dll in rewritten:
         shutil.copy2(dll, staging / dll.name)
-    exe = staging / 'LoadCheck.exe'
-    run([CSC, '/nologo', f'/out:{exe}', HERE / 'LoadCheck.cs'])
-    mono = EDITORS / version / 'Editor' / 'Data' / 'MonoBleedingEdge' / 'bin' / 'mono.exe'
+    tool = WORK / 'bin' / 'LoadCheck.exe'
+    tool.parent.mkdir(parents=True, exist_ok=True)
+    compile_csharp([CSC, '/nologo', f'/out:{tool}', HERE / 'LoadCheck.cs'])
+    exe = shutil.copy2(tool, staging / tool.name)
+    mono = editor_data(version) / 'MonoBleedingEdge' / 'bin' / 'mono.exe'
     env = {**os.environ, 'MONO_PATH': str(staging), 'MONO_LOG_LEVEL': 'debug', 'MONO_LOG_MASK': 'type'}
     result = subprocess.run(
         [str(mono), str(exe), str(staging), *(d.name for d in rewritten)], capture_output=True, text=True, env=env
@@ -674,7 +711,8 @@ def write_if_changed(path: Path, content: bytes):
     write(path, content)
 
 
-# The renamed game assemblies keep their originals' .meta, so the scripts' references stay valid.
+# The renamed game assemblies keep their originals' .meta, so the scripts' references stay valid. The
+# rewriter (DowngradeAssemblies.cs) and CrowCompat (Compat2018.cs) name them too: keep them in step.
 ASSEMBLY_NAMES = {'Recovered.CrowCountry': 'Assembly-CSharp', 'Recovered.Firstpass': 'Assembly-CSharp-firstpass'}
 
 
@@ -714,8 +752,9 @@ def assembly_overlay(exported: Path, game: Path, version: str, platform: str):
 
 
 def asset_overlay(exported: Path, game: Path, version: str, platform: str, assemblies: list):
-    """The rules for the exported assets and settings (asset_rules.py, shader_rules.py), in order: a
-    rule reads the files the rules before it changed. Returns (overlay, exported paths left out)."""
+    """The rules for the exported assets and settings (shader_rules.py, asset_rules.py, material_rules.py,
+    video_rules.py), in order: a rule reads the files the rules before it changed (asset_rules.current_bytes).
+    Returns (overlay, exported paths left out)."""
     overlay, excluded = {}, set()
     overlay.update(shader_overlay(exported, game, version))
     with progress.step('Asset rules'):
@@ -736,9 +775,9 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(npot_texture_overlay(exported, overlay, platform))
         overlay.update(texture_cap_overlay(exported, overlay, platform))
         overlay.update(streamed_mesh_overlay(exported, game))
-        duplicates = mesh_duplicates(exported, platform, overlay)
+        duplicates = mesh_duplicates(exported, overlay)
         overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
-        texture_copies, renamed_references = texture_dedup_overlay(exported, overlay, platform)
+        texture_copies, renamed_references = texture_dedup_overlay(exported, overlay)
         overlay.update(renamed_references)
         moved, renamed = addressables_overlay(exported, overlay)
         overlay.update(moved)
@@ -768,13 +807,15 @@ def editor_scripts():
 
 
 SYNC_RECORD = '.crow-sync.json'  # in the project's folder, outside Assets: the editor ignores it
-# Also there: the hashes of the rule sources (PROJECT_SOURCES) this project was assembled with, which
-# build saves for quickcode_check. Gone while assemble runs, so a project it didn't finish has none.
+# Also there: the hashes of the rule sources (PROJECT_SOURCES) this project was assembled with and the
+# code and project switches it had (project_inputs), which build saves for quickcode_check. Gone while
+# assemble runs, so a project it didn't finish has none.
 PROJECT_INPUTS = '.crow-inputs.json'
 
 
 def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: str):
-    inputs = non_code_inputs(PROJECT_SOURCES)  # as this run reads them
+    inputs = project_inputs(platform)  # as this run reads them
+    log('Project switches: ' + describe_switches(build_switches(platform, ('project',))))
     (project / PROJECT_INPUTS).unlink(missing_ok=True)
     exported = rip_dir / 'ExportedProject'
     plugins, plugin_files, assemblies = assembly_overlay(exported, game, version, platform)
@@ -803,8 +844,6 @@ def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: s
 
 # ---------------------------------------------------------------- build
 
-STEAM_APP_ID = '1996010'  # Crow Country's, from its Steam manifest
-
 
 def build(
     project: Path,
@@ -820,7 +859,7 @@ def build(
     in its own folder (main gives it one) that leaves the full build's log and code stage alone; None
     for all."""
     ARTIFACTS.mkdir(parents=True, exist_ok=True)
-    unity = EDITORS / version / 'Editor' / 'Unity.exe'
+    unity = editor_exe(version)
     if not unity.exists():
         sys.exit(f'No Unity {version} editor at {unity}')
     if editor_has_open(project):
@@ -829,7 +868,12 @@ def build(
     # take its staged assemblies for this build's (a leftover tempStrip ends its watch at once).
     shutil.rmtree(project / 'Temp', ignore_errors=True)
     warn_stale_plugins(project, version, platform)
-    inputs = build_inputs(project)
+    inputs = build_inputs(project, platform)
+    # Every build switch goes to the editor with its value (unity/BuildUtil.cs: Switch); unset ones not at all.
+    switches = build_switches(platform, ('build',))
+    log('Build switches: ' + describe_switches(switches))
+    env = {name: value for name, value in os.environ.items() if name not in switches}
+    env.update((name, value) for name, value in switches.items() if value)
     variant = ('-il2cpp' if platform == 'windows' and backend == 'il2cpp' else '') + ('-scenes' if scenes else '')
     log_path = ARTIFACTS / f'build-{version}-{platform}{variant}.log'
     # The build entry point must match this script even if only the build stage reruns. Only the
@@ -860,18 +904,36 @@ def build(
                 target,
                 *(['-developmentBuild'] if development else []),
                 *(['-codeStage', str(CODE_STAGE)] if platform == 'vita' and not scenes else []),
+                *(['-vitaTitleId', VITA_TITLE_ID] if platform == 'vita' else []),
                 *(['-crowScenes', ';'.join(scenes)] if scenes else []),
                 '-logFile',
                 str(log_path),
-            ]
+            ],
+            env=env,
         )
     log(f'Unity exited {result.returncode} after {time.time() - started:.0f}s; log {log_path}')
     summarize_log(log_path)
     log_build_steps(log_path)
     if result.returncode != 0:
         sys.exit(result.returncode)
-    # Unity can report success after a failed IL2CPP step; check for the player, and for
-    # IL2CPP's failure in the log (a failed link leaves the previous build's game module).
+    check_build_output(output, platform, started, log_path)
+    # What quickcode checks against, written right after the checks: a build that fails later (a native
+    # plugin, Ctrl+C) still leaves it with the code stage the editor saved.
+    if platform == 'vita' and not scenes:
+        save_code_stage(project, version, log_path, {**inputs, **switch_record(platform)})
+    if platform == 'vita':
+        native_plugins(output)
+        boot_config(output)
+    if scenes:
+        folder = output if platform == 'vita' else output.parent
+        folder.with_name(folder.name + '.txt').write_text('\n'.join(scenes) + '\n', encoding='utf-8')
+        log(f'TEST BUILD of the first scene and {", ".join(scenes)} in {folder}')
+
+
+def check_build_output(output: Path, platform: str, started: float, log_path: Path):
+    """Stop when a build the editor reported as a success is not one: Unity can report success after a
+    failed IL2CPP step (a failed link leaves the previous build's game module), with errors in its
+    report, or after scene steps of the editor scripts failed. A good build has no error."""
     player = next(output.glob('*.self'), None) if platform == 'vita' else (output if output.exists() else None)
     if player is None:
         sys.exit(f'Unity reported success but wrote no player at {output}')
@@ -885,33 +947,37 @@ def build(
     log_text = log_path.read_text(encoding='utf-8', errors='replace')
     if 'BuilderFailedException' in log_text:
         sys.exit(f'Unity reported success but IL2CPP failed; see {log_path}')
-    check_scene_steps(log_text, log_path)
-    # What quickcode checks against, right after the checks: before (21 Oct) it was written last, so a
-    # build that failed after them (a native plugin, Ctrl+C) left a code stage without it, which
-    # quickcode then took for one from before the check existed and skipped it.
-    if platform == 'vita' and not scenes:
-        keep_linker_inputs(log_path)
-        plugins = sorted((project / 'Assets' / 'Plugins').glob('*.dll'))
-        (CODE_STAGE / LAYOUT).write_text('\n'.join(serialized_layout(plugins, version)) + '\n', encoding='utf-8')
-        (CODE_STAGE / NON_CODE_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
-    if platform == 'vita':
-        native_plugins(output)
-        boot_config(output)
-    if scenes:
-        folder = output if platform == 'vita' else output.parent
-        folder.with_name(folder.name + '.txt').write_text('\n'.join(scenes) + '\n', encoding='utf-8')
-        log(f'TEST BUILD of the first scene and {", ".join(scenes)} in {folder}')
+    summary = re.findall(r'^DOWNGRADE_BUILD \w+ errors=(\d+)', log_text, re.M)
+    if not summary:
+        sys.exit(f'The editor log has no DOWNGRADE_BUILD summary; see {log_path}')
+    errors = int(summary[-1])
+    failed = [line[:SUMMARY_WIDTH] for line in SCENE_STEP_FAILED.findall(log_text)]
+    if errors:
+        # The build report's errors, which DowngradeBuild writes beside the player.
+        messages = output.with_name(output.name + '.messages.txt')
+        reported = messages.read_text(encoding='utf-8', errors='replace').splitlines() if messages.exists() else []
+        failed += [line[:SUMMARY_WIDTH] for line in reported if line.startswith(('Error\t', 'Exception\t'))]
+    if not errors and not failed:
+        return
+    for line in failed[:20]:
+        log(f'  {line}')
+    message = (
+        f'The build reports {errors} errors, and {len(failed)} lines above say what failed ({log_path}, '
+        f'{output.name}.messages.txt beside the player); a good build has none'
+    )
+    if build_switches(platform, ('check',))['CROW_ALLOW_SCENE_FAILURES'] != '1':
+        sys.exit(f'{message}. CROW_ALLOW_SCENE_FAILURES=1 lets it through')
+    log(f'WARNING (CROW_ALLOW_SCENE_FAILURES=1): {message}')
 
 
 # The editor scripts' per-scene steps catch their exceptions, log them and go on, and Unity then
 # reports success: a merge or split that threw halfway leaves its scene as far as it got, and an
 # area whose MeshCombineStudio bake failed combines at run time again (Station Square -> Pool ran out
-# of memory that way). Their failure lines (MergeScenes.cs, PlayerMerge.cs: "<step> <scene> failed:
-# <exception>"; an enemy type's or the player's atlas, from the merge's report, EnemyRebuild.cs and
-# compat/PlayerMerge.cs: "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>", which before
-# 21 Oct went through; MeshCombineBake.cs (the bake's and the strip's), ProBuilderMeshes.cs, PuddleBake.cs: a
-# summary with failed=N) fail the build.
-# CROW_ALLOW_SCENE_FAILURES=1 lets such a build through, with the warning, for experiments.
+# of memory that way). check_build_output prints their failure lines and stops: MergeScenes.cs and
+# PlayerMerge.cs write "<step> <scene> failed: <exception>"; an enemy type's or the player's atlas
+# (EnemyRebuild.cs, compat/PlayerMerge.cs) "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>";
+# MeshCombineBake.cs (the bake's and the strip's), ProBuilderMeshes.cs and PuddleBake.cs a summary with
+# failed=N. Any other error (a script without a failure line) counts in DOWNGRADE_BUILD's errors.
 SCENE_STEP_FAILED = re.compile(
     r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE|CROW_ENEMY_ATLAS) .* failed: .*$'
     r'|^DOWNGRADE_(?:MCS|PROBUILDER|PUDDLE) .*\bfailed=[1-9].*$',
@@ -919,16 +985,13 @@ SCENE_STEP_FAILED = re.compile(
 )
 
 
-def check_scene_steps(log_text: str, log_path: Path):
-    failed = [line[:SUMMARY_WIDTH] for line in SCENE_STEP_FAILED.findall(log_text)]
-    if not failed:
-        return
-    for line in failed[:20]:
-        log(f'  {line}')
-    message = f'{len(failed)} scene steps of the editor scripts failed (above; the first is in {log_path})'
-    if os.environ.get('CROW_ALLOW_SCENE_FAILURES') != '1':
-        sys.exit(f'{message}. The build is incomplete; CROW_ALLOW_SCENE_FAILURES=1 lets it through')
-    log(f'WARNING (CROW_ALLOW_SCENE_FAILURES=1): {message}')
+def save_code_stage(project: Path, version: str, log_path: Path, inputs: dict):
+    """Complete the code stage the editor saved (DowngradeBuild.SaveCodeStage) with what quickcode needs
+    and checks against: the link XMLs, the serialized layout, and the non-code inputs and switches."""
+    keep_linker_inputs(log_path)
+    plugins = sorted((project / 'Assets' / 'Plugins').glob('*.dll'))
+    (CODE_STAGE / LAYOUT).write_text('\n'.join(serialized_layout(plugins, version)) + '\n', encoding='utf-8')
+    (CODE_STAGE / NON_CODE_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
 
 
 def log_build_steps(log_path: Path):
@@ -986,15 +1049,13 @@ def warn_stale_plugins(project: Path, version: str, platform: str):
 
 
 # What quickcode compares with the last full PS Vita build, saved in the code stage by build: the
-# serialized layout of the build's assemblies (SerializedLayout.cs) and the hashes of the non-code
-# inputs of its project (below the tools' folder): the rule sources as project read them
-# (PROJECT_SOURCES: the rules, common.py's asset lists, the PS Vita shaders vita_lit_overlay copies in,
-# the decompiler's patches) and the build script as build wrote it (BUILD_SOURCES). Before (21 Oct)
-# all of them were hashed when build ended, so a rule edited between project and build counted as
-# built, and the shaders and common.py weren't hashed at all.
+# serialized layout of the build's assemblies (SerializedLayout.cs: each field line has its place among
+# its type's serialized fields, "<assembly> field <type>.<field> #2 <field type>"), the hashes of the
+# non-code inputs of its project (below the tools' folder) and its build switches: the rule sources as
+# project read them (PROJECT_SOURCES: the rules, common.py's asset lists, the PS Vita shaders
+# vita_lit_overlay copies in, the decompiler's patches), the build script as build wrote it
+# (BUILD_SOURCES), and the switches (switch_record).
 LAYOUT = 'serialized-layout.txt'
-# A field line's place among its type's serialized fields ("<assembly> field <type>.<field> #2 <field type>").
-FIELD_PLACE = re.compile(r'^(\S+ field \S+) #\d+(?= )')
 NON_CODE_INPUTS = 'non-code-inputs.json'
 PROJECT_SOURCES = ('*_rules.py', 'common.py', 'vita_shaders/*', 'patches/*')
 BUILD_SOURCES = ('unity/*.cs',)
@@ -1004,12 +1065,8 @@ NON_CODE_SOURCES = PROJECT_SOURCES + BUILD_SOURCES
 def serialized_layout(dlls: list, version: str):
     """SerializedLayout.cs's lines for these assemblies: the types and fields the player's data is
     serialized with, and the [RuntimeInitializeOnLoadMethod] methods the build lists."""
-    data = editor_data(version)
-    folders = [
-        data / 'MonoBleedingEdge' / 'lib' / 'mono' / 'unityaot',
-        data / PLATFORM_ENGINE['vita'],
-        data / 'UnityExtensions' / 'Unity' / 'GUISystem',
-    ]
+    paths = editor_paths(version, 'vita')
+    folders = [paths.bcl, paths.target_engine, paths.gui]
     tool = WORK / 'bin' / 'SerializedLayout.exe'
     compile_csharp([CSC, '/nologo', f'/r:{WORK / "bin" / CECIL.name}', f'/out:{tool}', HERE / 'SerializedLayout.cs'])
     out = WORK / 'bin' / 'serialized-layout.txt'
@@ -1023,19 +1080,34 @@ def non_code_inputs(patterns=NON_CODE_SOURCES):
     return {path.relative_to(HERE).as_posix(): file_hash(path) for path in files}
 
 
-def build_inputs(project: Path):
-    """The non-code inputs of this build: the project's record of its rule sources, and the build
-    script's now (build writes it into the project). Warns when the rules changed since project ran:
+SWITCH = 'switch '  # a switch's key in the input records
+
+
+def switch_record(platform, stages=('code', 'project', 'build', 'player')):
+    """{'switch <name>': value} of the build switches (common.BUILD_SWITCHES) for the input records: those
+    that shape what the stages write."""
+    return {SWITCH + name: value for name, value in build_switches(platform, stages).items()}
+
+
+def project_inputs(platform):
+    """What a project is assembled from besides the code and the export: the rule sources, and the code
+    and project switches."""
+    return {**non_code_inputs(PROJECT_SOURCES), **switch_record(platform, ('code', 'project'))}
+
+
+def build_inputs(project: Path, platform: str):
+    """The non-code inputs of this build: the project's record of its rule sources and switches, and the
+    build script's now (build writes it into the project). Warns when they changed since project ran:
     the build has the project as it was."""
     try:
         inputs = json.loads((project / PROJECT_INPUTS).read_text(encoding='utf-8'))
     except (OSError, ValueError):
         log(
-            f'WARNING: {project} has no {PROJECT_INPUTS} (assembled before 21 Oct, or project did not finish); '
-            "taking today's rule sources for the project's"
+            f'WARNING: {project} has no {PROJECT_INPUTS} (project did not finish); '
+            "taking today's inputs for the project's"
         )
-        inputs = non_code_inputs(PROJECT_SOURCES)
-    changed = changed_inputs(inputs, non_code_inputs(PROJECT_SOURCES))
+        inputs = project_inputs(platform)
+    changed = changed_inputs(inputs, project_inputs(platform))
     if changed:
         log(
             f'WARNING: {", ".join(changed)} changed since pipeline.py project assembled {project.name}; this build '
@@ -1045,7 +1117,12 @@ def build_inputs(project: Path):
 
 
 def changed_inputs(before: dict, now: dict):
-    return sorted(name for name in before.keys() | now.keys() if before.get(name) != now.get(name))
+    """The inputs that differ, a switch with its two values."""
+    return sorted(
+        f'{name}={before.get(name)}->{now.get(name)}' if name.startswith(SWITCH) else name
+        for name in before.keys() | now.keys()
+        if before.get(name) != now.get(name)
+    )
 
 
 def quickcode_check(dlls: list, version: str, force: bool):
@@ -1065,11 +1142,6 @@ def quickcode_check(dlls: list, version: str, force: bool):
     else:
         before = (CODE_STAGE / LAYOUT).read_text(encoding='utf-8').splitlines()
         now = serialized_layout(dlls, version)
-        if not any(FIELD_PLACE.match(line) for line in before):
-            # Saved before the field lines had their place (#n, 21 Oct): compared without it, rather than
-            # every field reading as changed until the next full build.
-            now = [FIELD_PLACE.sub(r'\1', line) for line in now]
-            log(f'Field order not checked: the last full build saved {LAYOUT} without field places (before 21 Oct)')
         removed, added = sorted(set(before) - set(now)), sorted(set(now) - set(before))
         if removed or added:
             for line in [*(f'  - {line}' for line in removed), *(f'  + {line}' for line in added)][:30]:
@@ -1084,12 +1156,16 @@ def quickcode_check(dlls: list, version: str, force: bool):
             log('WARNING (--force): ' + message)
     if (CODE_STAGE / NON_CODE_INPUTS).exists():
         before = json.loads((CODE_STAGE / NON_CODE_INPUTS).read_text(encoding='utf-8'))
-        changed = changed_inputs(before, non_code_inputs())
+        # quickcode applies the code and player switches itself.
+        applied = {SWITCH + name for name in build_switches('vita', ('code', 'player'))}
+        before = {name: value for name, value in before.items() if name not in applied}
+        now = {**non_code_inputs(), **switch_record('vita', ('project', 'build'))}
+        changed = changed_inputs(before, now)
         if changed:
             log(
                 f'WARNING: {", ".join(changed)} changed since the last full build; quickcode updates only the '
                 'code, so those changes need project and build'
-                + ('' if all(name in before for name in changed) else ' (a file it did not record counts as changed)')
+                + ('' if before.keys() >= now.keys() else ' (an input it did not record counts as changed)')
             )
 
 
@@ -1099,8 +1175,7 @@ def quickcode_check(dlls: list, version: str, force: bool):
 # the build script (DowngradeBuild.SaveCodeStage) from the project's Temp folder, under their paths
 # there, and the linker's generated link XMLs (from the system's temp folder) in linker-xml.
 CODE_STAGE = WORK / 'vita-code-stage'
-# A link XML's argument, quoted or not: before (21 Oct) a quoted path with a space (a Windows account
-# named "John Smith") didn't match, and quickcode failed once the system's temp folder was cleaned.
+# A link XML's argument, quoted (a path with a space: a Windows account named "John Smith") or not.
 LINKER_XML = re.compile(r'-x\s+(?:"([^"]+\.tmp)"|([^"\s]+\.tmp))')
 
 
@@ -1147,6 +1222,7 @@ def quick_code(version: str, game: Path, force: bool = False):
     linker_arguments = logged_arguments(log_text, 'UnityLinker')
     il2cpp_arguments = logged_arguments(log_text, 'il2cpp')
     rewritten = rewritten_folder(version, 'vita')
+    log('Player switches: ' + describe_switches(build_switches('vita', ('player',))))
     if rewrite_assemblies(game_data(game) / 'Managed', rewritten, version, 'vita'):
         sys.exit(f'The game assemblies do not resolve against {version}; see the rewriter log in {ARTIFACTS}')
     quickcode_check([*rewritten.glob('*.dll'), compat_path('vita')], version, force)
@@ -1226,13 +1302,9 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
 
 def copy_whole(files: dict):
     """Copy each source into <target>.part, all of them first, then rename the parts over their targets
-    one right after the other: a quickcode stopped mid-copy leaves the build's files whole and as a set
-    (vita.py sync reads the build under the vita-build lock, see vita.py). Before (21 Oct) each file was
-    copied and renamed in turn, so one stopped after the module's rename left the new module with the
-    old metadata, which crashes at launch. A .part a killed quickcode leaves behind is never sent
-    (vita_app_files); the next quickcode writes over it. Each rename is tried again on PermissionError
-    (replace_path): before (22 Oct) Defender or the indexer reading a .part just closed could fail the
-    metadata's rename right after the module's, the same mismatch. If one still fails, say so."""
+    one right after the other (replace_path, which retries): a new module with the old metadata crashes at
+    launch, so a quickcode stopped mid-copy leaves the build's files whole and as a set, and says so if a
+    rename still fails. vita_app_files never sends a .part a killed quickcode left; the next writes over it."""
     parts = {target: target.with_name(target.name + '.part') for target in files}
     renamed = []
     try:
@@ -1273,17 +1345,15 @@ def native_plugins(output: Path):
 # The PS Vita player's graphics jobs: the 2018.2 editor has no setting for them on the PS Vita, but its
 # player reads gfx-enable-gfx-jobs from Media/boot.config at start and then records the camera's draws in
 # Unity's job workers beside its render thread (Station Square, main thread: standing 24.9 -> 22.1 ms,
-# steady real fight 59.1 -> 55.2). The user's game crashed with them on, on the render thread drawing with
-# what an area change's unload freed (17 Oct); with SceneGap's drain before unloading (compat/Loading.cs)
-# 41 area changes in 40 minutes ran clean (18 Oct), so they are on again for the user's play-test.
-# CROW_GFX_JOBS=on (the default) writes gfx-enable-gfx-jobs=1; off writes it out; build and quickcode run it.
+# steady real fight 59.1 -> 55.2). docs/vita.md has their history. CROW_GFX_JOBS=on (the default) writes
+# gfx-enable-gfx-jobs=1; off writes it out; build and quickcode run it.
 def boot_config(output: Path):
     path = output / 'Media' / 'boot.config'
     if not path.exists():
-        return
+        sys.exit(f'No {path}: the PS Vita build is incomplete, and its graphics jobs would be off')
     lines = path.read_text(encoding='utf-8').splitlines()
     lines = [line for line in lines if not line.startswith('gfx-enable-gfx-jobs=')]
-    jobs = os.environ.get('CROW_GFX_JOBS', 'on') == 'on'
+    jobs = build_switches('vita', ('player',))['CROW_GFX_JOBS'] == 'on'
     if jobs:
         lines.insert(0, 'gfx-enable-gfx-jobs=1')
     path.write_bytes(('\n'.join(lines) + '\n').encode('utf-8'))
@@ -1314,7 +1384,7 @@ def summarize_log(log_path: Path):
 
 # ---------------------------------------------------------------- package
 
-VITA_TITLE_ID = 'CROW00001'  # matches the content ID set in DowngradeBuild.cs
+VITA_TITLE_ID = 'CROW00001'  # build passes it to DowngradeBuild.cs, which sets the content ID with it
 VITA_FTP = (VITA_HOST, 1337)  # VitaShell's or vitacompanion's FTP server
 VITA_COMMANDS = (VITA_HOST, 1338)  # vitacompanion's command server
 
@@ -1394,12 +1464,11 @@ def check_lock(stage=None, platform='vita'):
     """Every stage writes in work/, builds/ or artifacts/, which other jobs share: one pipeline.py at a
     time, under lock.py run (which sets CROW_LOCKS). Without it, stop while another run holds a build
     lock, and warn otherwise (also for a lock taken without run, or by an older lock.py, whose holder
-    can't be told from this process's parents). Every run this process is in counts (lock.held_here):
-    before (21 Oct) only CROW_LOCK, the innermost run's, did, so `lock.py run vita-build -- lock.py run
-    vita-device -- ... pipeline.py` stopped on its own vita-build. A stage that writes the PS Vita build
-    (writes_vita_build) needs vita-build itself: pc-build doesn't wait for a sync's reader (lock.py), so
-    before (22 Oct) a PS Vita build or quickcode under pc-build could rewrite the files a sync was sending.
-    No stage (a script's own steps, such as a private quickcode into work/scratch): any build lock will do."""
+    can't be told from this process's parents). Every run this process is in counts (lock.held_here), so
+    `lock.py run vita-build -- lock.py run vita-device -- ... pipeline.py` runs under its own vita-build. A
+    stage that writes the PS Vita build (writes_vita_build) needs vita-build itself: pc-build doesn't wait
+    for a sync's reader (lock.py), which would get files rewritten as it sends them. No stage (a script's
+    own steps, such as a private quickcode into work/scratch): any build lock will do."""
     import lock
 
     needed = 'vita-build' if platform == 'vita' or writes_vita_build(stage, platform) else 'pc-build'
@@ -1449,6 +1518,23 @@ def main():
         '--force', action='store_true', help='quickcode: go on when the serialized types changed (see quick_code)'
     )
     args = parser.parse_args()
+    ignored = [
+        option
+        for option, given, stages in (
+            ('--scenes', args.scenes, ('build',)),
+            ('--development', args.development, ('build',)),
+            ('--force', args.force, ('quickcode',)),
+            ('--backend il2cpp', args.backend == 'il2cpp', ('build',)),
+        )
+        if given and args.stage not in stages
+    ]
+    if args.backend == 'il2cpp' and args.platform == 'vita':
+        ignored.append('--backend il2cpp (the PS Vita build is IL2CPP only)')
+    if args.platform == 'windows' and args.stage in ('package', 'quickcode'):
+        ignored.append(f'--platform windows ({args.stage} is PS Vita only)')
+    if ignored:
+        parser.error(f'{args.stage} does not take {", ".join(ignored)}')
+    build_switches(args.platform)  # stops on a value a switch doesn't take, before any stage starts
     check_lock(args.stage, args.platform)
     if not args.version.startswith('2018.2.'):
         parser.error('the compatibility rules are written for Unity 2018.2')

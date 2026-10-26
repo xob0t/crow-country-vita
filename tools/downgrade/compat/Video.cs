@@ -57,10 +57,12 @@ namespace CrowCompat
         public event EventHandler loopPointReached;
         public event EventHandler prepareCompleted;
         public event EventHandler seekCompleted;
+#pragma warning disable 0067  // the API's events the frame atlases never raise
         public event EventHandler frameDropped;
         public event ErrorEventHandler errorReceived;
         public event FrameReadyEventHandler frameReady;
         public event TimeEventHandler clockResyncOccurred;
+#pragma warning restore 0067
 
         public bool isPlaying { get { return playing && !paused; } }
         public bool isPaused { get { return paused; } }
@@ -288,12 +290,6 @@ namespace CrowCompat
             shownFrame = index;
             if (sendFrameReadyEvents && frameReady != null) frameReady(this, index);
         }
-
-        // Keeps the events' fields read, so the compiler does not warn about the ones never raised.
-        void Unused()
-        {
-            if (frameDropped != null || errorReceived != null || clockResyncOccurred != null) { }
-        }
     }
 
     // A video as video_rules.py writes it: the frames kept (every one at 30 fps or less) in an atlas,
@@ -358,11 +354,10 @@ namespace CrowCompat
     //                              <name>, with its parents (the status screen: "UI Canvas Inventory OFF",
     //                              "Inventory Screenspace OFF"); repeatable
     //   -crow-video-log            log each playing video's clip, frame and time every second
-    //   -crow-no-uv2               canvases without uv2, as before UIPixelate's fix (for comparisons)
     public class VideoProbe : MonoBehaviour
     {
         static readonly List<KeyValuePair<string, float>> activations = new List<KeyValuePair<string, float>>();
-        static bool logVideos, noUv2;
+        static bool logVideos;
         float lastLoad, lastLog;
         readonly HashSet<string> activated = new HashSet<string>();
 
@@ -377,9 +372,8 @@ namespace CrowCompat
                         System.Globalization.CultureInfo.InvariantCulture, out seconds))
                     activations.Add(new KeyValuePair<string, float>(args[i + 1], seconds));
             }
-            logVideos = Array.IndexOf(args, "-crow-video-log") >= 0;
-            noUv2 = Array.IndexOf(args, "-crow-no-uv2") >= 0;
-            if (activations.Count == 0 && !logVideos && !noUv2) return;
+            logVideos = CrowFlags.Has(args, "-crow-video-log");
+            if (activations.Count == 0 && !logVideos) return;
             var probe = new GameObject("CrowVideoProbe");
             DontDestroyOnLoad(probe);
             probe.AddComponent<VideoProbe>();
@@ -394,9 +388,6 @@ namespace CrowCompat
         void Update()
         {
             float now = Time.realtimeSinceStartup;
-            if (noUv2)
-                foreach (Canvas canvas in Resources.FindObjectsOfTypeAll<Canvas>())
-                    if (canvas.gameObject.scene.IsValid()) canvas.additionalShaderChannels &= ~AdditionalCanvasShaderChannels.TexCoord2;
             foreach (KeyValuePair<string, float> activation in activations)
             {
                 string key = activation.Key + "@" + activation.Value;

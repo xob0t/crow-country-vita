@@ -32,7 +32,7 @@ namespace CrowCompat
 {
     public static class ActionProfile
     {
-        static readonly bool on = Array.IndexOf(ProbeFiles.Args, "-crow-action-profile") >= 0;
+        static readonly bool on = CrowFlags.Has(ProbeFiles.Args, "-crow-action-profile");
         const int Depth = 64, Kinds = 8;
         static readonly object[] actions = new object[Depth];
         static readonly object[] contexts = new object[Depth];
@@ -182,19 +182,10 @@ namespace CrowCompat
         // name and detail.
         static string[] Owner(UnityEngine.GameObject gameObject, string detail)
         {
-            UnityEngine.Transform transform = gameObject.transform, root = transform, enemy = null;
-            for (UnityEngine.Transform t = transform; t != null; t = t.parent)
-            {
-                root = t;
-                // The outermost: an enemy's own parts include an "Enemy Set".
-                if (t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.name != "Enemy Set") enemy = t;
-            }
+            UnityEngine.Transform transform = gameObject.transform, root = transform.root, enemy = EnemyNames.RootOf(transform);
             if (enemy != null)
             {
-                string type = enemy.name.Substring(6);
-                int paren = type.IndexOf(" (", StringComparison.Ordinal);
-                if (paren > 0) type = type.Substring(0, paren);
-                return new[] { "Enemy_" + type.Replace(' ', '_'), enemy.GetInstanceID().ToString(), gameObject.name.Replace(' ', '_') + ":" + detail.Replace(' ', '_') };
+                return new[] { "Enemy_" + EnemyNames.TypeOf(enemy).Replace(' ', '_'), enemy.GetInstanceID().ToString(), gameObject.name.Replace(' ', '_') + ":" + detail.Replace(' ', '_') };
             }
             string owner = root.name == MaraScene.PlayerName ? "player" : "root:" + root.name;
             return new[] { owner.Replace(' ', '_'), root.GetInstanceID().ToString(), gameObject.name.Replace(' ', '_') + ":" + detail.Replace(' ', '_') };

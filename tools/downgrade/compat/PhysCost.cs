@@ -6,8 +6,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
-// What a physics step works on in a fight, and experiments that take parts of it away (measurements only; results in
-// status.md, Enemy physics, 19 Oct).
+// What a physics step works on in a fight (measurements only; results in docs/status-log.md, Enemy physics, 19 Oct).
 //   -crow-phys-census <s>   s seconds after each area load (and with the cycle key pcensus=<frames>), over 10
 //                           frames: every enabled collider by owner (an enemy type, the player, a level root),
 //                           static (no rigidbody), on a kinematic or a dynamic body, a body's own or a compound
@@ -23,19 +22,8 @@ using UnityEngine.SceneManagement;
 //                           exits each receives, by receiver (owner/object) and other side (owner/object, tag);
 //                           every 10 s the counts (CROW_PHYS_EVENTS; Windows test players only: the listener is a
 //                           MonoBehaviour the PS Vita build's data doesn't know; it turns on contact reports)
-// Cycle keys (-crow-cycle / -crow-fight-cycle / -crow-ab through EnemyCost.Change), reversible, on the
-// enemies alive when applied:
-//   pcensus=<frames>        the census now
-//   psolid=off|on           the enemies' solid colliders on compound children (not the body's own) off
-//   pnone=trig|solid|all|off  those enemy colliders (triggers, solid children, or all of them, the bodies' own
-//                           too) on a layer that collides with nothing, so PhysX keeps their shapes (sync,
-//                           broadphase) but no pairs; off puts them back (solid and all let the enemies fall
-//                           through the floor: a fight is no longer steady after them)
-//   pstatic=off|neg|pos|on  the static colliders the last census saw move switched off (Station Square's
-//                           bunting; neg: those with a negative scale, which a box collider warns of at every scale
-//                           change; pos: the others), and back
-//   ptrigstatic=ignore|on   Physics.IgnoreCollision between the enemies' enabled triggers and every enabled static
-//                           collider (the trigger pairs with the level), and back
+// The cycle key pcensus=<frames> (-crow-cycle / -crow-fight-cycle / -crow-ab) takes the census now. The experiments
+// that took parts away (psolid=, pnone=, pstatic=, ptrigstatic=) are done and gone (status-log.md, Enemy physics).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -67,7 +55,7 @@ namespace CrowCompat
             CrowEvents.Canvases("PhysCost.Frame", Frame);
         }
 
-        // EnemyCost.Change's first look: true when the key is one of these.
+        // A -crow-cycle / -crow-fight-cycle / -crow-ab change (Quality.Change); false when it isn't one.
         internal static bool Change(string key, string value)
         {
             switch (key)
@@ -78,141 +66,12 @@ namespace CrowCompat
                     Hook();
                     StartCensus(frames);
                     return true;
-                case "psolid":
-                    if (value == "off")
-                    {
-                        foreach (Collider collider in EnemyColliders())
-                            if (collider.enabled && !collider.isTrigger && collider.attachedRigidbody != null &&
-                                collider.attachedRigidbody.transform != collider.transform)
-                            {
-                                collider.enabled = false;
-                                solidOff.Add(collider);
-                            }
-                    }
-                    else
-                    {
-                        foreach (Collider collider in solidOff)
-                            if (collider != null) collider.enabled = true;
-                        solidOff.Clear();
-                    }
-                    Debug.Log("CROW_PHYS psolid=" + value + " (" + solidOff.Count + " off)");
-                    return true;
-                case "pnone":
-                    None(value);
-                    return true;
-                case "ptrigstatic":
-                    foreach (KeyValuePair<Collider, Collider> pair in ignored)
-                        if (pair.Key != null && pair.Value != null) Physics.IgnoreCollision(pair.Key, pair.Value, false);
-                    ignored.Clear();
-                    if (value == "ignore")
-                    {
-                        var statics = UnityEngine.Object.FindObjectsOfType<Collider>().Where(c => c.enabled && c.attachedRigidbody == null && !c.isTrigger).ToList();
-                        foreach (Collider trigger in EnemyColliders())
-                            if (trigger.enabled && trigger.isTrigger)
-                                foreach (Collider other in statics)
-                                {
-                                    Physics.IgnoreCollision(trigger, other, true);
-                                    ignored.Add(new KeyValuePair<Collider, Collider>(trigger, other));
-                                }
-                    }
-                    Debug.Log("CROW_PHYS ptrigstatic=" + value + " (" + ignored.Count + " pairs)");
-                    return true;
-                case "pstatic":
-                    if (value == "off" || value == "neg" || value == "pos")
-                    {
-                        foreach (Collider collider in staticMoved)
-                            if (collider != null && collider.enabled && (value == "off" || Negative(collider.transform.lossyScale) == (value == "neg")))
-                            {
-                                collider.enabled = false;
-                                staticOff.Add(collider);
-                            }
-                    }
-                    else
-                    {
-                        foreach (Collider collider in staticOff)
-                            if (collider != null) collider.enabled = true;
-                        staticOff.Clear();
-                    }
-                    Debug.Log("CROW_PHYS pstatic=" + value + " (" + staticOff.Count + " off of " + staticMoved.Count + ")");
-                    return true;
             }
             return false;
         }
 
-        static readonly List<KeyValuePair<Collider, Collider>> ignored = new List<KeyValuePair<Collider, Collider>>();
-
-        static bool Negative(Vector3 scale)
-        {
-            return scale.x < 0f || scale.y < 0f || scale.z < 0f;
-        }
-
-        static readonly List<Collider> solidOff = new List<Collider>(), staticOff = new List<Collider>(), staticMoved = new List<Collider>();
-        static readonly Dictionary<GameObject, int> movedLayer = new Dictionary<GameObject, int>();
-        static int noneLayer = -1;
-        static bool[] noneRow;
-
-        // pnone: the chosen enemy colliders' GameObjects on a layer no other layer collides with.
-        static void None(string value)
-        {
-            foreach (KeyValuePair<GameObject, int> pair in movedLayer)
-                if (pair.Key != null) pair.Key.layer = pair.Value;
-            movedLayer.Clear();
-            if (noneRow != null)
-            {
-                for (int b = 0; b < 32; b++) Physics.IgnoreLayerCollision(noneLayer, b, noneRow[b]);
-                noneRow = null;
-            }
-            if (value == "trig" || value == "solid" || value == "all")
-            {
-                if (noneLayer < 0) noneLayer = UnusedLayer();
-                if (noneLayer < 0)
-                {
-                    Debug.Log("CROW_PHYS pnone: no unused layer");
-                    return;
-                }
-                noneRow = new bool[32];
-                for (int b = 0; b < 32; b++)
-                {
-                    noneRow[b] = Physics.GetIgnoreLayerCollision(noneLayer, b);
-                    Physics.IgnoreLayerCollision(noneLayer, b, true);
-                }
-                foreach (Collider collider in EnemyColliders())
-                {
-                    if (!collider.enabled) continue;
-                    bool own = collider.attachedRigidbody != null && collider.attachedRigidbody.transform == collider.transform;
-                    bool pick = value == "all" || (value == "trig" ? collider.isTrigger : !collider.isTrigger && !own);
-                    if (!pick || movedLayer.ContainsKey(collider.gameObject)) continue;
-                    // A GameObject that holds a body and other colliders moves them all (value all only).
-                    if (!own || value == "all")
-                    {
-                        movedLayer[collider.gameObject] = collider.gameObject.layer;
-                        collider.gameObject.layer = noneLayer;
-                    }
-                }
-            }
-            Debug.Log("CROW_PHYS pnone=" + value + " layer=" + noneLayer + " (" + movedLayer.Count + " objects)");
-        }
-
-        // The highest layer that no loaded GameObject is on.
-        static int UnusedLayer()
-        {
-            var used = new bool[32];
-            foreach (Transform t in Resources.FindObjectsOfTypeAll<Transform>())
-                if (t != null && t.gameObject.scene.IsValid()) used[t.gameObject.layer] = true;
-            for (int layer = 31; layer >= 8; layer--)
-                if (!used[layer]) return layer;
-            return -1;
-        }
-
-        // The enabled and disabled colliders of the enemies alive in the loaded scenes.
-        static List<Collider> EnemyColliders()
-        {
-            var found = new List<Collider>();
-            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
-                if (body.name.StartsWith("Enemy ", StringComparison.Ordinal) && body.name != "Enemy Set")
-                    found.AddRange(body.GetComponentsInChildren<Collider>(false).Where(c => c.attachedRigidbody == body));
-            return found;
-        }
+        // The static colliders the last census saw move (CROW_PHYS_STATIC_MOVED).
+        static readonly List<Collider> staticMoved = new List<Collider>();
 
         // ---------------------------------------------------------------- census
 
@@ -283,8 +142,7 @@ namespace CrowCompat
         {
             if (player != null && t.gameObject.scene == player.scene) return "player";
             for (Transform p = t; p != null; p = p.parent)
-                if (p.name.StartsWith("Enemy ", StringComparison.Ordinal) && p.name != "Enemy Set" && p.GetComponent<Rigidbody>() != null)
-                    return "enemy:" + p.name.Substring(6).Replace(' ', '_');
+                if (EnemyNames.IsRoot(p)) return "enemy:" + EnemyNames.TypeOf(p).Replace(' ', '_');
             Transform root = t.root;
             return "level:" + (root.name.Length > 24 ? root.name.Substring(0, 24) : root.name).Replace(' ', '_');
         }
@@ -351,7 +209,7 @@ namespace CrowCompat
                 staticMoved.Add(entry.Collider);
                 if (staticMoved.Count <= 20)
                     Debug.Log("CROW_PHYS_STATIC_MOVED " + entry.Owner + " frames=" + entry.Moved + "/" + frames + " " + Shape(entry.Collider) +
-                              (entry.Trigger ? "T" : "") + " layer=" + LayerMask.LayerToName(entry.Collider.gameObject.layer).Replace(' ', '_') + " path=" + Perf.Path(entry.Collider.transform, 5));
+                              (entry.Trigger ? "T" : "") + " layer=" + LayerMask.LayerToName(entry.Collider.gameObject.layer).Replace(' ', '_') + " path=" + Hierarchy.Path(entry.Collider.transform, 5));
             }
             Debug.Log("CROW_PHYS_CENSUS scene=" + scene + " frames=" + frames + " colliders=" + entries.Count +
                       " static=" + entries.Count(e => e.Body == 0) + " kin=" + entries.Count(e => e.Body == 1) + " dyn=" + entries.Count(e => e.Body == 2) +
@@ -394,7 +252,7 @@ namespace CrowCompat
                         c[(trigger ? 1 : 0) + (mesh ? 2 : 0)]++;
                     }
                     string side = (trigger ? "T:" : "C:") + (b.Body == 0 ? "static" : b.Owner == a.Owner ? "same" : b.Owner) +
-                                  (mesh ? "/mesh" : "") + (b.Body == 0 ? "/" + Perf.Path(b.Collider.transform, 2).Replace(' ', '_') : "");
+                                  (mesh ? "/mesh" : "") + (b.Body == 0 ? "/" + Hierarchy.Path(b.Collider.transform, 2).Replace(' ', '_') : "");
                     Dictionary<string, int> list;
                     if (!others.TryGetValue(a.Owner, out list)) others[a.Owner] = list = new Dictionary<string, int>();
                     int n;
@@ -499,4 +357,182 @@ namespace CrowCompat
         void OnCollisionExit(Collision collision) { Count("collide-", collision.collider); }
     }
 #endif
+
+    // A mesh collider whose transform's scale changes (its own or a parent's) is cooked again from its
+    // mesh by PhysX at the next physics step (PhysicsManager::SyncTransforms -> MeshCollider::ScaleChanged
+    // -> ExtractMeshGeometry -> PhysX cooking), every frame for one that animates. Station Square's
+    // bunting: 18 ProBuilder flags (PrismPentagon, with ProBuilder's default mesh collider) under
+    // swinging and stretching parents, about 12 ms of the PS Vita's main thread a frame in
+    // FixedUpdate.PhysicsFixedUpdate (with Physics.autoSyncTransforms on, the same time went to the
+    // scripts' first physics query instead). Two seconds after each scene load the loaded scenes'
+    // non-trigger mesh colliders are listed (on or off), and then and every 15 s after, those that are
+    // on are watched for 40 frames (nothing allocated); each whose shape (the world matrix's axis
+    // lengths and angles) changed in 10 of them or more (the flags' sway pauses now and then) gets a
+    // BoxCollider of its mesh's bounds on the same GameObject (same layer and rigidbody, same physics
+    // material) and is switched off. A box takes a scale change as a shape update,
+    // without cooking. Left alone: triggers, and colliders of non-kinematic rigidbodies (their shape
+    // drives the simulation).
+    static class ScaledColliders
+    {
+        const int Frames = 40, Often = 10;  // watched frames; changes that count as animated
+        static string mode = "game";
+        static bool hooked;
+        static float next = -1f;
+        static int frame = -1;
+        static bool rescan;
+        static readonly List<MeshCollider> candidates = new List<MeshCollider>();
+        static float[] shapes = new float[0];
+        static int[] changes = new int[0];
+        static bool[] watching = new bool[0];
+        static readonly float[] shape = new float[6];
+        static readonly Dictionary<MeshCollider, BoxCollider> swapped = new Dictionary<MeshCollider, BoxCollider>();
+
+        public static void Install(string[] args)
+        {
+            string value = CrowFlags.Value(args, "-crow-scaled-colliders", "box");
+            if (value != null) Set(value);
+        }
+
+        internal static void Set(string value)
+        {
+            mode = value;
+            if (mode == "game")
+            {
+                int restored = 0;
+                foreach (KeyValuePair<MeshCollider, BoxCollider> pair in swapped)
+                {
+                    if (pair.Value != null) UnityEngine.Object.Destroy(pair.Value);
+                    if (pair.Key == null) continue;
+                    pair.Key.enabled = true;
+                    restored++;
+                }
+                swapped.Clear();
+                frame = -1;
+                Debug.Log("CROW_SCALED game: " + restored + " mesh colliders back");
+                return;
+            }
+            next = Time.realtimeSinceStartup;
+            rescan = true;
+            if (hooked) return;
+            hooked = true;
+            CrowEvents.Loaded("ScaledColliders.sceneLoaded", (scene, loadMode) =>
+            {
+                next = Time.realtimeSinceStartup + 2f;
+                rescan = true;
+                frame = -1;
+            });
+            CrowEvents.BeforeRender("ScaledColliders.Tick", Tick);
+        }
+
+        static void Tick()
+        {
+            if (mode == "game") return;
+            if (frame < 0)
+            {
+                if (next < 0f || Time.realtimeSinceStartup < next) return;
+                next = Time.realtimeSinceStartup + 15f;
+                if (rescan) List();
+                rescan = false;
+                // The candidates that are on now; nothing allocated.
+                int on = 0;
+                for (int i = 0; i < candidates.Count; i++)
+                {
+                    MeshCollider collider = candidates[i];
+                    Rigidbody body = collider == null ? null : collider.attachedRigidbody;
+                    watching[i] = collider != null && collider.enabled && collider.gameObject.activeInHierarchy && !collider.isTrigger &&
+                                  !swapped.ContainsKey(collider) && (body == null || body.isKinematic);
+                    changes[i] = 0;
+                    if (!watching[i]) continue;
+                    Shape(collider.transform, i);
+                    on++;
+                }
+                if (on > 0) frame = 0;
+                return;
+            }
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                if (!watching[i] || candidates[i] == null) continue;
+                if (Shape(candidates[i].transform, i)) changes[i]++;
+            }
+            if (++frame < Frames) return;
+            frame = -1;
+            List<string> found = null;
+            for (int i = 0; i < candidates.Count; i++)
+            {
+                MeshCollider collider = candidates[i];
+                if (!watching[i] || collider == null || changes[i] < Often) continue;
+                if (found == null) found = new List<string>();
+                // Not one the game switched off meanwhile: its box would collide where nothing should.
+                if (mode == "box" && collider.enabled) Swap(collider);
+                BoxCollider box;
+                Bounds bounds = swapped.TryGetValue(collider, out box) ? box.bounds : collider.bounds;
+                if (found.Count < 12)
+                    found.Add(Hierarchy.Path(collider.transform, 5) + "(" + collider.sharedMesh.vertexCount + "v" + (collider.convex ? ",convex" : "") + ",layer" +
+                              collider.gameObject.layer + ",y" + bounds.min.y.ToString("F2", CultureInfo.InvariantCulture) + ".." +
+                              bounds.max.y.ToString("F2", CultureInfo.InvariantCulture) + ")");
+            }
+            if (found == null) return;
+            // The player's body for comparison: the rigidbody in DontDestroyOnLoad that isn't kinematic.
+            string player = "";
+            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
+                if (!body.isKinematic && body.gameObject.scene.name == Scenes.Kept)
+                {
+                    var bounds = new Bounds(body.position, Vector3.zero);
+                    foreach (Collider collider in body.GetComponentsInChildren<Collider>()) if (collider.attachedRigidbody == body) bounds.Encapsulate(collider.bounds);
+                    player = " player=" + Hierarchy.Path(body.transform, 2) + "(y" + bounds.min.y.ToString("F2", CultureInfo.InvariantCulture) + ".." +
+                             bounds.max.y.ToString("F2", CultureInfo.InvariantCulture) + ")";
+                    break;
+                }
+            Debug.Log("CROW_SCALED scene=" + SceneManager.GetActiveScene().name.Replace(' ', '_') + " candidates=" + candidates.Count +
+                      " animated=" + changes.Count(c => c >= Often) + (mode == "box" ? " boxed" : " (report)") + " total=" + swapped.Count + player +
+                      " " + string.Join(" ", found.ToArray()));
+        }
+
+        // Once per area load: the loaded scenes' non-trigger mesh colliders, on or off (allocates once).
+        static void List()
+        {
+            foreach (MeshCollider gone in swapped.Keys.Where(c => c == null).ToList()) swapped.Remove(gone);
+            candidates.Clear();
+            foreach (MeshCollider collider in Resources.FindObjectsOfTypeAll<MeshCollider>())
+                if (collider.gameObject.scene.IsValid() && !collider.isTrigger && collider.sharedMesh != null) candidates.Add(collider);
+            shapes = new float[candidates.Count * 6];
+            changes = new int[candidates.Count];
+            watching = new bool[candidates.Count];
+        }
+
+        // What a scale change alters and a rotation or move doesn't: the axes' squared lengths and dot
+        // products. Stores them for candidate i; whether they changed.
+        static bool Shape(Transform transform, int i)
+        {
+            Matrix4x4 m = transform.localToWorldMatrix;
+            Vector3 x = m.GetColumn(0), y = m.GetColumn(1), z = m.GetColumn(2);
+            shape[0] = x.sqrMagnitude;
+            shape[1] = y.sqrMagnitude;
+            shape[2] = z.sqrMagnitude;
+            shape[3] = Vector3.Dot(x, y);
+            shape[4] = Vector3.Dot(x, z);
+            shape[5] = Vector3.Dot(y, z);
+            // Relative to the largest axis: small props have world scales of a few hundredths.
+            float tolerance = 1e-6f * Mathf.Max(shape[0], Mathf.Max(shape[1], shape[2]));
+            bool changed = false;
+            for (int k = 0; k < 6; k++)
+            {
+                if (Mathf.Abs(shape[k] - shapes[i * 6 + k]) > tolerance) changed = true;
+                shapes[i * 6 + k] = shape[k];
+            }
+            return changed;
+        }
+
+        static void Swap(MeshCollider mesh)
+        {
+            Bounds bounds = mesh.sharedMesh.bounds;
+            BoxCollider box = mesh.gameObject.AddComponent<BoxCollider>();
+            box.center = bounds.center;
+            box.size = Vector3.Max(bounds.size, new Vector3(0.001f, 0.001f, 0.001f));
+            box.sharedMaterial = mesh.sharedMaterial;
+            box.contactOffset = mesh.contactOffset;
+            mesh.enabled = false;
+            swapped[mesh] = box;
+        }
+    }
 }

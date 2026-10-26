@@ -14,17 +14,24 @@ object (absolute _NID_ symbols) gets the same treatment, its other names made un
     uv run tools/downgrade/native/clock/build.py
 """
 
-import os
+import hashlib
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
-OUT = ROOT / 'work' / 'native' / 'clock'
-SDK = Path(os.environ.get('SCE_PSP2_SDK_DIR', r'C:\vitasdk\sdk'))
+sys.path.insert(0, str(HERE.parents[1]))
+from common import TARGET, WORK, editor_data, setting  # noqa: E402
+
+OUT = WORK / 'native' / 'clock'
+# The SDK setup.py installs (SCE_PSP2_SDK_DIR, read from the registry when this shell lacks it).
+SDK = Path(setting('SCE_PSP2_SDK_DIR') or r'C:\vitasdk\PSVITA\sdk')
 BIN = SDK / 'host_tools' / 'build' / 'bin'
+SOURCES = [HERE / 'clock.c', HERE / 'threads.c']
+# The functions the plugin exports: what the sources declare PRX_EXPORT.
+EXPORT = re.compile(r'^PRX_EXPORT int (\w+)\(', re.M)
 
 # The SDK stub each new one is copied from, by name length.
 BASES = {
@@ -45,52 +52,34 @@ FUNCTIONS = {
 }
 
 
-# The editor's bootstrap source for a plugin (UnityEditor.PSP2.Extensions), for CrowClock's functions.
+# The editor's bootstrap source for a plugin (UnityEditor.PSP2.Extensions), for CrowClock's exports.
 BRIDGE = r"""#include <stddef.h>
 #include <kernel.h>
 #include <moduleinfo.h>
 SCE_MODULE_INFO(CrowClock_b, SCE_MODULE_ATTR_NONE, 1, 1);
-extern "C" int CrowClockSetArm();
-extern "C" int CrowClockGetArm();
-extern "C" int CrowClockSetGpu();
-extern "C" int CrowClockGetGpu();
-extern "C" int CrowClockSetBus();
-extern "C" int CrowClockGetBus();
-extern "C" int CrowClockSetXbar();
-extern "C" int CrowClockGetXbar();
-extern "C" int CrowThreadSelf();
-extern "C" int CrowThreadQuery();
-extern "C" int CrowThreadSet();
-extern "C" int CrowThreadsRunning();
-extern "C" int CrowCpuIdle();
-extern "C" int CrowThreadWait();
-extern "C" int CrowSyncName();
+{declarations}
 typedef int (*EXTERNFUNCTION)();
-static struct FunctionMap { const char* name; EXTERNFUNCTION address; } s_FunctionNames[] = {
-  { "CrowClockSetArm", &CrowClockSetArm },
-  { "CrowClockGetArm", &CrowClockGetArm },
-  { "CrowClockSetGpu", &CrowClockSetGpu },
-  { "CrowClockGetGpu", &CrowClockGetGpu },
-  { "CrowClockSetBus", &CrowClockSetBus },
-  { "CrowClockGetBus", &CrowClockGetBus },
-  { "CrowClockSetXbar", &CrowClockSetXbar },
-  { "CrowClockGetXbar", &CrowClockGetXbar },
-  { "CrowThreadSelf", &CrowThreadSelf },
-  { "CrowThreadQuery", &CrowThreadQuery },
-  { "CrowThreadSet", &CrowThreadSet },
-  { "CrowThreadsRunning", &CrowThreadsRunning },
-  { "CrowCpuIdle", &CrowCpuIdle },
-  { "CrowThreadWait", &CrowThreadWait },
-  { "CrowSyncName", &CrowSyncName },
-};
+static struct FunctionMap {{ const char* name; EXTERNFUNCTION address; }} s_FunctionNames[] = {{
+{entries}
+}};
 extern "C" __declspec(dllimport) void RegisterModule(const char* module_name, void* exports,
   size_t exports_count, SceSize size, void* arg);
-extern "C" int module_start(SceSize sz, const void* arg) {
+extern "C" int module_start(SceSize sz, const void* arg) {{
   RegisterModule("CrowClock", s_FunctionNames, sizeof(s_FunctionNames) / sizeof(s_FunctionNames[0]),
     sz, (void*)arg);
   return SCE_KERNEL_START_SUCCESS;
-}
+}}
 """
+
+
+def bridge_source():
+    """BRIDGE for every PRX_EXPORT function of the sources: one missing from it would fail only on the
+    console, as EntryPointNotFound at its first call."""
+    names = [name for source in SOURCES for name in EXPORT.findall(source.read_text(encoding='utf-8'))]
+    return BRIDGE.format(
+        declarations='\n'.join(f'extern "C" int {name}();' for name in names),
+        entries='\n'.join(f'  {{ "{name}", &{name} }},' for name in names),
+    )
 
 
 def run(*command, cwd=OUT):
@@ -137,6 +126,17 @@ def stub_library(folder: Path) -> Path:
 def main():
     if not (BIN / 'psp2snc.exe').exists():
         sys.exit(f'No psp2snc in {BIN}; set SCE_PSP2_SDK_DIR')
+    modules = editor_data(TARGET) / 'PlaybackEngines' / 'PSP2Player' / 'Data' / 'Modules'
+    # The modules are rebuilt when a source, this script, the SDK or the editor's stub changes.
+    digest = hashlib.sha256()
+    for path in [*SOURCES, Path(__file__), BIN / 'psp2snc.exe', modules / 'Il2CppAssemblies_stub_weak.a']:
+        digest.update(f'{path} {path.stat().st_size} '.encode() + hashlib.sha256(path.read_bytes()).digest())
+    stamp = OUT / 'build.stamp'
+    outputs = [OUT / 'CrowClock.suprx', OUT / 'CrowClock.suprx.b.suprx']
+    if stamp.exists() and stamp.read_text() == digest.hexdigest() and all(p.exists() for p in outputs):
+        print(f'{OUT / "CrowClock.suprx"}: up to date')
+        return
+    stamp.unlink(missing_ok=True)
     OUT.mkdir(parents=True, exist_ok=True)
     library = stub_library(OUT)
     run(BIN / 'psp2snc.exe', '-O2', '-Xmserrors', '-c', HERE / 'clock.c', '-o', OUT / 'clock.o')
@@ -158,10 +158,8 @@ def main():
     )
     plugin_stub = stubs / 'CrowClock_stub.a'
     bridge = OUT / 'bridge.cpp'
-    bridge.write_text(BRIDGE, encoding='utf-8')
+    bridge.write_text(bridge_source(), encoding='utf-8')
     run(BIN / 'psp2snc.exe', '-O2', '-Xmserrors', '-c', bridge, '-o', OUT / 'bridge.o')
-    modules = Path(os.environ['LOCALAPPDATA']) / 'Unity' / 'Editors' / '2018.2.19f1' / 'Editor' / 'Data'
-    modules = modules / 'PlaybackEngines' / 'PSP2Player' / 'Data' / 'Modules'
     run(
         BIN / 'psp2snc.exe',
         '-Wl,--oformat=prx',
@@ -173,6 +171,7 @@ def main():
         OUT / 'CrowClock.suprx.b.suprx',
     )
     made = sorted(p.name for p in stubs.iterdir())
+    stamp.write_text(digest.hexdigest())
     print(f'{OUT / "CrowClock.suprx"}; stubs: {", ".join(made)}')
 
 

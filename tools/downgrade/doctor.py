@@ -280,30 +280,23 @@ def find_sdk_root(folder: Path, depth=4):
     return None
 
 
+STATUS_STYLES = {'ok': 'green', 'MISSING': 'bold red', 'optional': 'yellow'}
+
+
 def summarize(checks):
-    """The checklist as text lines, and the number of required items that failed."""
+    """The checklist as lines (Text, each status in its colour), and the number of required items that
+    failed."""
     lines, failed = [], 0
     width = max((len(c.name) for c in checks), default=0)
     for check in checks:
         status = 'ok' if check.ok else ('MISSING' if check.required else 'optional')
         failed += not check.ok and check.required
-        lines.append(f'  [{status:^8}] {check.name:<{width}}  {check.detail}'.rstrip())
+        line = Text(f'  [{status:^8}] {check.name:<{width}}  {check.detail}'.rstrip())
+        line.stylize(STATUS_STYLES[status], 2, 12)
+        lines.append(line)
         if not check.ok and check.fix:
-            lines.append(f'  {"":10} {"":<{width}}  fix: {check.fix}')
+            lines.append(Text(f'  {"":10} {"":<{width}}  fix: {check.fix}'))
     return lines, failed
-
-
-STATUS_STYLES = {'ok': 'green', 'MISSING': 'bold red', 'optional': 'yellow'}
-
-
-def show(console, *lines):
-    """Print lines, coloring the status of those summarize() made."""
-    for line in lines:
-        text = Text(line)
-        style = STATUS_STYLES.get(line[3:11].strip()) if line.startswith('  [') else None
-        if style:
-            text.stylize(style, 2, 12)
-        console.print(text)
 
 
 # ---------------------------------------------------------------- the machine
@@ -555,16 +548,11 @@ def check_uscsandbox():
     )
 
 
-def check_editor(version, module='editor'):
-    root = EDITORS / version
-    flag = '' if module == 'editor' else f' --{module}'
-    fix = (
-        f'{SETUP}{flag}'
-        if version == TARGET
-        else f'install Unity {version}{"" if module == "editor" else " and the module"} in {root}'
-    )
+def check_editor(module='editor'):
+    root = EDITORS / TARGET
+    fix = SETUP if module == 'editor' else f'{SETUP} --{module}'
     path = root / EDITOR_FILES[module]
-    return Check(module_name(module, version), path.exists(), str(root if module == 'editor' else path), fix)
+    return Check(module_name(module, TARGET), path.exists(), str(root if module == 'editor' else path), fix)
 
 
 def check_editor_data(version, vita):
@@ -669,19 +657,19 @@ def check_vita_host():
     )
 
 
-def space_needed(targets, version=TARGET):
+def space_needed(targets):
     """GB a build of the targets needs: a first build's or a rebuild's for each, by whether its project
     is there, with the export they share counted once."""
     need = 0
     for target in targets:
-        exists = project_dir(version, 'vita' if target == 'vita' else 'windows').exists()
+        exists = project_dir(TARGET, 'vita' if target == 'vita' else 'windows').exists()
         need += (REBUILD_GB if exists else FIRST_BUILD_GB)[target]
-    shared = (len(targets) - 1) * RIP_GB if not (WORK / f'rip-{version}').exists() else 0
+    shared = (len(targets) - 1) * RIP_GB if not (WORK / f'rip-{TARGET}').exists() else 0
     return need - shared
 
 
-def check_space(targets, version=TARGET):
-    need = space_needed(targets, version)
+def check_space(targets):
+    need = space_needed(targets)
     free = free_gb(WORK)
     return Check(
         'Free disk space',
@@ -771,8 +759,9 @@ def project_dir(version, platform):
     return WORK / (f'crow-{version}' + ('-vita' if platform == 'vita' else ''))
 
 
-def checks_for(targets, game: Path, version=TARGET, license=False):
+def checks_for(targets, game: Path, license=False):
     """Every requirement of the targets, for the doctor's full checklist."""
+    version = TARGET
     vita = 'vita' in targets
     checks = [
         check_python(),
@@ -782,16 +771,16 @@ def checks_for(targets, game: Path, version=TARGET, license=False):
         check_dotnet(),
         check_cecil(),
         check_uscsandbox(),
-        check_editor(version),
+        check_editor(),
     ]
     if 'il2cpp' in targets:
-        checks += [check_editor(version, 'il2cpp'), check_visual_cpp()]
+        checks += [check_editor('il2cpp'), check_visual_cpp()]
     if vita:
-        checks.append(check_editor(version, 'vita'))
+        checks.append(check_editor('vita'))
     checks.append(check_editor_data(version, vita))
     if vita:
         checks += [*check_vita_sdk(), check_vita_host()]
-    checks.append(check_space(targets, version))
+    checks.append(check_space(targets))
     # The license check starts the editor with the PS Vita target when the targets include it (that also
     # checks the module loads), else the Windows one.
     checks.append(license_status('vita' if vita else 'windows', version, license))
@@ -816,7 +805,8 @@ def main(argv=None, license_check=None):
     checks = checks_for(targets, default_game(), license=license_check or args.license)
     lines, failed = summarize(checks)
     title = 'every target' if targets == TARGETS else f'the {" and ".join(targets)} target' + 's' * (len(targets) > 1)
-    show(progress.console, f'Requirements for {title}:', *lines)
+    for line in [Text(f'Requirements for {title}:'), *lines]:
+        progress.console.print(line)
     if failed:
         progress.console.print(Text(f'{failed} required item(s) missing.', 'bold red'))
         return 1

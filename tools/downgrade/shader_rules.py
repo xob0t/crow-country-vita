@@ -32,13 +32,19 @@ from common import (
 # exports no file for them), so a decompile failure there is no loss: USCSandbox stops at the end of
 # Standard's data in sharedassets0.assets.
 BUILTIN_SHADERS = {'Standard', 'Skybox/Procedural'}
+# The decompiler's patches (patches/uscsandbox-<name>.patch), in the order they apply: the others are
+# written against the code swizzle leaves.
+PATCHES = ['swizzle', 'staterefs', 'tiers']
 
 
 def uscsandbox():
     """Build the pinned USCSandbox DX11 shader decompiler, with our patches, using the local .NET 8 SDK."""
     repo = EXTERNAL / 'USCSandbox'
     exe = repo / 'USCSandbox' / 'bin' / 'Release' / 'net8.0' / 'USCSandbox.exe'
-    patches = sorted((HERE / 'patches').glob('uscsandbox-*.patch'), key=lambda p: (p.stem != 'uscsandbox-swizzle', p))
+    patches = [HERE / 'patches' / f'uscsandbox-{name}.patch' for name in PATCHES]
+    unlisted = {p.name for p in (HERE / 'patches').glob('uscsandbox-*.patch')} - {p.name for p in patches}
+    if unlisted:
+        sys.exit(f'patches missing from shader_rules.PATCHES: {", ".join(sorted(unlisted))}')
     stamp = repo / '.crow-patches'
     digest = hashlib.sha256(USCSANDBOX_COMMIT.encode() + b''.join(p.read_bytes() for p in patches)).hexdigest()
     if exe.exists() and stamp.exists() and stamp.read_text() == digest:
@@ -99,12 +105,20 @@ def decompile_shaders(game: Path):
     return shaders
 
 
+# The types of a uniform's declaration (float, half4, int2x2, ...).
+UNIFORM_TYPE = r'(?:float|half|fixed|int|uint|bool)\w*'
+
+
+def for_each_program(text, function):
+    """text with function's result in place of each CGPROGRAM line and body, given as a match: [1] the
+    CGPROGRAM line, [2] the body up to its ENDCG."""
+    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', function, text, flags=re.S)
+
+
 def builtin_uniforms(version):
     """Uniforms that the target editor declares in includes every CGPROGRAM gets."""
     includes = editor_data(version) / 'CGIncludes'
-    declaration = re.compile(
-        r'^\s*(?:uniform\s+)?(?:float|half|fixed|int|uint|bool)\w*\s+(\w+)\s*(?:\[[^\]]*\])?\s*;', re.M
-    )
+    declaration = re.compile(rf'^\s*(?:uniform\s+)?{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;', re.M)
     names = set()
     for name in ('HLSLSupport.cginc', 'UnityShaderVariables.cginc'):
         names.update(declaration.findall((includes / name).read_text(encoding='utf-8')))
@@ -125,13 +139,13 @@ def mask_logic(text):
 
 def strip_builtin_declarations(text, builtins):
     """The decompiler declares every uniform a program reads; drop those Unity already declares."""
-    pattern = re.compile(r'^[ \t]*(?:float|half|fixed|int|uint|bool)\w*\s+(\w+)\s*(?:\[[^\]]*\])?\s*;[^\n]*\n', re.M)
+    pattern = re.compile(rf'^[ \t]*{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;[^\n]*\n', re.M)
     return pattern.sub(lambda m: '' if m.group(1) in builtins else m.group(0), text)
 
 
 CONDITION = re.compile(r'^\s*#\s*(if|ifdef|ifndef|elif|else|endif)\b\s*(.*?)\s*(?://.*)?$')
 CONDITIONAL_DECLARATION = re.compile(
-    r'^\s*(?:uniform\s+)?((?:float|half|fixed|int|uint|bool)\w*)\s+(\w+)\s*;|^\s*UNITY_DECLARE_TEX3D_FLOAT\((\w+)\)'
+    rf'^\s*(?:uniform\s+)?({UNIFORM_TYPE})\s+(\w+)\s*;|^\s*UNITY_DECLARE_TEX3D_FLOAT\((\w+)\)'
 )
 
 
@@ -198,7 +212,7 @@ def declare_conditional_uniforms(text, conditional):
             lines += [f'#if !({condition})', declaration, '#endif']
         return match[1] + '\n'.join(lines) + '\n' + body
 
-    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S)
+    return for_each_program(text, program)
 
 
 GLOBAL_DECLARATION = re.compile(
@@ -228,7 +242,7 @@ def guard_repeated_declarations(text):
                 body[index] = f'#ifndef {guard}\n#define {guard}\n{body[index]}\n#endif'
         return match[1] + '\n'.join(body)
 
-    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S)
+    return for_each_program(text, program)
 
 
 SAMPLER_3D = re.compile(r'^(\s*)(?:sampler3D\w*\s+(\w+)\s*;|UNITY_DECLARE_TEX3D\w*\((\w+)\);).*$', re.M)
@@ -258,7 +272,7 @@ def no_3d_samplers_on_psp2(text):
         body = SAMPLER_3D.sub(lambda m: f'#if !defined(SHADER_API_PSP2)\n{m[0]}\n#endif', body)
         return match[1] + NO_3D_SAMPLERS + '\n' + body
 
-    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S)
+    return for_each_program(text, program)
 
 
 # Linear fog. The decompiler writes the fog keyword as a shader_feature, so a build keeps the FOG_LINEAR
@@ -317,7 +331,7 @@ def linear_fog(name, text):
             return match[0]
         return match[1] + FOG_DEPTH + '\n' + match[2]
 
-    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', program, text, flags=re.S), features, rewritten
+    return for_each_program(text, program), features, rewritten
 
 
 # Instructions the decompiler lost, per shader: (the decompiled text, with the instruction restored).

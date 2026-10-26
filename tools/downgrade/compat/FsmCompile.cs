@@ -7,7 +7,7 @@ using UnityEngine;
 // optimization, so no call between IL2CPP's C++ files is inlined: every FsmFloat.Value, FsmStateAction.Fsm,
 // NamedVariable.IsNone or Fsm.Event(null) an action makes is a real call into PlayMaker's module, and the
 // state loops call every running action's OnUpdate, OnFixedUpdate and OnLateUpdate whether its class has
-// one or not. Measured on the console first (status.md, FSM compile): the actions' own logic is a small
+// one or not. Measured on the console first (status-log.md, FSM compile): the actions' own logic is a small
 // part of their time (a polling BoolTest 0.9 us, FloatCompare 2.8, IntCompare 1.6), the rest is the engine
 // they call (GetWorldDistance 9.8 us, SmoothLookAtWithLimit 36, SetRotation 27, AddForce 52), so a compiled
 // FSM per design could take little more than PlayMaker's own part, and none of the engine's. The rewriter
@@ -51,9 +51,7 @@ namespace CrowCompat
         // From Diag.Install (every player).
         internal static void Install(string[] args)
         {
-            Set(Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
-            string value = CrowFlags.Value(args, "-crow-fsm-compile");
-            if (value != null) Set(value);
+            Set(CrowFlags.Value(args, "-crow-fsm-compile", "on", "off"));
             log = CrowFlags.Has(args, "-crow-fsm-compile-log");
             if (log) CrowEvents.Canvases("FsmCompile.Frame", Frame);
             Debug.Log("CROW_FSM_COMPILE " + Describe());

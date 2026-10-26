@@ -18,10 +18,10 @@ using UnityEngine;
 // longer combines at run time. Combiners switched on later in play keep combining then. The meshes
 // are written unreadable, as the combiner makes them, except those a MeshCollider uses. On one thread
 // (the combining's own threads finish after its CombineAtOnce loop, which only Update, in play mode,
-// would collect). From CROW_MCS_BAKE: on (the PS Vita's default) or off (other platforms' default).
+// would collect). From CROW_MCS_BAKE (common.BUILD_SWITCHES): on (the default with the PS Vita's scene
+// data) or off.
 class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
 {
-    const BindingFlags Any = BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance;
     static Type combinerType, managerType;
 
     public int callbackOrder
@@ -29,29 +29,20 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         get { return 10; }  // after CrowMergeScenes and the split, which leave a combiner's meshes to it
     }
 
-    internal static string Mode()
+    static object Get(object target, string name)
     {
-        string mode = Environment.GetEnvironmentVariable("CROW_MCS_BAKE");
-        if (!string.IsNullOrEmpty(mode)) return mode;
-        return DowngradeBuild.VitaData ? "on" : "off";  // the PS Vita, or CROW_VITA_DATA=1
-    }
-
-    internal static object Get(object target, string name)
-    {
-        FieldInfo field = target.GetType().GetField(name, Any);
-        return field == null ? null : field.GetValue(target);
+        return BuildUtil.Field(target, name);
     }
 
     static void Set(object target, string name, object value)
     {
-        FieldInfo field = target.GetType().GetField(name, Any);
-        if (field != null) field.SetValue(target, value);
+        BuildUtil.SetField(target, name, value);
     }
 
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        if (Mode() == "off") return;
+        if (BuildUtil.Switch("CROW_MCS_BAKE") == "off") return;
         if (combinerType == null)
         {
             combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
@@ -114,12 +105,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 if (existing.Contains(filter) || filter.sharedMesh == null) continue;
                 meshes++;
                 if (!(bool)makeUnreadable || collided.Contains(filter.sharedMesh)) continue;
-                var serialized = new SerializedObject(filter.sharedMesh);
-                SerializedProperty readable = serialized.FindProperty("m_IsReadable");
-                if (readable == null) continue;
-                readable.boolValue = false;
-                serialized.ApplyModifiedPropertiesWithoutUndo();
-                unreadable++;
+                if (BuildUtil.MarkUnreadable(filter.sharedMesh)) unreadable++;
             }
         }
         // The job manager is the combining's helper object (DontSave), with its caches of the sources.
@@ -131,7 +117,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
     }
 }
 
-// What MeshCombineStudio's combining leaves in the scenes the PS Vita build writes (M2, 22 Oct). A combiner
+// What MeshCombineStudio's combining leaves in the scenes the PS Vita build writes. A combiner
 // that no longer combines at run time (baked above, or combined in the editor by the game's makers) has
 // switched its sources' renderers off for good, and lists them in its MeshCombinerData (per source its
 // GameObject, Transform, renderer, filter, mesh and three matrices) only to undo the combining, which
@@ -150,71 +136,23 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
 // and the data's lists (found objects, LOD objects, LOD groups, colliders) and the combiner's own are
 // emptied: emptying the colliders' list loses only their re-enabling at the scene's unload. The objects
 // stay, so names, child indices and hierarchy walks are as they were. From CROW_MCS_STRIP: on or off (by
-// default as CROW_MCS_BAKE: on for the PS Vita's scene data).
+// default as CROW_MCS_BAKE; common.BUILD_SWITCHES).
 class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
 {
     static readonly string[] Lists = { "foundObjects", "foundLodObjects", "foundLodGroups", "foundColliders" };
-    // Arrays of these element types hold no object reference and no name (strings are read).
-    static readonly HashSet<string> Plain = new HashSet<string>
-    {
-        "int", "unsigned int", "SInt8", "UInt8", "SInt16", "UInt16", "SInt64", "UInt64", "float", "double", "bool", "char",
-        "Vector2f", "Vector3f", "Vector4f", "Quaternionf", "ColorRGBA", "Rectf",
-    };
 
     public int callbackOrder
     {
         get { return 30; }  // after CrowStripScenes (20), which removes the inert scripts some sources carry
     }
 
-    static string Mode()
-    {
-        string mode = Environment.GetEnvironmentVariable("CROW_MCS_STRIP");
-        return string.IsNullOrEmpty(mode) ? CrowMeshCombineBake.Mode() : mode;
-    }
-
-    // Every object a behaviour's serialized data references, and every string in it (with a path's last
-    // part); an FsmTemplate it references is read too.
-    static void Walk(UnityEngine.Object behaviour, HashSet<UnityEngine.Object> objects, HashSet<string> names, HashSet<UnityEngine.Object> walked)
-    {
-        if (!walked.Add(behaviour)) return;
-        var serialized = new SerializedObject(behaviour);
-        SerializedProperty property = serialized.GetIterator();
-        bool enter = true;
-        while (property.Next(enter))
-        {
-            enter = true;
-            if (property.propertyType == SerializedPropertyType.ObjectReference)
-            {
-                UnityEngine.Object target = property.objectReferenceValue;
-                if (target != null)
-                {
-                    objects.Add(target);
-                    if (target is ScriptableObject && target.GetType().Name == "FsmTemplate") Walk(target, objects, names, walked);
-                }
-                enter = false;
-            }
-            else if (property.propertyType == SerializedPropertyType.String)
-            {
-                string text = property.stringValue;
-                if (!string.IsNullOrEmpty(text))
-                {
-                    names.Add(text);
-                    int slash = text.LastIndexOf('/');
-                    if (slash >= 0) names.Add(text.Substring(slash + 1));
-                }
-                enter = false;
-            }
-            else if (property.isArray && Plain.Contains(property.arrayElementType)) enter = false;
-        }
-    }
-
     static IEnumerable<GameObject> SearchParents(object combiner)
     {
-        object options = CrowMeshCombineBake.Get(combiner, "searchOptions");
+        object options = BuildUtil.Field(combiner, "searchOptions");
         if (options == null) yield break;
-        var parent = CrowMeshCombineBake.Get(options, "parent") as GameObject;
+        var parent = BuildUtil.Field(options, "parent") as GameObject;
         if (parent != null) yield return parent;
-        var parents = CrowMeshCombineBake.Get(options, "parentGOs") as GameObject[];
+        var parents = BuildUtil.Field(options, "parentGOs") as GameObject[];
         if (parents == null) yield break;
         foreach (GameObject one in parents)
             if (one != null) yield return one;
@@ -223,7 +161,7 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        if (Mode() != "on") return;
+        if (BuildUtil.Switch("CROW_MCS_STRIP") != "on") return;
         Type combinerType = Type.GetType("MeshCombineStudio.MeshCombiner, MeshCombineStudio.Runtime");
         if (combinerType == null) return;  // a project without MeshCombineStudio
         var combiners = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren(combinerType, true)).ToList();
@@ -232,13 +170,13 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
         var pending = new HashSet<GameObject>();  // under a run-time combiner's search parents
         foreach (Component combiner in combiners)
         {
-            if ((bool)CrowMeshCombineBake.Get(combiner, "combineInRuntime"))
+            if ((bool)BuildUtil.Field(combiner, "combineInRuntime"))
             {
                 foreach (GameObject parent in SearchParents(combiner))
                     foreach (Transform t in parent.GetComponentsInChildren<Transform>(true))
                         pending.Add(t.gameObject);
             }
-            else if ((bool)CrowMeshCombineBake.Get(combiner, "combined")) done.Add(combiner);
+            else if ((bool)BuildUtil.Field(combiner, "combined")) done.Add(combiner);
         }
         if (done.Count == 0) return;
         int sources = 0, stripped = 0, later = 0, named = 0, busy = 0, on = 0, entries = 0, failed = 0;
@@ -254,7 +192,7 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
                     if (behaviour == null) continue;  // a missing script
                     string type = behaviour.GetType().Name;
                     if (type == "MeshCombiner" || type == "MeshCombinerData") continue;  // what is emptied below
-                    Walk(behaviour, referenced, names, walked);
+                    BuildUtil.Walk(behaviour, referenced, names, true, walked);  // with a path's last part
                 }
                 foreach (LODGroup group in root.GetComponentsInChildren<LODGroup>(true))
                     foreach (LOD lod in group.GetLODs())
@@ -266,14 +204,14 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
             var seen = new HashSet<GameObject>();
             foreach (Component combiner in done)
             {
-                var data = CrowMeshCombineBake.Get(combiner, "data") as Component;
+                var data = BuildUtil.Field(combiner, "data") as Component;
                 if (data == null) data = combiner.GetComponent("MeshCombinerData");
-                var found = data == null ? null : CrowMeshCombineBake.Get(data, "foundObjects") as System.Collections.IList;
+                var found = data == null ? null : BuildUtil.Field(data, "foundObjects") as System.Collections.IList;
                 if (found != null)
                     foreach (object cached in found)
                     {
-                        var renderer = CrowMeshCombineBake.Get(cached, "mr") as MeshRenderer;
-                        var filter = CrowMeshCombineBake.Get(cached, "mf") as MeshFilter;
+                        var renderer = BuildUtil.Field(cached, "mr") as MeshRenderer;
+                        var filter = BuildUtil.Field(cached, "mf") as MeshFilter;
                         if (renderer == null || filter == null || renderer.gameObject != filter.gameObject) continue;  // gone already
                         GameObject source = renderer.gameObject;
                         if (!seen.Add(source)) continue;
@@ -294,7 +232,7 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
                     if (holder != null)
                         foreach (string name in Lists)
                         {
-                            var list = CrowMeshCombineBake.Get(holder, name) as System.Collections.IList;
+                            var list = BuildUtil.Field(holder, name) as System.Collections.IList;
                             if (list == null) continue;
                             entries += list.Count;
                             list.Clear();

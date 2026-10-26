@@ -29,6 +29,11 @@ using Debug = UnityEngine.Debug;
 //                             -crow-audio-game keeps every filter on, as the game has them.
 //   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3), the most audible
 //                             (FilterGate), filters already on at the load included.
+//   -crow-reverb-adapt off    keep that cap in every area (by default it comes down where the mixer falls behind).
+//   -crow-reverb-silent off   give a filter to sources that can't be heard at the listener too (by default they
+//                             get none: FilterGate.Silent).
+//   -crow-workers-share off   keep Unity's job workers off CPU 2 while few filters are on (FilterGate.Share; the
+//                             PS Vita's default shares it, unless -crow-gfx-workers is given).
 //   -crow-loader-cpus <cpus>  the CPUs of Unity's loading thread (UnityPreload), digits 0-2 (the PS
 //                             Vita's default: 1; - leaves it on the player's choice, CPU 2, FMOD's).
 //   -crow-dsp-buffer <n>, -crow-real-voices <n>, -crow-sample-rate <hz>
@@ -41,8 +46,8 @@ using Debug = UnityEngine.Debug;
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
 //                             repeatable.
-// The measurement-only probes (-crow-doppler, -crow-mix-mute, -crow-mix-record, -crow-audio-census,
-// -crow-reverb-null) are in AudioProbe.cs (moved there as they were, 21 Oct).
+// The mixer measurements of 19-21 Oct (-crow-doppler, -crow-mix-*, -crow-audio-census, -crow-reverb-null) are
+// done and gone; their results are in docs/status-log.md.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -60,7 +65,7 @@ namespace CrowCompat
 
         static string[] Args { get { return ProbeFiles.Args; } }
 
-        public static bool WantsTap { get { return Args.Contains("-crow-audio-tap"); } }
+        public static bool WantsTap { get { return CrowFlags.Has(Args, "-crow-audio-tap"); } }
 
         // The background loading priority for the player's scene (Loading.cs's MaraScene).
         public static UnityEngine.ThreadPriority LoadPriority(UnityEngine.ThreadPriority fallback)
@@ -87,7 +92,7 @@ namespace CrowCompat
             string before = Describe(config);
             if (buffer <= 0 && voices <= 0 && rate <= 0)
             {
-                if (Args.Contains("-crow-audio")) Debug.Log("CROW_AUDIO config " + before);
+                if (CrowFlags.Has(Args, "-crow-audio")) Debug.Log("CROW_AUDIO config " + before);
                 return;
             }
             if (buffer > 0) config.dspBufferSize = buffer;
@@ -108,7 +113,6 @@ namespace CrowCompat
         {
             FilterGate.Install(Args);
             SharedReverb.Install(Args, FilterGate.GatesReverbs);
-            ReverbNull.Install(Args);
             Threads.MoveLoader(Args);
         }
 
@@ -116,15 +120,8 @@ namespace CrowCompat
         internal static void Install(GameObject probe)
         {
             string[] args = Args;
-            int index = Array.IndexOf(args, "-crow-audio");
-            if (index >= 0)
-            {
-                float seconds;
-                every = index + 1 < args.Length && float.TryParse(args[index + 1], NumberStyles.Float, CultureInfo.InvariantCulture, out seconds) ? seconds : 2f;
-            }
+            if (CrowFlags.Has(args, "-crow-audio")) every = CrowFlags.Number(args, "-crow-audio", 2f);
             outputRate = AudioSettings.outputSampleRate;
-            Doppler.Install(args);
-            MixProbe.Install(args);
             Threads.Install(args, every > 0f);
             tap = WantsTap && probe != null && probe.GetComponent<AudioSource>() != null;
             if (tap)
@@ -334,7 +331,7 @@ namespace CrowCompat
             string given = CrowFlags.Optional(args, "-crow-audio-filters");
             if (given == null)
             {
-                if (Application.platform != RuntimePlatform.PSP2 || args.Contains("-crow-audio-game")) return;
+                if (Application.platform != RuntimePlatform.PSP2 || CrowFlags.Has(args, "-crow-audio-game")) return;
                 given = "reverb,idle";
             }
             foreach (string type in given.ToLowerInvariant().Split(','))
@@ -357,6 +354,7 @@ namespace CrowCompat
                 watchFrom = Time.realtimeSinceStartup + 1f;
                 windowDsp = -1.0;
             });
+            CrowEvents.Unloaded("FilterGate.sceneUnloaded", scene => Destroyed.Forget(curves));
             CrowEvents.Canvases("FilterGate.Update", Update);
             Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
         }
@@ -373,11 +371,16 @@ namespace CrowCompat
             if (all || types.Contains("echo")) list.Add(typeof(AudioEchoFilter));
             if (all || types.Contains("distortion")) list.Add(typeof(AudioDistortionFilter));
             // The reverbs that share one (SharedReverb): an entry for each group, its members' filters left out below.
+            // One list of the reverb filters for both (each FindObjectsOfTypeAll is a new array).
+            AudioReverbFilter[] reverbs = null;
             if (list.Contains(typeof(AudioReverbFilter)))
-                foreach (SharedReverb.Group group in SharedReverb.Find())
+            {
+                reverbs = Resources.FindObjectsOfTypeAll<AudioReverbFilter>();
+                foreach (SharedReverb.Group group in SharedReverb.Find(reverbs))
                     entries.Add(new Entry { Shared = group, Tail = group.Tail });
+            }
             foreach (Type type in list)
-                foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(type))
+                foreach (UnityEngine.Object found in type == typeof(AudioReverbFilter) ? reverbs : Resources.FindObjectsOfTypeAll(type))
                 {
                     var filter = found as Behaviour;
                     if (filter == null || !filter.gameObject.scene.IsValid()) continue;
@@ -531,9 +534,10 @@ namespace CrowCompat
         // 28, the mixer without one 19-40%) for a second, and the DSP clock never behind in this area. Back on CPU 1
         // alone (64:1, the PS Vita's default) in the frame a filter comes on. With one filter allowed (wsharemax=1):
         // Fairy Forest's steady fight on its shared reverb -0.4 ms a frame, the DSP clock down to 0.989; Corridor D's
-        // 0.980-0.993 for a whole minute, over the cap's 0.97, so nothing took it back. At the same priority as the mixer a worker's job delays a mix block by a few ms (the tap's
-        // longest gap 13 -> 18 ms, no late block); with Pool's two reverbs on, sharing put the DSP clock at 99% of real
-        // time (adapting caps then take reverbs off) and the render thread there at 96%.
+        // 0.980-0.993 for a whole minute, over the cap's 0.97, so nothing took it back. At the same priority as the
+        // mixer a worker's job delays a mix block by a few ms (the tap's longest gap 13 -> 18 ms, no late block); with
+        // Pool's two reverbs on, sharing put the DSP clock at 99% of real time (adapting caps then take reverbs off)
+        // and the render thread there at 96%.
         // -crow-workers-share off (wshare=off) keeps them on CPU 1; an explicit -crow-gfx-workers also turns it off.
         static bool shareAuto, shared, blockedHere;
         static int shareMaxOn;  // the filters on that still let the workers share (wsharemax=<n>, a test)
@@ -558,8 +562,8 @@ namespace CrowCompat
         // Its filters then get silence at their input and give silence (their tails kept: OffAt), so a reverb
         // switched off there changes nothing heard, and is back on in the frame the sound can reach the listener.
         // Per source, its two custom curves as first read (GetCustomCurve returns a copy, which nothing changes) and what
-        // their keys say (AnimationCurve.keys is a new array a read: until 22 Oct both were read on every call, each frame
-        // for each playing fully 3D source with a gated reverb).
+        // their keys say: AnimationCurve.keys is a new array at each read, and Silent runs each frame for each playing
+        // fully 3D source with a gated reverb.
         class Curves
         {
             public bool BlendBelow;  // the custom spatial blend curve has a key under 0.999
@@ -589,7 +593,7 @@ namespace CrowCompat
             Curves pair;
             if (!curves.TryGetValue(source, out pair))
             {
-                if (curves.Count > 2000) curves.Clear();
+                if (curves.Count > 2000) curves.Clear();  // a bound within an area (the unloads prune the rest)
                 curves[source] = pair = CurvesOf(source);
             }
             if (pair.BlendBelow) return false;
@@ -606,7 +610,7 @@ namespace CrowCompat
                     float from = Mathf.Clamp01(distance / max);
                     for (int i = 0; i <= 8; i++)
                         if (rolloff.Evaluate(Mathf.Lerp(from, 1f, i / 8f)) > 0f) return false;
-                    // A key at or past from with a value above 0 (the keys' loop until 22 Oct).
+                    // A key at or past from with a value above 0 (Curves.LastHeard, read once).
                     return !(pair.LastHeard >= from);
             }
             return false;
@@ -664,7 +668,6 @@ namespace CrowCompat
 
         internal static bool Change(string key, string value)
         {
-            if (MixProbe.Change(key, value)) return true;
             switch (key)
             {
                 case "rmax":
@@ -704,11 +707,6 @@ namespace CrowCompat
             return false;
         }
 
-        internal static void SwitchType(Type type, bool on)
-        {
-            Switch(type, on);
-        }
-
         static void Switch(Type type, bool on)
         {
             List<Behaviour> list;
@@ -728,7 +726,7 @@ namespace CrowCompat
                 foreach (UnityEngine.Object found in UnityEngine.Object.FindObjectsOfType(type))
                 {
                     var behaviour = found as Behaviour;
-                    if (behaviour == null || !behaviour.enabled || MixProbe.Mine(behaviour)) continue;
+                    if (behaviour == null || !behaviour.enabled) continue;
                     behaviour.enabled = false;
                     list.Add(behaviour);
                     count++;
@@ -762,7 +760,7 @@ namespace CrowCompat
     // CrowSharedReverb/SharedReverb<n>.mixer, a Master group with an SFX Reverb whose 14 parameters are exposed,
     // set from the members' filters) whose output is their old group, and their filters are off. Unity applies a
     // source's volume, rolloff and pan before its filters, so the sum reaches the shared reverb as it reached each:
-    // rendered offline on Windows, per-source and shared differ by float rounding (-137 dB; ReverbNull below), 2D
+    // rendered offline on Windows, per-source and shared differ by float rounding (-137 dB, status-log.md), 2D
     // or 3D, moving or with volume fades. A group counts as one filter for FilterGate's cap, ranking (its most
     // audible member) and silent rule (on while any member wants its filter, or within the tail of the last that
     // did); off, its members go to their old group with no reverb, as their filters would be off. Without FilterGate
@@ -814,8 +812,7 @@ namespace CrowCompat
         static readonly HashSet<Logged> logged = new HashSet<Logged>();  // filters that keep their own, logged once per reason
         static readonly HashSet<Settings> loggedFull = new HashSet<Settings>();  // settings told that every mixer is in use
 
-        // A filter that keeps its own reverb, and why (the log's once-only set; until 22 Oct its instance ID and the
-        // reason joined into a string on every find).
+        // A filter that keeps its own reverb, and why: the log's once-only set, a struct, so a find makes no string.
         struct Logged : IEquatable<Logged>
         {
             public int Id;
@@ -919,9 +916,10 @@ namespace CrowCompat
         internal static void Install(string[] args, bool gatedByFilterGate)
         {
             string mode = CrowFlags.Value(args, "-crow-shared-reverb");
-            on = mode == null ? Application.platform == RuntimePlatform.PSP2 && !args.Contains("-crow-audio-game") : mode != "off";
+            on = mode == null ? Application.platform == RuntimePlatform.PSP2 && !CrowFlags.Has(args, "-crow-audio-game") : mode != "off";
             gated = gatedByFilterGate;
             CrowEvents.Loaded("SharedReverb.sceneLoaded", (scene, loadMode) => nextFind = 0f);
+            CrowEvents.Unloaded("SharedReverb.sceneUnloaded", scene => Destroyed.Forget(gameOn));
             CrowEvents.Canvases("SharedReverb.Frame", Frame);
             Debug.Log("CROW_AUDIO shared reverb " + (on ? "on" : "off") + (gated ? " (FilterGate switches the groups)" : ""));
         }
@@ -937,10 +935,9 @@ namespace CrowCompat
         {
             bool has;
             if (gameOn.TryGetValue(filter, out has)) return has;
-            if (gameOn.Count > 2000)
-                foreach (Behaviour gone in gameOn.Keys.Where(k => k == null).ToList()) gameOn.Remove(gone);
+            if (gameOn.Count > 2000) Destroyed.Forget(gameOn);  // a bound within an area (the unloads prune the rest)
             gameOn[filter] = has = filter.enabled;
-            if (!has) Debug.Log("CROW_AUDIO " + filter.GetType().Name + " " + Path(filter.transform) + " is off in the game: left alone");
+            if (!has) Debug.Log("CROW_AUDIO " + filter.GetType().Name + " " + Hierarchy.Path(filter.transform, 3) + " is off in the game: left alone");
             return has;
         }
 
@@ -985,7 +982,7 @@ namespace CrowCompat
         // Every group found now and on (standalone and the null test).
         internal static void RouteAll()
         {
-            foreach (Group group in Find())
+            foreach (Group group in Find(Resources.FindObjectsOfTypeAll<AudioReverbFilter>()))
                 if (!group.Routed) group.Route(true);
         }
 
@@ -1083,14 +1080,14 @@ namespace CrowCompat
         static readonly List<Group> alive = new List<Group>();
         static readonly List<AudioReverbFilter> gone = new List<AudioReverbFilter>();
 
-        // The groups in the loaded scenes, kept, grown, made or released. FilterGate calls it from its find. The list is
-        // the next find's too: read it before.
-        internal static List<Group> Find()
+        // The groups in the loaded scenes, kept, grown, made or released, from every reverb filter in memory
+        // (FilterGate's find passes its list). The list is the next find's too: read it before.
+        internal static List<Group> Find(AudioReverbFilter[] filters)
         {
             alive.Clear();
             Reuse();  // a find that threw
             if (!Active || !Load()) return alive;
-            foreach (AudioReverbFilter filter in Resources.FindObjectsOfTypeAll<AudioReverbFilter>())
+            foreach (AudioReverbFilter filter in filters)
             {
                 if (filter == null || !filter.gameObject.scene.IsValid() || !GameHasOn(filter)) continue;
                 Group group;
@@ -1108,7 +1105,7 @@ namespace CrowCompat
                     if (!Eligible(filter, out source, out why))
                     {
                         if (logged.Add(new Logged { Id = filter.GetInstanceID(), Why = why }))
-                            Debug.Log("CROW_AUDIO shared reverb: " + Path(filter.transform) + " keeps its own (" + why + ")");
+                            Debug.Log("CROW_AUDIO shared reverb: " + Hierarchy.Path(filter.transform, 3) + " keeps its own (" + why + ")");
                         continue;
                     }
                     dest = source.outputAudioMixerGroup;
@@ -1253,389 +1250,6 @@ namespace CrowCompat
             owner.Clear();
         }
 
-        internal static string Path(Transform t)
-        {
-            string text = t.name;
-            for (int i = 0; i < 2 && t.parent != null; i++)
-            {
-                t = t.parent;
-                text = t.name + "/" + text;
-            }
-            return text.Replace(' ', '_');
-        }
     }
 
-    // The game's threads' CPU use from the kernel (CrowClock plugin). A background thread samples which
-    // thread each CPU runs every 10 ms, so the threads that use the CPU are found by their UIDs; each
-    // report gives every known thread's run time over the window.
-    public static class Threads
-    {
-        [DllImport("CrowClock")] static extern int CrowThreadSelf();
-        [DllImport("CrowClock")] static extern int CrowThreadQuery(int uid, int[] info, byte[] name);
-        [DllImport("CrowClock")] static extern int CrowThreadSet(int uid, int priority, int affinity);
-        [DllImport("CrowClock")] static extern int CrowThreadsRunning(int[] uids);
-        [DllImport("CrowClock")] static extern int CrowCpuIdle(int[] idle);
-        [DllImport("CrowClock")] static extern int CrowThreadWait(int uid, int[] info);
-        [DllImport("CrowClock")] static extern int CrowSyncName(int uid, int waitType, byte[] name);
-
-        // The plugin exists on the PS Vita only. Mono looks a P/Invoke up when it compiles the method that
-        // calls it, whichever branch then runs, and logs the failed library load ("Fallback handler could
-        // not load library ...CrowClock"): methods that other players run call it through this.
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static int SelfNative()
-        {
-            return CrowThreadSelf();
-        }
-
-        class Known
-        {
-            public string Name, Tag;
-            public long Run, Samples;
-            public bool Set;
-        }
-
-        static bool available;
-        static readonly Dictionary<int, Known> known = new Dictionary<int, Known>();
-        static readonly object gate = new object();
-        static readonly List<string[]> settings = new List<string[]>();
-        static readonly Stopwatch wall = Stopwatch.StartNew();
-        static long lastWall;
-        static readonly long[] lastIdle = new long[3];
-        static readonly int[] cpuSamples = new int[3];
-        static int sampleRounds;
-
-        internal static void Install(string[] args, bool report)
-        {
-            for (int i = 0; i + 1 < args.Length; i++)
-                if (args[i] == "-crow-thread")
-                {
-                    string[] parts = args[i + 1].Split(':');
-                    if (parts.Length == 3) settings.Add(parts);
-                    else Debug.Log("CROW_THREADS -crow-thread wants <name>:<priority>:<cpus>, not " + args[i + 1]);
-                }
-            if (!report && settings.Count == 0) return;
-            Start();
-        }
-
-        static bool started;
-
-        // The sampler, once (-crow-audio and Loading's -crow-load-cpu both want it).
-        internal static bool Start()
-        {
-            if (started) return available;
-            started = true;
-            if (Application.platform != RuntimePlatform.PSP2) return false;
-            try
-            {
-                Name(SelfNative(), null);
-                available = true;
-            }
-            catch (Exception e)
-            {
-                Debug.Log("CROW_THREADS no CrowClock thread functions (" + e.GetType().Name + ": " + e.Message + ")");
-                return false;
-            }
-            new Thread(Sample) { IsBackground = true, Name = "CrowThreadSample" }.Start();
-            return true;
-        }
-
-        // Unity's loading thread (UnityPreload) runs on CPU 2 by the player's choice, beside FMOD's mixer,
-        // stream and file threads, and at the priority of the mixer (0x40) when backgroundLoadingPriority
-        // is High: the title's background load of the player's scene (Loading.cs) took the mixer from the
-        // 58% of CPU 2 it needs to 15%, and the DSP clock ran at a quarter of real time for 30 s (the
-        // stutter on the title). CPU 1 has the render worker alone (10-40%). A thread that samples which
-        // thread each CPU runs, every millisecond, finds UnityPreload by its name when it first runs (the
-        // title's prefetch, Loading.cs) and moves it (-crow-loader-cpus; default 1).
-        // Whether UnityPreload left CPU 2: background loads can then run at Normal priority (below the
-        // render worker's, on CPU 1) without starving FMOD (Loading.cs).
-        public static volatile bool LoaderMoved;
-
-        internal static void MoveLoader(string[] args)
-        {
-            if (Application.platform != RuntimePlatform.PSP2) return;
-            string cpus = CrowFlags.Optional(args, "-crow-loader-cpus") ?? "1";
-            int mask = 0;
-            foreach (char c in cpus)
-                if (c >= '0' && c <= '2') mask |= 0x10000 << (c - '0');
-            if (mask == 0) return;
-            try
-            {
-                SelfNative();
-            }
-            catch (Exception e)
-            {
-                Debug.Log("CROW_THREADS no CrowClock thread functions (" + e.GetType().Name + ": " + e.Message + ")");
-                return;
-            }
-            new Thread(() => FindLoader(mask)) { IsBackground = true, Name = "CrowLoaderCpu" }.Start();
-        }
-
-        static void FindLoader(int mask)
-        {
-            var uids = new int[3];
-            var info = new int[10];
-            var name = new byte[32];
-            var seen = new HashSet<int>();
-            var clock = Stopwatch.StartNew();
-            while (clock.ElapsedMilliseconds < 120000)
-            {
-                Thread.Sleep(1);
-                if (CrowThreadsRunning(uids) < 0) continue;
-                foreach (int uid in uids)
-                {
-                    if (uid == 0 || !seen.Add(uid) || CrowThreadQuery(uid, info, name) < 0) continue;
-                    string text = Encoding.ASCII.GetString(name);
-                    if (text.IndexOf("UnityPreload", StringComparison.Ordinal) < 0) continue;
-                    int result = CrowThreadSet(uid, 0, mask);
-                    LoaderMoved = result >= 0;
-                    Debug.Log("CROW_THREADS UnityPreload to CPUs " + Cpus(mask) + " after " + clock.ElapsedMilliseconds + " ms" +
-                              (result < 0 ? " failed 0x" + result.ToString("X8") : ""));
-                    return;
-                }
-            }
-            Debug.Log("CROW_THREADS UnityPreload not found");
-        }
-
-        internal static int Self()
-        {
-            try { return available ? SelfNative() : 0; }
-            catch (Exception) { return 0; }
-        }
-
-        // For Quality's -crow-loop-cpu: the calling thread's UID (0 without the plugin), and a
-        // thread's run time in microseconds (-1 on failure). Works without -crow-audio.
-        internal static int SelfAnyway()
-        {
-            if (Application.platform != RuntimePlatform.PSP2) return 0;
-            try { return SelfNative(); }
-            catch (Exception) { return 0; }
-        }
-
-        static readonly int[] runInfo = new int[10];
-        static readonly byte[] runName = new byte[32];
-
-        // Main thread only (shares its buffers).
-        internal static long RunMicros(int uid)
-        {
-            if (CrowThreadQuery(uid, runInfo, runName) < 0) return -1;
-            return (uint)runInfo[4] | ((long)runInfo[5] << 32);
-        }
-
-        // For Quality's frame probe (any thread, its own buffers): a thread's status, wait type, the UID it
-        // waits on and the CPU it last ran on into info[4]; which of our threads each CPU runs now into
-        // uids[3]; a thread's name; a wait object's name. Below 0 on failure.
-        internal static int Wait(int uid, int[] info)
-        {
-            return CrowThreadWait(uid, info);
-        }
-
-        internal static int Running(int[] uids)
-        {
-            return CrowThreadsRunning(uids);
-        }
-
-        // Quality's workers= and gfxthread= keys: a thread's priority and CPUs now (0 keeps either); the old
-        // ones into was[0] (priority) and was[1] (CPU mask). Below 0 on failure.
-        internal static int SetNow(int uid, int priority, int mask, int[] was)
-        {
-            var info = new int[10];
-            var name = new byte[32];
-            if (CrowThreadQuery(uid, info, name) < 0) return -1;
-            was[0] = info[1];
-            was[1] = info[2];
-            return CrowThreadSet(uid, priority, mask);
-        }
-
-        // MixProbe's athread= key: every known thread whose name has <name> set to a priority and CPU mask now
-        // (0 keeps either; game puts back what it had before the first change). The names set, or why none.
-        static readonly Dictionary<int, int[]> before = new Dictionary<int, int[]>();
-
-        internal static string SetByName(string name, int priority, int mask, bool restore)
-        {
-            if (!available) return "no thread sampler (-crow-audio)";
-            KeyValuePair<int, Known>[] entries;
-            lock (gate) entries = known.ToArray();
-            var info = new int[10];
-            var buffer = new byte[32];
-            var done = new List<string>();
-            foreach (KeyValuePair<int, Known> pair in entries)
-            {
-                if (CrowThreadQuery(pair.Key, info, buffer) < 0) continue;
-                string kernelName = Encoding.ASCII.GetString(buffer);
-                int end = kernelName.IndexOf('\0');
-                if (end >= 0) kernelName = kernelName.Substring(0, end);
-                if (kernelName.IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0 &&
-                    Short(kernelName).IndexOf(name, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                int[] was;
-                if (!before.TryGetValue(pair.Key, out was)) before[pair.Key] = was = new[] { info[1], info[2] };
-                int result = restore ? CrowThreadSet(pair.Key, was[0], was[1]) : CrowThreadSet(pair.Key, priority, mask);
-                done.Add(Short(kernelName) + "[p" + info[1].ToString("x") + " c" + Cpus(info[2]) + "->" +
-                         (restore ? "p" + was[0].ToString("x") + " c" + Cpus(was[1]) : (priority > 0 ? "p" + priority.ToString("x") : "p=") + " c" + (mask > 0 ? Cpus(mask) : "=")) +
-                         (result < 0 ? " failed 0x" + result.ToString("X8") : "") + "]");
-            }
-            return done.Count > 0 ? string.Join(" ", done.ToArray()) : "no thread named " + name;
-        }
-
-        internal static string ThreadName(int uid)
-        {
-            var info = new int[10];
-            var name = new byte[32];
-            if (CrowThreadQuery(uid, info, name) < 0) return null;
-            int end = Array.IndexOf(name, (byte)0);
-            return System.Text.Encoding.ASCII.GetString(name, 0, end < 0 ? name.Length : end);
-        }
-
-        internal static string SyncName(int uid, int waitType)
-        {
-            var name = new byte[32];
-            if (CrowSyncName(uid, waitType, name) < 0) return null;
-            int end = Array.IndexOf(name, (byte)0);
-            return System.Text.Encoding.ASCII.GetString(name, 0, end < 0 ? name.Length : end);
-        }
-
-        // Adds a thread, with a tag to show after its name (or null).
-        internal static void Name(int uid, string tag)
-        {
-            if (uid <= 0) return;
-            lock (gate)
-            {
-                Known entry;
-                if (!known.TryGetValue(uid, out entry)) known[uid] = entry = new Known();
-                if (tag != null) entry.Tag = tag;
-            }
-        }
-
-        static void Sample()
-        {
-            var uids = new int[3];
-            while (true)
-            {
-                Thread.Sleep(10);
-                if (CrowThreadsRunning(uids) < 0) continue;
-                lock (gate)
-                {
-                    sampleRounds++;
-                    for (int cpu = 0; cpu < 3; cpu++)
-                    {
-                        if (uids[cpu] == 0) continue;
-                        cpuSamples[cpu]++;
-                        Known entry;
-                        if (!known.TryGetValue(uids[cpu], out entry)) known[uids[cpu]] = entry = new Known();
-                        entry.Samples++;
-                    }
-                }
-            }
-        }
-
-        // " cpu=a/b/c" with each CPU's load in percent over the window.
-        internal static void AppendCpu(StringBuilder line)
-        {
-            if (!available) return;
-            var idle = new int[6];
-            if (CrowCpuIdle(idle) < 0) return;
-            long now = wall.ElapsedTicks;
-            double us = (now - lastWall) * 1e6 / Stopwatch.Frequency;
-            line.Append(" cpu=");
-            for (int cpu = 0; cpu < 3; cpu++)
-            {
-                long value = (uint)idle[cpu * 2] | ((long)idle[cpu * 2 + 1] << 32);
-                if (cpu > 0) line.Append('/');
-                line.Append(lastWall == 0 ? "?" : (100.0 - 100.0 * (value - lastIdle[cpu]) / us).ToString("F0", CultureInfo.InvariantCulture));
-                lastIdle[cpu] = value;
-            }
-            lastWall = now;
-        }
-
-        static long threadWall;
-
-        // A CROW_THREADS line: each known thread's share of a CPU over the window, the busiest first.
-        internal static void Report(bool quiet)
-        {
-            string shares = Shares();
-            if (shares == null || quiet) return;
-            Debug.Log("CROW_THREADS " + shares);
-        }
-
-        // Each known thread's share of a CPU since the last call, the busiest first (null without the
-        // plugin). One caller only: Report's (-crow-audio) or Loading's -crow-load-cpu thread.
-        internal static string Shares()
-        {
-            if (!available) return null;
-            long now = wall.ElapsedTicks;
-            double us = (now - threadWall) * 1e6 / Stopwatch.Frequency;
-            bool first = threadWall == 0;
-            threadWall = now;
-            var info = new int[10];
-            var name = new byte[32];
-            var rows = new List<KeyValuePair<double, string>>();
-            KeyValuePair<int, Known>[] entries;
-            int rounds;
-            lock (gate)
-            {
-                entries = known.ToArray();
-                rounds = sampleRounds;
-                sampleRounds = 0;
-            }
-            foreach (KeyValuePair<int, Known> pair in entries)
-            {
-                Known entry = pair.Value;
-                if (CrowThreadQuery(pair.Key, info, name) < 0) continue;
-                string kernelName = Encoding.ASCII.GetString(name).TrimEnd('\0');
-                int end = kernelName.IndexOf('\0');
-                if (end >= 0) kernelName = kernelName.Substring(0, end);
-                entry.Name = kernelName;
-                Apply(pair.Key, entry, kernelName);
-                long run = (uint)info[4] | ((long)info[5] << 32);
-                double share = first || entry.Run == 0 ? -1 : 100.0 * (run - entry.Run) / us;
-                entry.Run = run;
-                long samples;
-                lock (gate)
-                {
-                    samples = entry.Samples;
-                    entry.Samples = 0;
-                }
-                if (share < 1.0) continue;
-                rows.Add(new KeyValuePair<double, string>(share, Short(entry.Name) + entry.Tag + "=" + share.ToString("F0", CultureInfo.InvariantCulture) +
-                    "%[p" + info[1].ToString("x") + " c" + Cpus(info[2]) + " s" + (rounds > 0 ? (100 * samples / rounds).ToString(CultureInfo.InvariantCulture) : "?") + "]"));
-            }
-            return string.Join(" ", rows.OrderByDescending(r => r.Key).Select(r => r.Value).ToArray());
-        }
-
-        // "82810B90 Unity_main_thread" -> "Unity_main_thread"; spaces to underscores.
-        static string Short(string name)
-        {
-            if (name.Length > 9 && name[8] == ' ') name = name.Substring(9);
-            return name.Replace(' ', '_');
-        }
-
-        static string Cpus(int mask)
-        {
-            var text = new StringBuilder();
-            for (int cpu = 0; cpu < 4; cpu++)
-                if ((mask & (0x10000 << cpu)) != 0) text.Append(cpu);
-            return text.Length > 0 ? text.ToString() : "?";
-        }
-
-        // -crow-thread: once per thread, when its name matches.
-        static void Apply(int uid, Known entry, string kernelName)
-        {
-            if (entry.Set) return;
-            foreach (string[] setting in settings)
-            {
-                // By the kernel's name or as CROW_THREADS shows it (spaces as underscores: Unity's job
-                // workers are "Worker Thread", and the flag's value can't hold a space).
-                if (kernelName.IndexOf(setting[0], StringComparison.OrdinalIgnoreCase) < 0 &&
-                    Short(kernelName).IndexOf(setting[0], StringComparison.OrdinalIgnoreCase) < 0) continue;
-                entry.Set = true;
-                int priority, mask = 0;
-                int.TryParse(setting[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out priority);
-                foreach (char c in setting[2])
-                    if (c >= '0' && c <= '2') mask |= 0x10000 << (c - '0');
-                int result = CrowThreadSet(uid, priority, mask);
-                Debug.Log("CROW_THREADS set " + kernelName + " priority=" + (priority > 0 ? "0x" + priority.ToString("x") : "kept") +
-                          " cpus=" + (mask > 0 ? Cpus(mask) : "kept") + (result < 0 ? " failed 0x" + result.ToString("X8") : ""));
-                return;
-            }
-        }
-    }
 }

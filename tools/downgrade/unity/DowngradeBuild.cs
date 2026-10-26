@@ -13,12 +13,13 @@ using UnityEngine;
 //                                 scene of the build settings, which the player starts
 //   -developmentBuild             Unity's development player
 //   -codeStage <dir>              PS Vita: save the linker's and IL2CPP's inputs there for quickcode
-// The CROW_* variables below (CROW_MERGE, CROW_SPLIT, CROW_VITA_DATA) and in the other unity/*.cs
-// scripts choose what the build does to the scenes it writes.
+//   -vitaTitleId <id>             PS Vita: the app's title ID (pipeline.VITA_TITLE_ID)
+// The build switches (CROW_* variables, common.BUILD_SWITCHES; BuildUtil.Switch) choose what the scripts
+// here do to the scenes the build writes.
 public static class DowngradeBuild
 {
     // Homebrew title: XXYYYY-<9 char title ID>_00-<16 char label>.
-    const string VitaContentId = "IV0000-CROW00001_00-CROWCOUNTRYVITA0";
+    const string VitaContentId = "IV0000-{0}_00-CROWCOUNTRYVITA0";
 
     public static void Build()
     {
@@ -59,12 +60,15 @@ public static class DowngradeBuild
                 EditorApplication.Exit(2);
                 return;
             }
+            string titleId = Argument(args, "-vitaTitleId");
+            if (titleId == null || titleId.Length != 9) throw new ArgumentException("Missing -vitaTitleId <9 characters>");
             EditorUserBuildSettings.psp2BuildSubtarget = PSP2BuildSubtarget.PCHosted;
-            PlayerSettings.PSVita.contentID = VitaContentId;
+            PlayerSettings.PSVita.contentID = string.Format(VitaContentId, titleId);
             PlayerSettings.PSVita.shortTitle = "Crow Country";
             // The Vita module calls IL2CPP without null and array bounds checks, so a null
             // reference or bad index the PC game survives as a logged exception crashes the
-            // player instead. Keep the exception behaviour of the source version.
+            // player instead. Keep the exception behaviour of the source version (pipeline.IL2CPP_CHECKS,
+            // which link runs IL2CPP with: keep the two in step).
             PlayerSettings.SetAdditionalIl2CppArgs("--emit-null-checks --enable-array-bounds-check");
             // The largest application memory budget; the game's art is sized for PCs.
             PlayerSettings.PSVita.memoryExpansionMode = PlayerSettings.PSVita.PSVitaMemoryExpansionMode.ExpandBy109MB;
@@ -78,7 +82,7 @@ public static class DowngradeBuild
         Debug.Log("DOWNGRADE_SPLASH hasPro=" + UnityEditorInternal.InternalEditorUtility.HasPro() +
                   " show=" + PlayerSettings.SplashScreen.show + " showUnityLogo=" + PlayerSettings.SplashScreen.showUnityLogo);
 
-        scenes = scenes.Concat(PreloadAddressables()).ToArray();
+        scenes = scenes.Concat(AddressablesScenes()).ToArray();
 
         // pipeline.py build --development: the development player, for the engine's profiler markers.
         BuildOptions options = args.Contains("-developmentBuild") ? BuildOptions.Development : BuildOptions.None;
@@ -105,47 +109,34 @@ public static class DowngradeBuild
         EditorApplication.Exit(report.summary.result == BuildResult.Succeeded ? 0 : 1);
     }
 
-    // The assets the game loads through Addressables (asset_rules.ADDRESSABLE_ASSETS, listed by the
-    // pipeline as "key<tab>path" lines in ProjectSettings/CrowAddressables.txt) go in a CrowCompat AddressablesTable
-    // among the player's preloaded assets: the player loads it before the first scene, with the
-    // dependencies the build lists, and CrowCompat's Addressables serves the keys from it.
-    const string AddressablesList = "ProjectSettings/CrowAddressables.txt", AddressablesTablePath = "Assets/CrowAddressablesTable.asset";
+    // The assets the game loads through Addressables (asset_rules.ADDRESSABLE_ASSETS, listed by the pipeline as
+    // "key<tab>path" lines in ProjectSettings/CrowAddressables.txt). The game's catalog has one, the player
+    // prefab, which goes in a scene of its own (SaveMaraScene); CrowCompat's Addressables loads any other key
+    // from Resources/Addressables.
+    const string AddressablesList = "ProjectSettings/CrowAddressables.txt";
+    // The preloaded table of Addressables assets an older build script made, which stays empty: taken out.
+    const string OldAddressablesTable = "Assets/CrowAddressablesTable.asset";
 
     // Returns the scenes the build adds (CrowMara).
-    static string[] PreloadAddressables()
+    static string[] AddressablesScenes()
     {
         if (!System.IO.File.Exists(AddressablesList))
             throw new InvalidOperationException("No " + AddressablesList + ": run pipeline.py project");
-        Type type = Type.GetType("CrowCompat.AddressablesTable, CrowCompat");
-        if (type == null) throw new InvalidOperationException("No CrowCompat.AddressablesTable in the project's CrowCompat.dll");
-        var keys = new System.Collections.Generic.List<string>();
-        var assets = new System.Collections.Generic.List<UnityEngine.Object>();
         var added = new System.Collections.Generic.List<string>();
         foreach (string line in System.IO.File.ReadAllLines(AddressablesList))
         {
             string[] fields = line.Split('\t');
-            if (fields.Length != 2) continue;
-            UnityEngine.Object asset = AssetDatabase.LoadMainAssetAtPath(fields[1]);
-            if (asset == null) throw new InvalidOperationException("No asset " + fields[1] + " for the Addressables key " + fields[0]);
-            if (fields[0] == MaraKey)
-            {
-                added.Add(SaveMaraScene((GameObject)asset));
-                continue;
-            }
-            keys.Add(fields[0]);
-            assets.Add(asset);
+            if (fields.Length != 2) throw new InvalidOperationException(AddressablesList + " has a line that isn't key<tab>path: " + line);
+            if (fields[0] != MaraKey) throw new InvalidOperationException("No rule for the Addressables key " + fields[0] + " (" + AddressablesList + ")");
+            var prefab = AssetDatabase.LoadMainAssetAtPath(fields[1]) as GameObject;
+            if (prefab == null) throw new InvalidOperationException("No prefab " + fields[1] + " for the Addressables key " + fields[0]);
+            added.Add(SaveMaraScene(prefab));
         }
-        ScriptableObject table = ScriptableObject.CreateInstance(type);
-        type.GetField("keys").SetValue(table, keys.ToArray());
-        type.GetField("assets").SetValue(table, assets.ToArray());
-        AssetDatabase.DeleteAsset(AddressablesTablePath);
-        AssetDatabase.CreateAsset(table, AddressablesTablePath);
-        AssetDatabase.SaveAssets();
-        var preloaded = PlayerSettings.GetPreloadedAssets()
-            .Where(a => a != null && AssetDatabase.GetAssetPath(a) != AddressablesTablePath).ToList();
-        preloaded.Add(AssetDatabase.LoadMainAssetAtPath(AddressablesTablePath));
-        PlayerSettings.SetPreloadedAssets(preloaded.ToArray());
-        Debug.Log("DOWNGRADE_ADDRESSABLES preloaded " + string.Join(", ", keys.ToArray()) + "; scenes " + string.Join(", ", added.ToArray()));
+        UnityEngine.Object[] preloaded = PlayerSettings.GetPreloadedAssets();
+        if (preloaded.Any(a => a != null && AssetDatabase.GetAssetPath(a) == OldAddressablesTable))
+            PlayerSettings.SetPreloadedAssets(preloaded.Where(a => a != null && AssetDatabase.GetAssetPath(a) != OldAddressablesTable).ToArray());
+        AssetDatabase.DeleteAsset(OldAddressablesTable);
+        Debug.Log("DOWNGRADE_ADDRESSABLES scenes " + string.Join(", ", added.ToArray()));
         return added.ToArray();
     }
 
@@ -232,38 +223,6 @@ public static class DowngradeBuild
         string managed = System.IO.Path.Combine(stage, "StagingArea", "Data", "Managed");
         int assemblies = System.IO.Directory.Exists(managed) ? System.IO.Directory.GetFiles(managed, "*.dll", System.IO.SearchOption.AllDirectories).Length : 0;
         Debug.Log("DOWNGRADE_CODE_STAGE saved " + count + " files and " + assemblies + " staged assemblies to " + stage);
-    }
-
-    // The PS Vita build's static merge (CrowCompat's compat/Merge.cs, CrowMergeScenes in MergeScenes.cs), from the
-    // CROW_MERGE environment variable: on (merge, and drop the parts' meshes nothing else in the scene
-    // uses; the default), ab (merge and keep the parts' meshes, so -crow-merge off can switch back for
-    // comparisons), off. Other platforms don't merge, unless CROW_VITA_DATA=1 (a Windows player with
-    // the PS Vita's scene data, for measurements: merge, split and MeshCombineStudio bake as on the PS Vita).
-    internal static string MergeMode()
-    {
-        if (!VitaData) return "off";
-        string mode = Environment.GetEnvironmentVariable("CROW_MERGE");
-        return string.IsNullOrEmpty(mode) ? "on" : mode;
-    }
-
-    // The PS Vita build's scene split (CrowCompat's Merge.Split, after the merge in CrowMergeScenes),
-    // from the CROW_SPLIT environment variable: movers (the default: the still parts and the parts that
-    // move on their own), on (the still parts only) or off. Other platforms don't split (CROW_VITA_DATA=1 does).
-    internal static string SplitMode()
-    {
-        if (!VitaData) return "off";
-        string mode = Environment.GetEnvironmentVariable("CROW_SPLIT");
-        return string.IsNullOrEmpty(mode) ? "movers" : mode;
-    }
-
-    // The scene data as the PS Vita build writes it: the PS Vita target, or CROW_VITA_DATA=1 on another.
-    internal static bool VitaData
-    {
-        get
-        {
-            return EditorUserBuildSettings.activeBuildTarget == BuildTarget.PSP2 ||
-                   Environment.GetEnvironmentVariable("CROW_VITA_DATA") == "1";
-        }
     }
 
     // Whether a scene path is the scene named (its file name, or its path), in any case.

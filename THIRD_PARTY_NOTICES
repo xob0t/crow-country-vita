@@ -1,0 +1,17 @@
+Third-party notices
+
+The rest of this repository is under the MIT license in LICENSE. The files below are not.
+
+
+tools/downgrade/patches/uscsandbox-swizzle.patch
+tools/downgrade/patches/uscsandbox-staterefs.patch
+tools/downgrade/patches/uscsandbox-tiers.patch
+
+These patches change USCSandbox (https://github.com/nesrak1/USCSandbox), which has no license
+file of its own and reworks code from AssetRipper, under the GNU General Public License version 3.
+The patches are offered under the GNU General Public License version 3 (GPL-3.0), like the code
+they modify, and are not covered by the MIT license of the rest of this repository.
+
+The repository holds no USCSandbox code. The pipeline downloads USCSandbox at a pinned commit
+(common.USCSANDBOX_COMMIT in tools/downgrade/common.py) and applies the patches on the machine that
+builds (shader_rules.uscsandbox).

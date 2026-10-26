@@ -15,12 +15,14 @@ CROW_FIGHT_WINDOW line per measured window and a CROW_FIGHT_SUMMARY line, and qu
 
 vita: takes the vita-device lock (waiting up to --wait seconds, by default not at all; inside
 `lock.py run` it uses the caller's), syncs the build (unless --no-sync), and for each mode and run
-quits the game, writes args.txt, launches, keeps the console awake, waits for the summary (or a failure, or --timeout),
-pulls the log and samples vitacompanion's perf during the fight. However it ends, it quits the game
-and clears args.txt. pc: runs a Windows player through run_player.py (its own desktop, windowed,
-muted); --vitalike runs it at <CAP> percent of the wall time on three cores (vitalike.py's
-calibration, made for the IL2CPP player), and the PC player copy gets the current CrowCompat.dll
-(Mono builds) so the benchmark works without a new build.
+quits the game, writes args.txt, launches, keeps the console awake, waits for the summary (or a
+failure, or --timeout), pulls the log and samples vitacompanion's perf during the fight. A run stops
+early when the game starts no log whose head names the run's flags (compat/ProbeFiles.cs's args
+line) within 2 minutes, and prints the head it found. However it ends, it quits the game and clears
+args.txt. pc: runs a Windows player through run_player.py (its own desktop, windowed, muted);
+--vitalike runs it at <CAP> percent of the wall time on three cores (vitalike.py's calibration, made
+for the IL2CPP player), and the PC player copy gets the current CrowCompat.dll (Mono builds) so the
+benchmark works without a new build.
 
 Logs and the table go to artifacts/fightbench/<tag>/ (<mode>-<run>.log, perf-<mode>-<run>.txt,
 summary.txt). `report` prints the table again from saved logs.
@@ -34,7 +36,8 @@ import sys
 import time
 from pathlib import Path
 
-from common import ROOT, TARGET, WORK, build_folder, number, split_at_dashes
+from common import ROOT, TARGET, WORK, build_folder, split_at_dashes
+from playerlog import fields
 
 OUT = ROOT / 'artifacts' / 'fightbench'
 VITA_BUILD = build_folder('vita')
@@ -42,6 +45,11 @@ PC_BUILD = build_folder('windows')
 PC_COPY = WORK / 'fightbench' / 'player'
 LINE = re.compile(r'(CROW_FIGHT_(?:WINDOW|SUMMARY|FAIL|SETUP|START))\s+(.*)$')
 POLL_SECONDS = 10
+# How long after the launch the game has to start this run's log (it writes its first lines in seconds).
+START_SECONDS = 120
+HEAD_LINES = 5  # where the log's args line is looked for
+# -crow-loop-profile's period: long enough that only the fight's per-window CROW_LOOP lines appear.
+LOOP_PROFILE_WINDOWS_ONLY = '100000'
 # Columns of the table: (key in the log line, heading, format).
 COLUMNS = [
     ('ms', 'frame', '{:.1f}'),
@@ -74,20 +82,6 @@ COLUMNS = [
 ]
 
 
-def fields(text):
-    """key=value pairs of a log line (values with a comma decimal read as numbers too)."""
-    out = {}
-    for pair in text.split():
-        if '=' not in pair:
-            continue
-        key, value = pair.split('=', 1)
-        try:
-            out[key] = number(value)
-        except ValueError:
-            out[key] = value
-    return out
-
-
 def parse(log: str):
     """(setup fields, window lines, summary fields or None, failure text or None)."""
     setup, windows, summary, failure = {}, [], None, None
@@ -105,6 +99,10 @@ def parse(log: str):
         elif kind == 'CROW_FIGHT_FAIL':
             failure = rest
     return setup, windows, summary, failure
+
+
+def outcome(failure, summary):
+    return 'FAILED ' + failure if failure else 'done' if summary is not None else 'no summary'
 
 
 def table(rows):
@@ -171,7 +169,7 @@ def flags_for(mode, args, run):
     """The run's flags. -crow-fight-run names the run: the log's args line then tells this run's log from
     the last one's, which stays on the card until the game starts writing the new one."""
     flags = ['-crow-fight', mode, '-crow-fight-run', f'{args.tag}/{mode}-{run}']
-    flags += ['-crow-loop-profile', '100000', '-crow-loop-cpu', '-crow-gc-log']
+    flags += ['-crow-loop-profile', LOOP_PROFILE_WINDOWS_ONLY, '-crow-loop-cpu', '-crow-gc-log']
     if args.area:
         flags += ['-crow-fight-area', args.area]
     if args.seconds:
@@ -212,6 +210,7 @@ def vita_run(vita, mode, run, args, tag_dir):
     perf = tag_dir / f'perf-{mode}-{run}.txt'
     perf.write_text('')
     text, fighting, samples, sent = '', False, 0, False
+    wanted, before, stray = f'args: {" ".join(flags)}', None, None
     while time.time() - started < args.timeout:
         time.sleep(POLL_SECONDS)
         try:
@@ -219,9 +218,19 @@ def vita_run(vita, mode, run, args, tag_dir):
         except Exception as error:
             print(f'  log read failed: {error}')
             continue
-        head = [line.strip() for line in text.split('\n', 3)[:3]]
-        if f'args: {" ".join(flags)}' not in head:
-            continue  # the last run's log: the game hasn't started writing this one
+        head = [line.strip() for line in text.split('\n', HEAD_LINES)[:HEAD_LINES]]
+        if wanted not in head:
+            # The last run's log stays until the game starts this one's. A new log whose head is
+            # written (two lines) but names other flags means the args line changed (ProbeFiles.cs).
+            if before is None:
+                before = text
+            elif text != before and text.count('\n') >= 2:
+                stray = f'the new log has no "{wanted}" line in its head: {" | ".join(head)}'
+            elif time.time() - started > START_SECONDS:
+                stray = f'the game started no new log in {START_SECONDS} s (did it launch?)'
+            if stray:
+                break
+            continue
         _, windows, summary, failure = parse(text)
         if 'CROW_FIGHT_START' in text and not fighting:
             fighting = True
@@ -240,10 +249,15 @@ def vita_run(vita, mode, run, args, tag_dir):
             break
     else:
         print(f'  timed out after {args.timeout} s')
+    if stray and text == before:  # the last run's log: nothing of this run's to keep
+        print(f'  FAILED: {stray}')
+        return None
     out.write_text(text, encoding='utf-8')
+    if stray:
+        print(f'  FAILED: {stray}; log {out}')
+        return out
     _, windows, summary, failure = parse(text)
-    state = 'FAILED ' + failure if failure else 'done' if summary is not None else 'no summary'
-    print(f'  {state}: {len(windows)} windows, {time.time() - started:.0f} s; log {out}')
+    print(f'  {outcome(failure, summary)}: {len(windows)} windows, {time.time() - started:.0f} s; log {out}')
     if summary is not None:
         print(table([(f'{mode}-{run}', summary)]))
     return out
@@ -294,8 +308,10 @@ def pc_runs(args):
             started = time.time()
             code = run_player.run(exe, out, flags, timeout=args.timeout + 60, on_start=slow)
             _, windows, summary, failure = parse(out.read_text(encoding='utf-8', errors='replace'))
-            state = 'FAILED ' + failure if failure else 'done' if summary is not None else 'no summary'
-            print(f'  {state} (exit {code}): {len(windows)} windows, {time.time() - started:.0f} s; log {out}')
+            print(
+                f'  {outcome(failure, summary)} (exit {code}): {len(windows)} windows, '
+                f'{time.time() - started:.0f} s; log {out}'
+            )
             logs.append(out)
     return logs
 
@@ -328,7 +344,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('target', choices=['vita', 'pc', 'report'])
     parser.add_argument('paths', nargs='*', help='report: tags (artifacts/fightbench/<tag>) or log files')
-    parser.add_argument('--modes', default='real,stress', help='comma-separated: real, stress')
+    parser.add_argument(
+        '--modes',
+        default='real,stress',
+        help='comma-separated -crow-fight modes: real, stress, idle, stand, walk, physics, discover (Fight.cs)',
+    )
     parser.add_argument('--runs', type=int, default=2)
     parser.add_argument('--tag', default=time.strftime('%m%d-%H%M'))
     parser.add_argument('--area', help='the fight scene (default: Fight.cs picks per mode)')
@@ -362,9 +382,8 @@ def main():
         args.build = args.build or VITA_BUILD
         import lock
 
-        # Any run this process is in (CROW_LOCKS), not only the innermost (CROW_LOCK): under `lock.py run
-        # vita-device -- lock.py run vita-build -- ...` it used to wait for its own vita-device lock.
-        if 'vita-device' not in lock.held_here():
+        # Any run this process is in, or CROW_HOLDER naming the holder (lock.ours).
+        if not lock.ours('vita-device'):
             holder = f'fightbench: {",".join(args.modes)} x{args.runs}'
             print(f'waiting for the vita-device lock as "{holder}"')
             code = lock.run('vita-device', holder, args.wait, [sys.executable, __file__, *sys.argv[1:]])

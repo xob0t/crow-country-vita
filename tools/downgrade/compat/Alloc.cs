@@ -32,6 +32,10 @@ using UnityEngine.SceneManagement;
 //                            (CROW_CLONES; any player)
 //   -crow-alloc-share game   delegates and DOTween's shortcut closures made new each time, as the game
 //                            does (SharedClosures, below; on by default on every player)
+//   -crow-gc-pace off|on|<MB>  collections run early while the game is paused, once MB (default 2) have
+//                            been allocated since the last (GcPace, below; on by default on the PS Vita)
+//   -crow-tween-recycle game|on  PlayMaker's DOTween actions' tweens recycled (TweenRecycle, below; on by
+//                            default on the PS Vita; game keeps the game's setting)
 // The callbacks run inside the allocator and the collector, so they allocate nothing and only touch
 // arrays made beforehand.
 // Part of CrowCompat; see Compat2018.cs.
@@ -57,7 +61,6 @@ namespace CrowCompat
         [DllImport("__Internal")] static extern void il2cpp_free(IntPtr pointer);
         [DllImport("__Internal")] static extern UIntPtr GC_get_heap_size();
         [DllImport("__Internal")] static extern UIntPtr GC_get_free_bytes();
-        [DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
 
         [DllImport("kernel32.dll")] static extern ushort RtlCaptureStackBackTrace(uint skip, uint count, IntPtr frames, IntPtr hash);
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool GetModuleHandleExW(uint flags, IntPtr address, out IntPtr module);
@@ -121,26 +124,25 @@ namespace CrowCompat
         // From Diag.Install. Only an IL2CPP player has the profiler interface; Mono's calls fail.
         internal static void Install(string[] args)
         {
-            int gcLog = Array.IndexOf(args, "-crow-gc-log"), alloc = Array.IndexOf(args, "-crow-alloc");
+            bool gcLog = CrowFlags.Has(args, "-crow-gc-log"), alloc = CrowFlags.Has(args, "-crow-alloc");
             GcPace.Install(args);
             float clones = CrowFlags.Number(args, "-crow-alloc-clones", -1f);
             if (clones > 0f) Clones.Install(clones);
-            if (gcLog < 0 && alloc < 0) return;
-            if (gcLog >= 0) longFrameMs = CrowFlags.Number(args, "-crow-gc-log", 200f);
-            if (alloc >= 0) reportEvery = CrowFlags.Number(args, "-crow-alloc", 10f);
-            if (longFrameMs <= 0f && gcLog >= 0) longFrameMs = 200f;
-            if (reportEvery <= 0f && alloc >= 0) reportEvery = 10f;
+            if (!gcLog && !alloc) return;
+            if (gcLog) longFrameMs = CrowFlags.Number(args, "-crow-gc-log", 200f);
+            if (alloc) reportEvery = CrowFlags.Number(args, "-crow-alloc", 10f);
+            if (longFrameMs <= 0f && gcLog) longFrameMs = 200f;
+            if (reportEvery <= 0f && alloc) reportEvery = 10f;
             runStart = new long[Runs];
             runEnd = new long[Runs];
             int events = ProfileGc;
-            if (alloc >= 0)
+            if (alloc)
             {
                 classes = new IntPtr[Slots];
                 classBytes = new long[Slots];
                 classCount = new int[Slots];
                 events |= ProfileAllocations;
-                int stackFlag = Array.IndexOf(args, "-crow-alloc-stacks");
-                if (stackFlag >= 0 && Application.platform == RuntimePlatform.WindowsPlayer)
+                if (CrowFlags.Has(args, "-crow-alloc-stacks") && Application.platform == RuntimePlatform.WindowsPlayer)
                 {
                     stacks = true;
                     sampleEvery = (long)(CrowFlags.Number(args, "-crow-alloc-stacks", 16f) * 1024f);
@@ -152,9 +154,8 @@ namespace CrowCompat
                     stackDepth = new int[StackSlots];
                     stackCount = new int[StackSlots];
                     stackClass = new IntPtr[StackSlots];
-                    int file = Array.IndexOf(args, "-crow-alloc-file");
-                    stackFile = file >= 0 && file + 1 < args.Length ? args[file + 1]
-                        : Path.Combine(Path.GetDirectoryName(Application.dataPath), "alloc-stacks.txt");
+                    stackFile = CrowFlags.Value(args, "-crow-alloc-file") ??
+                                Path.Combine(Path.GetDirectoryName(Application.dataPath), "alloc-stacks.txt");
                 }
             }
             try
@@ -218,6 +219,7 @@ namespace CrowCompat
             }
         }
 
+        // Nothing to do, but il2cpp_profiler_install_gc takes a resize callback with the GC's.
         [AOT.MonoPInvokeCallback(typeof(ResizeFunc))]
         static void OnResize(IntPtr profiler, long size)
         {
@@ -293,7 +295,7 @@ namespace CrowCompat
 
         static long Total()
         {
-            return (long)(ulong)GC_get_total_bytes();
+            return GcTotal.Bytes();
         }
 
         static string F(double value, string format = "0.0")
@@ -540,7 +542,7 @@ namespace CrowCompat
     // When the garbage collector runs, on the PS Vita (-crow-gc-pace off leaves it to Boehm; on other
     // IL2CPP players -crow-gc-pace on). A collection stops the game for 0.8 s in Roadside and 1.0 s in
     // Station Square (it marks all 75-95 MB of live data, on one core). In play Boehm runs one each
-    // time about 5.3 MB have been allocated since the last (Memory.cs's free_space_divisor 6), every
+    // time about 5.5-6.6 MB have been allocated since the last (Memory.cs's free_space_divisor 6), every
     // 3-5 minutes at the 20-30 KB/s the game allocates there (DOTween tweens from PlayMaker actions,
     // mostly), wherever the game is. GcPace runs it early where a 1 s stop costs little: half a second
     // into a pause (Time.timeScale 0: the status screen, the map), once at least 2 MB (-crow-gc-pace
@@ -557,11 +559,9 @@ namespace CrowCompat
         static float pausedSince = -1f;
         static bool pauseDone;
 
-        [DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
-
         static long Total()
         {
-            return (long)(ulong)GC_get_total_bytes();
+            return GcTotal.Bytes();
         }
 
         internal static void Install(string[] args)

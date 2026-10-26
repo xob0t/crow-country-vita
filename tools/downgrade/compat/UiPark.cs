@@ -9,7 +9,7 @@ using UnityEngine.SceneManagement;
 // in Station Square, 60 active). Unity's canvas update walks a root canvas's RectTransforms every frame,
 // twice (EarlyUpdate and PostLateUpdate UpdateCanvasRectTransform, about 0.55 ms each on the PS Vita),
 // switched-off ones included: on the PS Vita's fight, with those subtrees moved out of the canvas, the
-// canvases' steps 2.2 -> 1.5 ms a frame and the main thread 1.1 ms less (status.md, Render step).
+// canvases' steps 2.2 -> 1.5 ms a frame and the main thread 1.1 ms less (status-log.md, Render step).
 // UiPark parks them: 2 s after each area load, the topmost switched-off subtrees of 8 transforms or more
 // in the player's enabled overlay canvases (DontDestroyOnLoad) go below CrowUiPark, a plain transform
 // beside the canvases under their root (so they are destroyed, kept across loads and found under the
@@ -37,7 +37,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            string value = CrowFlags.Value(args, "-crow-ui-park") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string value = CrowFlags.Value(args, "-crow-ui-park", "on");
             // Each under a Guard of its own (Diag.Guard, 21 Oct): one failing leaves the other.
             if (value != null) Diag.Guard("UiPark", () => Set(value));
             Diag.Guard("RigPark", () => RigPark.Install(args));
@@ -45,7 +45,6 @@ namespace CrowCompat
 
         internal static bool Change(string key, string value)
         {
-            if (RigPark.Change(key, value)) return true;
             if (key != "uipark") return false;
             Set(value);
             return true;
@@ -85,7 +84,7 @@ namespace CrowCompat
             if (parent != null) restoredAt[parent] = Time.realtimeSinceStartup;
             if (on && nextPass < 0f) nextPass = Time.realtimeSinceStartup + 30f;
             if (check)
-                Debug.Log("CROW_UI_PARK restore " + (part == null ? "?" : Perf.Path(part, 4)) + " by " + why + "\n" + Environment.StackTrace);
+                Debug.Log("CROW_UI_PARK restore " + (part == null ? "?" : Hierarchy.Path(part, 4)) + " by " + why + "\n" + Environment.StackTrace);
         }
 
         static void Tick()
@@ -110,7 +109,7 @@ namespace CrowCompat
             foreach (Canvas canvas in UnityEngine.Object.FindObjectsOfType<Canvas>())
             {
                 if (!canvas.enabled || !canvas.isRootCanvas || canvas.renderMode != RenderMode.ScreenSpaceOverlay) continue;
-                if (canvas.gameObject.scene.name != "DontDestroyOnLoad") continue;
+                if (canvas.gameObject.scene.name != Scenes.Kept) continue;
                 Transform root = canvas.transform.root;
                 if (root == canvas.transform) continue;
                 Transform holder = root.Find(HolderName);
@@ -121,7 +120,7 @@ namespace CrowCompat
                     holder = made.transform;
                 }
                 var found = new Dictionary<Transform, List<Transform>>();
-                Collect(canvas.transform, found);
+                Collect(canvas.transform, found, null);
                 foreach (KeyValuePair<Transform, List<Transform>> pair in found)
                 {
                     float at;
@@ -135,7 +134,7 @@ namespace CrowCompat
                     restoredAt.Remove(pair.Key);
                     parts += pair.Value.Count;
                     transforms += moved;
-                    if (check) Debug.Log("CROW_UI_PARK park " + Perf.Path(pair.Key, 4) + ": " + pair.Value.Count + " parts, " + moved + " transforms");
+                    if (check) Debug.Log("CROW_UI_PARK park " + Hierarchy.Path(pair.Key, 4) + ": " + pair.Value.Count + " parts, " + moved + " transforms");
                 }
             }
             if (waiting > 0) nextPass = now + 30f;
@@ -145,15 +144,17 @@ namespace CrowCompat
 
         const string HolderName = "CrowUiPark";
 
-        // The topmost switched-off subtrees big enough, by parent.
-        static void Collect(Transform parent, Dictionary<Transform, List<Transform>> found)
+        // The topmost switched-off subtrees big enough (MinTransforms), by parent, but children named skip (both
+        // parkers').
+        internal static void Collect(Transform parent, Dictionary<Transform, List<Transform>> found, string skip)
         {
             for (int i = 0; i < parent.childCount; i++)
             {
                 Transform child = parent.GetChild(i);
+                if (skip != null && child.name == skip) continue;
                 if (child.gameObject.activeSelf)
                 {
-                    Collect(child, found);
+                    Collect(child, found, skip);
                     continue;
                 }
                 if (Count(child, MinTransforms) < MinTransforms) continue;
@@ -194,7 +195,6 @@ namespace CrowCompat
     // once, the screens open included, which the stress tests use).
     static class RigPark
     {
-        const int MinTransforms = 8;
         const string HolderName = "CrowRigPark";
         static bool on, check, hooked;
         static float nextPass = -1f, nextLog, nextCheck;
@@ -215,7 +215,7 @@ namespace CrowCompat
 
         internal static void Install(string[] args)
         {
-            string value = CrowFlags.Value(args, "-crow-rig-park") ?? (Application.platform == RuntimePlatform.PSP2 ? "on" : null);
+            string value = CrowFlags.Value(args, "-crow-rig-park", "on");
             if (value != null) Set(value);
         }
 
@@ -250,7 +250,7 @@ namespace CrowCompat
                 CrowEvents.BeforeRender("RigPark.Tick", Tick);
                 EnemySplit.RigRestored = Restored;
                 EnemySplit.RigGroupRestored = (parent, why, transforms, ms, moving) =>
-                    Debug.Log("CROW_RIG_PARK back " + (parent == null ? "?" : Perf.Path(parent, 3)) + " by " + why + ": " + transforms + " transforms in " +
+                    Debug.Log("CROW_RIG_PARK back " + (parent == null ? "?" : Hierarchy.Path(parent, 3)) + " by " + why + ": " + transforms + " transforms in " +
                               ms.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " ms (" +
                               moving.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " moving)");
             }
@@ -274,13 +274,13 @@ namespace CrowCompat
         {
             if (rigFound != null) return rigFound;
             GameObject player = MaraScene.FindPlayer();
-            Transform rig = player == null ? null : player.transform.Find("camera follow player");
+            Transform rig = player == null ? null : player.transform.Find(MaraScene.Rig);
             if (rig == null)
             {
-                GameObject found = GameObject.Find("camera follow player");
+                GameObject found = GameObject.Find(MaraScene.Rig);
                 rig = found == null ? null : found.transform;
             }
-            return rigFound = rig != null && rig.gameObject.scene.name == "DontDestroyOnLoad" ? rig : null;
+            return rigFound = rig != null && rig.gameObject.scene.name == Scenes.Kept ? rig : null;
         }
 
         static Transform Holder(Transform rig)
@@ -308,7 +308,7 @@ namespace CrowCompat
             if (parent != null) restoredAt[parent] = Time.realtimeSinceStartup;
             if (on && nextPass < 0f) nextPass = Time.realtimeSinceStartup + 30f;
             if (check)
-                Debug.Log("CROW_RIG_PARK restore " + (part == null ? "?" : Perf.Path(part, 4)) + " by " + why + "\n" + Environment.StackTrace);
+                Debug.Log("CROW_RIG_PARK restore " + (part == null ? "?" : Hierarchy.Path(part, 4)) + " by " + why + "\n" + Environment.StackTrace);
         }
 
         static void Tick()
@@ -345,7 +345,7 @@ namespace CrowCompat
             int rootBefore = rig.root.hierarchyCount;
             int parts = 0, transforms = 0, waiting = 0;
             var found = new Dictionary<Transform, List<Transform>>();
-            Collect(rig, found);
+            UiPark.Collect(rig, found, MaraScene.Canvases);  // UI Canvases is UiPark's
             var names = new List<string>();
             foreach (KeyValuePair<Transform, List<Transform>> pair in found)
             {
@@ -372,7 +372,7 @@ namespace CrowCompat
                 if (check)
                 {
                     foreach (Transform part in pair.Value) names.Add(part.name.Replace(' ', '_') + "=" + part.GetComponentsInChildren<Transform>(true).Length);
-                    Debug.Log("CROW_RIG_PARK park " + Perf.Path(pair.Key, 4) + ": " + pair.Value.Count + " parts, " + moved + " transforms");
+                    Debug.Log("CROW_RIG_PARK park " + Hierarchy.Path(pair.Key, 4) + ": " + pair.Value.Count + " parts, " + moved + " transforms");
                 }
             }
             if (waiting > 0) nextPass = now + 30f;
@@ -383,25 +383,6 @@ namespace CrowCompat
                       (moving * tick).ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) + " parking); " + EnemySplit.RigParked + " parked in all" +
                       (waiting > 0 ? ", " + waiting + " parents restored lately" : "") + "; the player's hierarchy " + rootBefore + " -> " + rig.root.hierarchyCount +
                       (names.Count > 0 ? ": " + string.Join(" ", names.ToArray()) : ""));
-        }
-
-        // The topmost switched-off subtrees big enough, by parent (UI Canvases is UiPark's).
-        static void Collect(Transform parent, Dictionary<Transform, List<Transform>> found)
-        {
-            for (int i = 0; i < parent.childCount; i++)
-            {
-                Transform child = parent.GetChild(i);
-                if (child.name == "UI Canvases") continue;
-                if (child.gameObject.activeSelf)
-                {
-                    Collect(child, found);
-                    continue;
-                }
-                if (UiPark.Count(child, MinTransforms) < MinTransforms) continue;
-                List<Transform> list;
-                if (!found.TryGetValue(parent, out list)) found[parent] = list = new List<Transform>();
-                list.Add(child);
-            }
         }
 
         // ---------------------------------------------------------------- check
@@ -440,11 +421,10 @@ namespace CrowCompat
                 if (what == null) continue;
                 reported.Add(t);
                 changes++;
-                Debug.Log("CROW_RIG_PARK changed while parked (" + when + "): " + Perf.Path(t, 5) + " " + what);
+                Debug.Log("CROW_RIG_PARK changed while parked (" + when + "): " + Hierarchy.Path(t, 5) + " " + what);
             }
         }
 
-        static System.Reflection.MethodInfo playing;
         static System.Reflection.FieldInfo targetField;
         static readonly HashSet<object> tweensReported = new HashSet<object>();
 
@@ -452,15 +432,13 @@ namespace CrowCompat
         static void Tweens()
         {
             if (snapshots.Count == 0) return;
-            if (playing == null)
+            if (targetField == null)
             {
-                Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween"), tween = Type.GetType("DG.Tweening.Tween, DOTween");
-                if (dotween == null || tween == null) return;
-                playing = dotween.GetMethod("PlayingTweens");
-                targetField = tween.GetField("target", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                if (playing == null || targetField == null) return;
+                if (GameTypes.Tween == null) return;
+                targetField = GameTypes.Tween.GetField("target", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (targetField == null) return;
             }
-            var list = playing.Invoke(null, new object[] { null }) as System.Collections.IList;
+            var list = GameTypes.PlayingTweens();
             if (list == null) return;
             foreach (object tween in list)
             {
@@ -476,7 +454,7 @@ namespace CrowCompat
                         // The shortcut that made it (DOLocalMove, DOMove...), from its setter's method name.
                         System.Reflection.FieldInfo setterField = tween.GetType().GetField("setter");
                         var setter = setterField == null ? null : setterField.GetValue(tween) as Delegate;
-                        Debug.Log("CROW_RIG_PARK tween on a parked part: " + tween.GetType().Name + " " + (setter == null ? "?" : setter.Method.Name) + " " + Perf.Path(t, 5));
+                        Debug.Log("CROW_RIG_PARK tween on a parked part: " + tween.GetType().Name + " " + (setter == null ? "?" : setter.Method.Name) + " " + Hierarchy.Path(t, 5));
                     }
                     break;
                 }
@@ -500,7 +478,7 @@ namespace CrowCompat
                 Quaternion rotation = part.localRotation;
                 int before = EnemySplit.RigInsideRestores;
                 EnemySplit.GetPosition(deep);
-                Debug.Log("CROW_RIG_PARK probe " + Perf.Path(deep, 4) + " inside " + part.name + ": back=" + (part.parent == parent) +
+                Debug.Log("CROW_RIG_PARK probe " + Hierarchy.Path(deep, 4) + " inside " + part.name + ": back=" + (part.parent == parent) +
                           " pose=" + (part.localPosition == position && part.localRotation == rotation) + " insideRestores=" + (EnemySplit.RigInsideRestores - before));
                 return;
             }
@@ -517,7 +495,7 @@ namespace CrowCompat
                 Debug.Log("CROW_RIG_PARK report: no rig");
                 return;
             }
-            var line = new System.Text.StringBuilder("CROW_RIG_PARK report ").Append(Perf.Path(rig, 3))
+            var line = new System.Text.StringBuilder("CROW_RIG_PARK report ").Append(Hierarchy.Path(rig, 3))
                 .Append(" transforms=").Append(rig.GetComponentsInChildren<Transform>(true).Length)
                 .Append(" active=").Append(rig.GetComponentsInChildren<Transform>(false).Length)
                 .Append(" renderers=").Append(rig.GetComponentsInChildren<Renderer>(false).Length)

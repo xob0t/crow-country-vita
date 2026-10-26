@@ -18,13 +18,12 @@ using UnityEngine;
 //                       vita-headers' db). Default 222: the power mode leaves 166, and gameplay is
 //                       GPU-bound there (Roadside 63.5 -> 49.5 ms a frame at 222, the picture the
 //                       same); 0 leaves the power mode's.
-//   -crow-bus-mhz <n>   the bus clock to keep, at most 222 MHz (scePowerSetBusClockFrequency, 0xB8D7B3FB);
-//                       default 0, left as it is.
 //   -crow-xbar-mhz <n>  the GPU crossbar clock to keep, 111 or 166 MHz (scePowerSetGpuXbarClockFrequency,
 //                       0xA7739DBE); default 0, left as it is.
 // -crow-cycle, -crow-fight-cycle and -crow-ab take gpu=<mhz> (Perf.cs), cpumhz=<mhz> (the ARM clock set to
-// exactly that, lower included, at most 444), busmhz=<mhz> and xbarmhz=<mhz> (0 stops keeping).
-// The CLOCK log lines give the clocks at start and before and after each change.
+// exactly that, lower included, at most 444) and xbarmhz=<mhz> (0 stops keeping).
+// The CLOCK log lines give the clocks at start (the bus's too: an application can't set it, status-log.md's
+// clocks of 19 Oct) and before and after each change.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -32,14 +31,13 @@ namespace CrowCompat
     {
         const int DefaultMhz = 444;
         const int DefaultGpuMhz = 222;
-        const int MaxBusMhz = 222;
         static readonly int[] GpuSteps = { 41, 55, 111, 166, 222 };
         static readonly int[] XbarSteps = { 111, 166 };
-        // The clocks set to a fixed value: GPU, bus, crossbar.
-        const int Gpu = 0, Bus = 1, Xbar = 2;
-        static readonly string[] Names = { "GPU", "bus", "crossbar" };
-        static readonly int[] fixedTarget = new int[3];
-        static readonly bool[] keepFixed = new bool[3];
+        // The clocks set to a fixed value: GPU, crossbar.
+        const int Gpu = 0, Xbar = 1;
+        static readonly string[] Names = { "GPU", "crossbar" };
+        static readonly int[] fixedTarget = new int[2];
+        static readonly bool[] keepFixed = new bool[2];
         static int target;
         static bool keepArm, armExact;
         static readonly object gate = new object();
@@ -49,7 +47,6 @@ namespace CrowCompat
         [DllImport("CrowClock")] static extern int CrowClockGetArm();
         [DllImport("CrowClock")] static extern int CrowClockSetGpu(int mhz);
         [DllImport("CrowClock")] static extern int CrowClockGetGpu();
-        [DllImport("CrowClock")] static extern int CrowClockSetBus(int mhz);
         [DllImport("CrowClock")] static extern int CrowClockGetBus();
         [DllImport("CrowClock")] static extern int CrowClockSetXbar(int mhz);
         [DllImport("CrowClock")] static extern int CrowClockGetXbar();
@@ -59,10 +56,9 @@ namespace CrowCompat
         {
             if (Application.platform != RuntimePlatform.PSP2) return;
             string[] args = ProbeFiles.Args;
-            target = Flag(args, "-crow-cpu-mhz", DefaultMhz);
-            fixedTarget[Gpu] = Flag(args, "-crow-gpu-mhz", DefaultGpuMhz);
-            fixedTarget[Bus] = Flag(args, "-crow-bus-mhz", 0);
-            fixedTarget[Xbar] = Flag(args, "-crow-xbar-mhz", 0);
+            target = CrowFlags.Int(args, "-crow-cpu-mhz", DefaultMhz);
+            fixedTarget[Gpu] = CrowFlags.Int(args, "-crow-gpu-mhz", DefaultGpuMhz);
+            fixedTarget[Xbar] = CrowFlags.Int(args, "-crow-xbar-mhz", 0);
             for (int which = Gpu; which <= Xbar; which++)
                 if (fixedTarget[which] > 0 && !Allowed(which, fixedTarget[which]))
                 {
@@ -80,31 +76,21 @@ namespace CrowCompat
             EnsureKeeper();
         }
 
-        static int Flag(string[] args, string flag, int fallback)
-        {
-            int index = Array.IndexOf(args, flag);
-            int value;
-            return index >= 0 && index + 1 < args.Length &&
-                   int.TryParse(args[index + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out value) ? value : fallback;
-        }
-
         static bool Allowed(int which, int mhz)
         {
-            if (which == Gpu) return Array.IndexOf(GpuSteps, mhz) >= 0;
-            if (which == Xbar) return Array.IndexOf(XbarSteps, mhz) >= 0;
-            return mhz > 0 && mhz <= MaxBusMhz;
+            return Array.IndexOf(which == Gpu ? GpuSteps : XbarSteps, mhz) >= 0;
         }
 
         static string Steps(int which)
         {
-            return which == Gpu ? "41, 55, 111, 166 or 222" : which == Xbar ? "111 or 166" : "at most 222";
+            return which == Gpu ? "41, 55, 111, 166 or 222" : "111 or 166";
         }
 
         static void EnsureKeeper()
         {
             lock (gate)
             {
-                if (keeper != null || !(keepArm || keepFixed[Gpu] || keepFixed[Bus] || keepFixed[Xbar])) return;
+                if (keeper != null || !(keepArm || keepFixed[Gpu] || keepFixed[Xbar])) return;
                 keeper = new Thread(Keep) { IsBackground = true, Name = "CrowClock" };
                 keeper.Start();
             }
@@ -126,12 +112,12 @@ namespace CrowCompat
 
         static int GetFixed(int which)
         {
-            return which == Gpu ? CrowClockGetGpu() : which == Bus ? CrowClockGetBus() : CrowClockGetXbar();
+            return which == Gpu ? CrowClockGetGpu() : CrowClockGetXbar();
         }
 
         static int SetFixed(int which, int mhz)
         {
-            return which == Gpu ? CrowClockSetGpu(mhz) : which == Bus ? CrowClockSetBus(mhz) : CrowClockSetXbar(mhz);
+            return which == Gpu ? CrowClockSetGpu(mhz) : CrowClockSetXbar(mhz);
         }
 
         // A fixed clock at its target (set when different, logged when it changes); false when the
@@ -206,18 +192,17 @@ namespace CrowCompat
             EnsureKeeper();
         }
 
-        // The cycles' clock keys (Quality.Change): cpumhz=, busmhz=, xbarmhz=; false for other keys.
+        // The cycles' clock keys (Quality.Change): cpumhz=, xbarmhz=; false for other keys.
         internal static bool Change(string key, string value)
         {
-            if (key != "cpumhz" && key != "busmhz" && key != "xbarmhz") return false;
+            if (key != "cpumhz" && key != "xbarmhz") return false;
             int mhz;
             if (!int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out mhz) || mhz < 0)
             {
                 Debug.Log("CLOCK: " + key + " takes a number of MHz, not " + value);
                 return true;
             }
-            if (key == "busmhz") SetKept(Bus, mhz);
-            else if (key == "xbarmhz") SetKept(Xbar, mhz);
+            if (key == "xbarmhz") SetKept(Xbar, mhz);
             else if (Application.platform == RuntimePlatform.PSP2)
             {
                 if (mhz > DefaultMhz)

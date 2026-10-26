@@ -14,12 +14,13 @@ namespace CrowCompat
     public static class Window
     {
         static bool? windowed;
+        const int WindowWidth = 960, WindowHeight = 544;  // -crow-windowed: the PS Vita's screen
 
         static bool Windowed
         {
             get
             {
-                if (windowed == null) windowed = Array.IndexOf(ProbeFiles.Args, "-crow-windowed") >= 0;
+                if (windowed == null) windowed = CrowFlags.Has(ProbeFiles.Args, "-crow-windowed");
                 return windowed.Value;
             }
         }
@@ -41,14 +42,14 @@ namespace CrowCompat
         public static void SetResolution(int width, int height, bool fullscreen)
         {
             if (Fixed) return;
-            if (Windowed) Screen.SetResolution(960, 544, false);
+            if (Windowed) Screen.SetResolution(WindowWidth, WindowHeight, false);
             else Screen.SetResolution(width, height, fullscreen);
         }
 
         public static void SetResolution(int width, int height, FullScreenMode mode)
         {
             if (Fixed) return;
-            if (Windowed) Screen.SetResolution(960, 544, FullScreenMode.Windowed);
+            if (Windowed) Screen.SetResolution(WindowWidth, WindowHeight, FullScreenMode.Windowed);
             else Screen.SetResolution(width, height, mode);
         }
     }

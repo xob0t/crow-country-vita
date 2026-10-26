@@ -1,5 +1,5 @@
-/* CrowClock's thread functions, for compat/Threads.cs: which of the game's threads use the CPU, from
-   the kernel's own accounting (each thread's run time, each CPU's idle time), and a thread's priority
+/* CrowClock's thread functions, for compat/Threads.cs and compat/ProbeFiles.cs: which of the game's
+   threads use the CPU, from the kernel's own accounting (each thread's run time, each CPU's idle time), and a thread's priority
    and CPU affinity changed for A/B runs. The PS Vita has no sampling profiler; the FMOD mixer, the
    loading thread and the render worker are threads the scripts never see. */
 #include <kernel.h>

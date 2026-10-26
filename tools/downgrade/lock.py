@@ -1,16 +1,16 @@
 """Take, release or hold a lock in work/ atomically, so jobs that run at the same time (builds, console runs)
 don't collide.
 
-    uv run tools/downgrade/lock.py take <name> "<holder: purpose>" [--wait SECONDS]  # exit 0 when taken, 1 on timeout
+    uv run tools/downgrade/lock.py take <name> "<holder: purpose>" [--wait SECONDS]
     uv run tools/downgrade/lock.py release <name> "<holder>"                         # removes it only if you hold it
     uv run tools/downgrade/lock.py run <name> "<holder: purpose>" [--wait SECONDS] -- <command...>
-    uv run tools/downgrade/lock.py wait <name> [--wait SECONDS]   # exit 0 once it is free (not taken), 75 on timeout
+    uv run tools/downgrade/lock.py wait <name> [--wait SECONDS]   # exit 0 once it is free (not taken)
     uv run tools/downgrade/lock.py status
 
-<name> is vita-device, vita-build or pc-build. Taking creates work/<name>.lock with O_EXCL, so the
-check and the write are one step and two jobs can never both get it. Release checks that the
-file still names you before removing it. --wait (or --max-wait) is how long take, run and wait wait
-for the lock; the default, 0, fails at once and says who holds it and since when.
+<name> is vita-device, vita-build or pc-build. --wait is how long take, run and wait wait for the lock;
+the default, 0, fails at once and says who holds it and since when. All three exit 75 when the lock
+stayed held. Taking creates work/<name>.lock with O_EXCL, so the check and the write are one step and
+two jobs can never both get it. Release checks that the file still names you before removing it.
 
 Only one pipeline.py runs at a time, whatever the platform: a build lock (vita-build, pc-build)
 counts as taken only while the other one is free; if the other appears right after, ours is
@@ -20,10 +20,8 @@ upload. They hold it as a reader (a "reader" line in the lock file): a reader an
 for each other, since a PC build never writes the PS Vita build; a vita-build taker (a build or
 quickcode) waits for the reader as for any holder, and wait vita-build too. So a job that writes the
 PS Vita build (pipeline.py build --platform vita, package, quickcode) runs under vita-build, never
-pc-build: pipeline.py stops otherwise (22 Oct). "Reader" is only about pc-build: two readers still
-exclude each other, as two holders of one lock do (a seed during a 30-minute install waits, then
-stops). Before (21 Oct) a sync or install held up every PC build for as long as it ran (an install's
-promote alone may take 30 minutes). An older lock.py takes a reader's lock for a build's, so it waits.
+pc-build: pipeline.py stops otherwise. "Reader" is only about pc-build: two readers still exclude
+each other, as two holders of one lock do (a seed during a 30-minute install waits, then stops).
 
 `run` takes the lock, runs the command and releases the lock however the command ends; it exits
 with the command's code, 130 after Ctrl+C, or 75 if the lock was not taken in time. Ctrl+C reaches
@@ -32,21 +30,18 @@ an FTP transfer cut off mid-way hangs the console's FTP server); Ctrl+Break ends
 command and everything it starts run in a Windows job that ends with lock.py: if lock.py is killed
 (a shell or an agent's tool stopping it), the Unity editor it started doesn't go on building
 unsupervised, and the lock, which names lock.py's process, counts as free once that process is gone
-(take removes it). The command sees CROW_LOCKS, the names of all the runs it is in (held_here), which
-pipeline.py, vita.py and fightbench.py check (a sync inside `lock.py run vita-build` is the build's
-own), and CROW_LOCK=<name>, the innermost run's, which build.py checks. For example, a Windows Mono
-player (pipeline.py's default platform is the PS Vita, whose stages run the same way under vita-build):
+(take removes it). The command sees CROW_LOCKS, the names of all the runs it is in, which
+pipeline.py, vita.py and fightbench.py check (held_here, ours: a sync inside `lock.py run vita-build`
+is the build's own), and CROW_LOCK=<name>, the innermost run's, which build.py checks. For example, a
+Windows Mono player (pipeline.py's default platform is the PS Vita, whose stages run the same way
+under vita-build):
 
     uv run tools/downgrade/lock.py run pc-build "user: mono build" --wait 3600 -- \\
         bash -c "uv run tools/downgrade/pipeline.py project --platform windows && \\
                  uv run tools/downgrade/pipeline.py build --platform windows"
 
-The time spent waiting counts against whatever limits the caller's own run time: an agent's
-background command that is stopped at 2 hours stops lock.py and its command with it, wherever the
-command is (a Unity build, a console transfer). Keep --wait plus the command's own time well inside
-such a limit, or queue in short steps: `lock.py wait <name> --wait 540` in the foreground until it
-exits 0, then `lock.py run <name> ... --wait 0`, again from the wait if another job got there first
-(exit 75).
+The time spent waiting counts against whatever limits the caller's own run time; docs/vita.md ("Code
+changes without a full build") says how to queue in short steps with wait.
 
 A person at the console holds vita-device under the name "user" ("user: <purpose>", any case);
 jobs use their own names and wait for a person as for any holder.
@@ -61,10 +56,12 @@ import sys
 import time
 from pathlib import Path
 
+import winapi
+
 WORK = Path(__file__).resolve().parents[2] / 'work'
 LOCKS = ('vita-device', 'vita-build', 'pc-build')
 BUILD_LOCKS = ('vita-build', 'pc-build')
-NOT_TAKEN = 75  # exit code of `run` and `wait` when the lock stayed held (EX_TEMPFAIL)
+NOT_TAKEN = 75  # exit code of take, run and wait when the lock stayed held (EX_TEMPFAIL)
 INTERRUPTED = 130  # exit code of `run` after Ctrl+C
 POLL_SECONDS = 5
 
@@ -151,7 +148,7 @@ def clear_stale(name):
     file, whatever the name has become meanwhile). Before (21 Oct) it was read, then unlinked by name:
     two waiters could both find the same stale lock, the first remove it and take the lock, and the
     second then remove that new lock and take it too. The first handle shares everything, so a reader
-    (holder_of, an older lock.py) never fails on it; the second exists only for a stale lock."""
+    (holder_of) never fails on it; the second exists only for a stale lock."""
     kernel32 = ctypes.windll.kernel32
     kernel32.CreateFileW.restype = ctypes.c_void_p
     uint, pointer = ctypes.c_uint32, ctypes.c_void_p
@@ -255,7 +252,7 @@ def take(name, holder, wait, process=False, reader=False):
                 remove(lock)  # the other build lock was taken in between: one pipeline at a time
         if time.time() >= end:
             print(held_by(busy), flush=True)
-            return 1
+            return NOT_TAKEN
         if not waiting:
             waiting = True
             print(f'{held_by(busy)}; waiting up to {wait:.0f} s for {name}', flush=True)
@@ -303,10 +300,17 @@ def release(name, holder):
 
 def held_here():
     """The locks the runs this process is in hold: CROW_LOCKS, which each run extends (`lock.py run
-    vita-build -- ... lock.py run vita-device -- vita.py sync` holds both), and CROW_LOCK, which an
-    older lock.py sets alone."""
-    names = [*os.environ.get('CROW_LOCKS', '').split(','), os.environ.get('CROW_LOCK', '')]
-    return [name for name in dict.fromkeys(names) if name]
+    vita-build -- ... lock.py run vita-device -- vita.py sync` holds both)."""
+    return [name for name in dict.fromkeys(os.environ.get('CROW_LOCKS', '').split(',')) if name]
+
+
+def ours(name):
+    """Whether this process may act as the lock's holder: a run it is in holds it (held_here), or
+    CROW_HOLDER names the holder of a lock taken with take."""
+    if name in held_here():
+        return True
+    text, mine = holder_of(name), os.environ.get('CROW_HOLDER', '')
+    return bool(text and mine and owner(mine) == owner(text))
 
 
 def run(name, holder, wait, command):
@@ -337,48 +341,17 @@ def run_to_end(command, env):
             print('lock.py: waiting for the command to end (Ctrl+Break stops both at once)', flush=True)
 
 
-class JobLimits(ctypes.Structure):  # JOBOBJECT_EXTENDED_LIMIT_INFORMATION
-    _fields_ = [
-        ('PerProcessUserTimeLimit', ctypes.c_int64),
-        ('PerJobUserTimeLimit', ctypes.c_int64),
-        ('LimitFlags', ctypes.c_uint32),
-        ('MinimumWorkingSetSize', ctypes.c_size_t),
-        ('MaximumWorkingSetSize', ctypes.c_size_t),
-        ('ActiveProcessLimit', ctypes.c_uint32),
-        ('Affinity', ctypes.c_size_t),
-        ('PriorityClass', ctypes.c_uint32),
-        ('SchedulingClass', ctypes.c_uint32),
-        ('IoCounters', ctypes.c_uint64 * 6),
-        ('ProcessMemoryLimit', ctypes.c_size_t),
-        ('JobMemoryLimit', ctypes.c_size_t),
-        ('PeakProcessMemoryUsed', ctypes.c_size_t),
-        ('PeakJobMemoryUsed', ctypes.c_size_t),
-    ]
-
-
-KILL_ON_JOB_CLOSE = 0x2000
-EXTENDED_LIMIT_INFORMATION = 9
-
-
 def join_job_ending_with_this_process():
     """Put this process in a Windows job that kills its processes when its last handle closes. The
     only handle is this process's, never closed, so whatever the command starts (the pipeline, the
-    Unity editor it runs) ends when lock.py ends, however that happens. Before, a killed lock.py left
-    its lock held and its Unity editor building."""
-    kernel32 = ctypes.windll.kernel32
-    kernel32.CreateJobObjectW.restype = ctypes.c_void_p
-    kernel32.GetCurrentProcess.restype = ctypes.c_void_p
-    kernel32.SetInformationJobObject.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32]
-    kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
-    job = kernel32.CreateJobObjectW(None, None)
-    limits = JobLimits(LimitFlags=KILL_ON_JOB_CLOSE)
-    size = ctypes.sizeof(limits)
-    if not (
-        job
-        and kernel32.SetInformationJobObject(job, EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits), size)
-        and kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess())
-    ):
-        print(f'lock.py: could not put the command in a job (error {kernel32.GetLastError()}); it can outlive lock.py')
+    Unity editor it runs) ends when lock.py ends, however that happens: a killed lock.py would leave
+    its Unity editor building."""
+    kernel32 = winapi.kernel32
+    try:
+        job = winapi.kill_on_close_job()
+        winapi.check(kernel32.AssignProcessToJobObject(job, kernel32.GetCurrentProcess()), 'AssignProcessToJobObject')
+    except OSError as error:
+        print(f'lock.py: could not put the command in a job ({error}); it can outlive lock.py')
 
 
 def main(argv):
@@ -393,7 +366,6 @@ def main(argv):
     parser.add_argument('holder', nargs='?', help='"<name>: <purpose>"; release needs only the name')
     parser.add_argument(
         '--wait',
-        '--max-wait',
         dest='wait',
         type=float,
         default=0,

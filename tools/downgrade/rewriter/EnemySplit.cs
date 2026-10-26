@@ -9,8 +9,8 @@ using Mono.Cecil.Cil;
 // read and write becomes a call of EnemySplit's static of the same meaning, with the object first.
 // The overlay canvases' parked switched-off subtrees (compat/UiPark.cs) go back the same way, and also
 // before a call that sees their old parents' children or descendants (GetChild, childCount, foreach,
-// Find, sibling indices, GetComponent(s)InChildren, GetComponent(s)InParent, IsChildOf; generic forms
-// included). Calls through a constrained. prefix (generic code) are left as they are.
+// Find, sibling indices, GetComponentsInChildren<T>, GetComponentInParent<T>, IsChildOf: the forms the
+// game calls). Calls through a constrained. prefix (generic code) are left as they are.
 // Part of the assembly rewriter; see DowngradeAssemblies.cs.
 partial class DowngradeAssemblies
 {
@@ -34,30 +34,12 @@ partial class DowngradeAssemblies
         { "UnityEngine.Transform::GetEnumerator()", "GetEnumerator" },
         { "UnityEngine.Transform::Find(System.String)", "Find" },
         { "UnityEngine.Transform::GetSiblingIndex()", "GetSiblingIndex" },
-        { "UnityEngine.Transform::SetSiblingIndex(System.Int32)", "SetSiblingIndex" },
-        { "UnityEngine.Transform::SetAsFirstSibling()", "SetAsFirstSibling" },
         { "UnityEngine.Transform::SetAsLastSibling()", "SetAsLastSibling" },
         { "UnityEngine.Transform::IsChildOf(UnityEngine.Transform)", "IsChildOf" },
-        { "UnityEngine.Component::GetComponentsInChildren(System.Type,System.Boolean)", "ComponentsInChildren" },
-        { "UnityEngine.GameObject::GetComponentsInChildren(System.Type,System.Boolean)", "ComponentsInChildren" },
-        { "UnityEngine.Component::GetComponentInChildren(System.Type,System.Boolean)", "ComponentInChildren" },
-        { "UnityEngine.GameObject::GetComponentInChildren(System.Type,System.Boolean)", "ComponentInChildren" },
         { "UnityEngine.Component::GetComponentsInChildren<T>(System.Boolean)", "ComponentsInChildrenT" },
         { "UnityEngine.GameObject::GetComponentsInChildren<T>(System.Boolean)", "ComponentsInChildrenT" },
-        { "UnityEngine.Component::GetComponentsInChildren<T>(System.Boolean,System.Collections.Generic.List`1<T>)", "ComponentsInChildrenList" },
-        { "UnityEngine.GameObject::GetComponentsInChildren<T>(System.Boolean,System.Collections.Generic.List`1<T>)", "ComponentsInChildrenList" },
-        { "UnityEngine.Component::GetComponentInChildren<T>(System.Boolean)", "ComponentInChildrenT" },
-        { "UnityEngine.GameObject::GetComponentInChildren<T>(System.Boolean)", "ComponentInChildrenT" },
-        { "UnityEngine.Component::GetComponentInParent(System.Type)", "ComponentInParent" },
-        { "UnityEngine.GameObject::GetComponentInParent(System.Type)", "ComponentInParent" },
         { "UnityEngine.Component::GetComponentInParent<T>()", "ComponentInParentT" },
         { "UnityEngine.GameObject::GetComponentInParent<T>()", "ComponentInParentT" },
-        { "UnityEngine.Component::GetComponentsInParent(System.Type,System.Boolean)", "ComponentsInParent" },
-        { "UnityEngine.GameObject::GetComponentsInParent(System.Type,System.Boolean)", "ComponentsInParent" },
-        { "UnityEngine.Component::GetComponentsInParent<T>(System.Boolean)", "ComponentsInParentT" },
-        { "UnityEngine.GameObject::GetComponentsInParent<T>(System.Boolean)", "ComponentsInParentT" },
-        { "UnityEngine.Component::GetComponentsInParent<T>()", "ComponentsInParentT0" },
-        { "UnityEngine.GameObject::GetComponentsInParent<T>()", "ComponentsInParentT0" },
     };
 
     // A call's key: Type::Name, <T> for a generic method, and its parameter types with the method's own
@@ -70,18 +52,11 @@ partial class DowngradeAssemblies
                string.Join(",", element.Parameters.Select(p => p.ParameterType.FullName.Replace("!!0", "T"))) + ")";
     }
 
-    // The rows the game has no call for (21 Oct 2026), routed should it get one; every other row is a
-    // rule of its own, registered before the scan so that one with no site fails the run.
-    static readonly HashSet<string> EnemySplitOptional = new HashSet<string>
-    {
-        "SetSiblingIndex", "SetAsFirstSibling", "ComponentsInChildren", "ComponentInChildren", "ComponentsInChildrenList",
-        "ComponentInChildrenT", "ComponentInParent", "ComponentsInParent", "ComponentsInParentT", "ComponentsInParentT0",
-    };
-
     static int RouteEnemySplit(ModuleDefinition module)
     {
         TypeDefinition split = compat["CrowCompat.EnemySplit"];
-        foreach (string rule in EnemySplitCalls.Values.Distinct().Where(name => !EnemySplitOptional.Contains(name))) Count("enemy split " + rule, 0);
+        // Each row is a rule of its own, registered before the scan so that one with no site fails the run.
+        foreach (string rule in EnemySplitCalls.Values.Distinct()) Count("enemy split " + rule, 0);
         int count = 0;
         foreach (TypeDefinition type in AllTypes(module.Types))
             foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))

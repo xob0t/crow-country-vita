@@ -6,7 +6,7 @@ There are no game files in this repository. You bring your own copy, and the pip
 
 ## Where it stands
 
-Early. The pipeline builds the game for Windows (Mono and IL2CPP) and the PS Vita from Unity 2018.2, and packages a VPK. On Windows it boots, loads areas and draws as the original does. The VPK hasn't been tested on a console yet. [docs/status.md](docs/status.md) has the details, the measurements and the plan.
+Playable on the console. The pipeline builds the game for Windows (Mono and IL2CPP) and the PS Vita from Unity 2018.2, and packages a VPK. On Windows it boots, loads areas and draws as the original does, and the VPK runs on a PS Vita. [docs/status.md](docs/status.md) has the details, the measurements and the plan.
 
 ## Building
 
@@ -55,4 +55,4 @@ uv run tools/downgrade/lock.py run vita-build "me: what for" --wait 1800 -- uv r
 
 ## License
 
-The pipeline is MIT-licensed ([LICENSE](LICENSE)). The USCSandbox patches in `tools/downgrade/patches` are GPL-3.0, like the code they change.
+The pipeline is MIT-licensed ([LICENSE](LICENSE)). The USCSandbox patches in `tools/downgrade/patches` are GPL-3.0, like the code they change ([THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)).

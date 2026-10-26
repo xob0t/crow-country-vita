@@ -20,9 +20,7 @@ using UnityEngine.SceneManagement;
 //                              area as the game loads it, Mara left where it puts her, nothing set, no
 //                              aim (the plain standing frame rate); walk: Mara on the spot, no enemies or
 //                              aim, her position every 0.1 s of game time (CROW_FIGHT_POS) while the pad
-//                              walks her (fightbench.py --input); physics: the fixed step test (FixedStep.cs);
-//                              discover:
-//                              log the enemies and quit
+//                              walks her (fightbench.py --input); discover: log the enemies and quit
 //   -crow-fight-area <scene>   the area (default Station Square); -crow-scene is set from it
 //   -crow-fight-spot x,y,z,yaw[,camyaw]  where Mara stands, her facing and the camera's (default: the
 //                              area's entry in Areas, else near the biggest group of enemies)
@@ -43,21 +41,19 @@ using UnityEngine.SceneManagement;
 //                              the menus (fightbench --input)
 //   -crow-fight-globals "<name>=<value>;..."  more PlayMaker globals set before the load, typed as the
 //                              variable is (e.g. "item: map=1;MapFF=true": the map and its Fairytale Town page)
-//   -crow-fight-dump           log one enemy of each type's colliders and bodies at the setup and
-//                              when measuring starts, and which of their layers collide
 //   -crow-fight-cycle <sets>   a change set per window, the sets in turn ('/' between sets, ',' between
-//                              changes, "-" for none; Quality.Change's keys, so -crow-ab's, Perf.cs's and
-//                              EnemyCost.cs's), logged as set= (A/B in one launch: with
+//                              changes, "-" for none; Quality.Change's keys, so -crow-ab's and every
+//                              module's), logged as set= (A/B in one launch: with
 //                              -crow-fight-kill 0 -crow-fight-fire 1000 the fight holds steady)
-//   -crow-fight-fixed          log what runs in physics steps: each FixedUpdate action with its fields,
-//                              and every active rigidbody's mass, drag and interpolation
-//   -crow-fight-fsm <name>     log every state and action of the FSMs on GameObjects of that name
 //   -crow-fight-run <name>     ignored: fightbench.py names each run, so its log's args line differs
 //                              from the last run's
 //   -crow-fight-moves "t:x,y,z,yaw[,camyaw];..."  t seconds after the fight starts (CROW_FIGHT_START), Mara and
 //                              the camera to another spot (as the setup puts them), pinned there from then on
 //                              (CROW_FIGHT_MOVE): enemies near the new spot wake from their culling, those at
 //                              the old one are culled
+// The dumps of 16-18 Oct (-crow-fight-dump, -crow-fight-fixed, -crow-fight-fsm) and the fixed step's test
+// (-crow-fight physics, FixedStep.cs' rule since 19 Oct) are gone; CROW_FIGHT_TYPE, one line per enemy type at the
+// setup, stays.
 // Mara: on the spot, pinned there (pushes undone every half second), the handgun with the laser
 // sight and a full box, unhurtable (DefenseMulti 0, Health kept at its maximum, never KO, poisoned or
 // on fire), the camera locked (CameraLock, no aim swivel). Aiming: the combat FSM (character
@@ -80,6 +76,9 @@ namespace CrowCompat
     public static class Fight
     {
         static readonly CultureInfo Inv = CultureInfo.InvariantCulture;
+        // Seconds since the player started after which an area still loading fails the run (area-not-loaded), short of
+        // fightbench.py's own --timeout (420 s by default), so the run ends with a reason.
+        const float LoadGiveUp = 400f;
 
         // Per area: the globals that switch its enemies on as on a later visit, and the fight's spot.
         class Area
@@ -141,7 +140,7 @@ namespace CrowCompat
         {
             mode = CrowFlags.Value(args, "-crow-fight");
             if (mode == null) return;
-            if (mode != "real" && mode != "stress" && mode != "idle" && mode != "stand" && mode != "discover" && mode != "physics" && mode != "walk")
+            if (mode != "real" && mode != "stress" && mode != "idle" && mode != "stand" && mode != "discover" && mode != "walk")
             {
                 Debug.Log("CROW_FIGHT_FAIL reason=unknown-mode mode=" + mode);
                 mode = null;
@@ -163,10 +162,7 @@ namespace CrowCompat
             settle = CrowFlags.Number(args, "-crow-fight-settle", settle);
             engage = CrowFlags.Number(args, "-crow-fight-engage", engage);
             fireEvery = CrowFlags.Number(args, "-crow-fight-fire", fireEvery);
-            if (Array.IndexOf(args, "-crow-fight-log") >= 0) shotLog = 40;
-            dump = Array.IndexOf(args, "-crow-fight-dump") >= 0;
-            fixedDump = Array.IndexOf(args, "-crow-fight-fixed") >= 0;
-            fsmDump = CrowFlags.Value(args, "-crow-fight-fsm");
+            if (CrowFlags.Has(args, "-crow-fight-log")) shotLog = 40;
             string cycle = CrowFlags.Value(args, "-crow-fight-cycle");
             if (cycle != null) cycleSets = cycle.Split('/');
             killEvery = CrowFlags.Number(args, "-crow-fight-kill", mode == "stress" ? 6f : 8f);
@@ -183,7 +179,7 @@ namespace CrowCompat
                     float[] place = Floats(parts[1]);
                     if (place != null && place.Length >= 4) moves.Add(new KeyValuePair<float, float[]>(at, place));
                 }
-            if (!LoopProfile.Installed) LoopProfile.Install(1e9f);  // only Fight's flushes report
+            LoopProfile.Install(1e9f);  // only Fight's flushes report
             if (Application.platform == RuntimePlatform.PSP2) mainUid = Threads.SelfAnyway();
             phase = Phase.Loading;
             CrowEvents.Loaded("Fight.sceneLoaded", (loaded, how) =>
@@ -266,7 +262,7 @@ namespace CrowCompat
         static bool Reflect()
         {
             if (fsmComponent != null) return true;
-            fsmComponent = Type.GetType("PlayMakerFSM, PlayMaker");
+            fsmComponent = GameTypes.PlayMakerFsm;
             Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
             Type named = Type.GetType("HutongGames.PlayMaker.NamedVariable, PlayMaker");
             if (fsmComponent == null || variables == null || named == null) return false;
@@ -431,7 +427,7 @@ namespace CrowCompat
             lastFrameAt = now;
             if (phase == Phase.Loading)
             {
-                if (now > 400f) Fail("area-not-loaded");
+                if (now > LoadGiveUp) Fail("area-not-loaded");
                 return;
             }
             if (phase == Phase.Settle)
@@ -455,12 +451,6 @@ namespace CrowCompat
                     return;
                 }
                 if (!ready) return;
-                if (mode == "physics")
-                {
-                    LoopProfile.FixedHook = PhysicsTest;
-                    phase = Phase.Done;
-                    return;
-                }
                 if (mode == "discover")
                 {
                     phase = Phase.Done;
@@ -490,12 +480,6 @@ namespace CrowCompat
                 if (now - phaseStart < engage) return;
                 phase = Phase.Measure;
                 phaseStart = now;
-                if (dump)
-                {
-                    Dump("fight");
-                    DumpRenderers();
-                    foreach (Enemy enemy in enemies.Where(e => IsAwake(e)).GroupBy(e => e.Type).Select(g => g.First())) Census(enemy.Root);
-                }
                 StartWindow(now);
                 windowIndex = 0;
                 LoopProfile.Flush("fight-engage");
@@ -508,7 +492,7 @@ namespace CrowCompat
         static readonly List<KeyValuePair<float, float[]>> moves = new List<KeyValuePair<float, float[]>>();
         static float fightStart, moveCheckAt = -1f;
 
-        // Audit.cs: when the fight started (CROW_FIGHT_START, realtimeSinceStartup), or -1 before.
+        // When the fight started (CROW_FIGHT_START, realtimeSinceStartup), or -1 before (EnemyRebuild's shots).
         internal static float StartedAt { get { return phase >= Phase.Engage ? fightStart : -1f; } }
 
         // -crow-fight-moves: Mara and the camera to the next spot, pinned there.
@@ -561,47 +545,6 @@ namespace CrowCompat
                 return true;
             }
             foreach (Enemy enemy in enemies.GroupBy(e => e.Type).Select(g => g.First())) Census(enemy.Root);
-            if (fixedDump) FixedCensus();
-            if (fsmDump != null) DumpFsms(fsmDump);
-            if (fixedDump)
-            {
-                // Every action type in the enemies' FSMs (all states), with its count (CROW_ENEMY_ACTIONS).
-                var types = new Dictionary<string, int>();
-                foreach (Enemy enemy in enemies)
-                    foreach (Component fsm in enemy.Root.GetComponentsInChildren(fsmComponent, true))
-                    {
-                        object inner = fsmComponent.GetProperty("Fsm").GetValue(fsm, null);
-                        foreach (object state in (Array)inner.GetType().GetProperty("States").GetValue(inner, null))
-                            foreach (object action in (Array)state.GetType().GetProperty("Actions").GetValue(state, null))
-                            {
-                                if (action == null) continue;
-                                int count;
-                                types.TryGetValue(action.GetType().Name, out count);
-                                types[action.GetType().Name] = count + 1;
-                            }
-                    }
-                Debug.Log("CROW_ENEMY_ACTIONS " + string.Join(" ", types.OrderByDescending(p => p.Value).Select(p => p.Key + "=" + p.Value).ToArray()));
-            }
-            if (dump)
-            {
-                Dump("setup");
-                // The level's colliders near the fight: what the enemies' bodies touch.
-                var near = new Dictionary<string, int>();
-                foreach (Collider collider in Physics.OverlapSphere(body.transform.position, 8f, Physics.AllLayers, QueryTriggerInteraction.Ignore))
-                {
-                    if (collider.attachedRigidbody != null) continue;
-                    var mesh = collider as MeshCollider;
-                    string key = (mesh != null ? (mesh.convex ? "MeshConvex" : "Mesh") + "(" + (mesh.sharedMesh == null ? 0 : mesh.sharedMesh.triangles.Length / 3) + "t)" : collider.GetType().Name) +
-                                 " " + collider.name.Replace(' ', '_') + " layer=" + LayerMask.LayerToName(collider.gameObject.layer).Replace(' ', '_');
-                    int count;
-                    near.TryGetValue(key, out count);
-                    near[key] = count + 1;
-                }
-                foreach (KeyValuePair<string, int> pair in near.OrderByDescending(p => p.Value)) Debug.Log("CROW_FIGHT_LEVEL x" + pair.Value + " " + pair.Key);
-                RaycastHit floor;
-                if (Physics.Raycast(body.transform.position + Vector3.up, Vector3.down, out floor, 3f, Physics.AllLayers, QueryTriggerInteraction.Ignore))
-                    Debug.Log("CROW_FIGHT_LEVEL floor " + floor.collider.GetType().Name + " " + floor.collider.name);
-            }
             if (mode == "discover") return true;
 
             // The spot: given, or 3 m from the enemy with the most live neighbours within 5 m, toward the entry.
@@ -704,24 +647,22 @@ namespace CrowCompat
                 foreach (Rigidbody rigidbody in root.GetComponentsInChildren<Rigidbody>(true))
                 {
                     GameObject gameObject = rigidbody.gameObject;
-                    if (!gameObject.name.StartsWith("Enemy ")) continue;
+                    if (!EnemyNames.Named(gameObject.name)) continue;
                     enemies.Add(Track(gameObject, false));
                 }
         }
 
         static Enemy Track(GameObject root, bool copy)
         {
-            Transform spawnKill = Descendant(root.transform, "spawn/kill");
-            Transform cull = Descendant(root.transform, "Pause/Cull") ?? Descendant(root.transform, "Pause/Cull?");
-            string type = root.name.Substring(6);
-            int paren = type.IndexOf(" (", StringComparison.Ordinal);
-            if (paren > 0) type = type.Substring(0, paren);
+            Transform spawnKill = Descendant(root.transform, EnemyNames.SpawnKill);
+            Transform cull = Descendant(root.transform, EnemyNames.Cull) ?? Descendant(root.transform, EnemyNames.CullOther);
+            string type = EnemyNames.TypeOf(root.transform);
             Component damage = null;
             object health = null;
             foreach (Component fsm in root.GetComponentsInChildren(fsmComponent, true))
             {
                 string name = fsm.gameObject.name;
-                if (!name.StartsWith("damage / kill", StringComparison.Ordinal) && name != "shoot me") continue;
+                if (!EnemyNames.IsDamage(name)) continue;
                 damage = fsm;
                 object variables = fsmComponent.GetProperty("FsmVariables").GetValue(fsm, null);
                 health = variables.GetType().GetMethod("FindVariable", new[] { typeof(string) }).Invoke(variables, new object[] { "my health" });
@@ -779,377 +720,6 @@ namespace CrowCompat
             Debug.Log("CROW_FIGHT " + what + " " + enemy.Root.name.Replace(' ', '_') + " at " + V(enemy.Root.transform.position).Replace(' ', ',') +
                       " active=" + (enemy.Root.activeInHierarchy ? 1 : 0) + " spawn=" + (enemy.SpawnState == null ? "-" : enemy.SpawnState()) +
                       " cull=" + (enemy.CullState == null ? "-" : enemy.CullState()) + " path=" + path);
-        }
-
-        // -crow-fight-dump: every collider and rigidbody of one enemy of each type, as they are now
-        // (CROW_FIGHT_COLLIDER, CROW_FIGHT_BODY), and the layer pairs that collide among the layers seen.
-        static bool dump;
-
-        static void Dump(string when)
-        {
-            var layers = new HashSet<int>();
-            foreach (Enemy enemy in enemies.Where(e => e.Root != null).GroupBy(e => e.Type).Select(g => g.First()))
-            {
-                Transform root = enemy.Root.transform;
-                foreach (Collider collider in root.GetComponentsInChildren<Collider>(true))
-                {
-                    layers.Add(collider.gameObject.layer);
-                    Rigidbody body = collider.attachedRigidbody;
-                    var mesh = collider as MeshCollider;
-                    string components = string.Join(",", collider.GetComponents<Component>()
-                        .Where(c => c != null && !(c is Transform) && !(c is Collider) && !(c is Renderer) && !(c is MeshFilter))
-                        .Select(c => c.GetType().Name == "PlayMakerFSM" ? "FSM" : c.GetType().Name).ToArray());
-                    Debug.Log("CROW_FIGHT_COLLIDER " + when + " " + enemy.Type + " " + RelPath(collider.transform, root) +
-                              " kind=" + (mesh != null ? (mesh.convex ? "MeshConvex" : "Mesh") : collider.GetType().Name.Replace("Collider", "")) +
-                              " layer=" + LayerMask.LayerToName(collider.gameObject.layer).Replace(' ', '_') + " tag=" + collider.tag.Replace(' ', '_') +
-                              " trigger=" + (collider.isTrigger ? 1 : 0) + " on=" + (collider.enabled && collider.gameObject.activeInHierarchy ? 1 : 0) +
-                              " body=" + (body == null ? "-" : RelPath(body.transform, root) + (body.isKinematic ? "(kin)" : "(dyn)")) +
-                              " comps=" + components);
-                }
-                foreach (Rigidbody body in root.GetComponentsInChildren<Rigidbody>(true))
-                    Debug.Log("CROW_FIGHT_BODY " + when + " " + enemy.Type + " " + RelPath(body.transform, root) + " kin=" + (body.isKinematic ? 1 : 0) +
-                              " on=" + (body.gameObject.activeInHierarchy ? 1 : 0) + " sleeping=" + (body.IsSleeping() ? 1 : 0) +
-                              " gravity=" + (body.useGravity ? 1 : 0) + " mass=" + F(body.mass) + " constraints=" + body.constraints +
-                              " layer=" + LayerMask.LayerToName(body.gameObject.layer).Replace(' ', '_'));
-            }
-            layers.Add(18);
-            layers.Add(31);
-            layers.Add(0);
-            var pairs = new StringBuilder("CROW_FIGHT_LAYERS " + when);
-            foreach (int a in layers.OrderBy(l => l))
-            {
-                pairs.Append(' ').Append(LayerMask.LayerToName(a).Replace(' ', '_')).Append(":");
-                for (int b = 0; b < 32; b++)
-                    if (!Physics.GetIgnoreLayerCollision(a, b) && LayerMask.LayerToName(b).Length > 0)
-                        pairs.Append(LayerMask.LayerToName(b).Replace(' ', '_')).Append(',');
-            }
-            Debug.Log(pairs.ToString());
-        }
-
-        // -crow-fight physics: test bodies in the air (no gravity, no collider) for each trial's step, the game's
-        // way (compensate false) or FixedStep's: drag 5 mass 0.5 (Mara's), drag 0.5 mass 1.68 (a Blob's) and
-        // drag 0 under an impulse every step for 1.5 s, then coasting to 2.5 s, and a drag 5 body given 5 m/s
-        // once. CROW_PHYS lines each step: trial, game time since the trial's start, the bodies' z and speed.
-        static readonly float[] trialSteps = { 0.02f, 1f / 30f, 1f / 30f, 1f / 25f, 0.02f };
-        static GameObject testFloor;
-        static readonly bool[] trialKeep = { true, false, true, true, true };
-        static int trial;
-        static Rigidbody[] testBodies;
-        static float trialStart;
-
-        static void PhysicsTest()
-        {
-            if (trial >= trialSteps.Length)
-            {
-                if (trial == trialSteps.Length)
-                {
-                    trial++;
-                    FixedStep.Set(FixedStep.GameStep);
-                    Debug.Log("CROW_PHYS done");
-                    Quit();
-                }
-                return;
-            }
-            if (testBodies == null)
-            {
-                FixedStep.Set(trialSteps[trial], trialKeep[trial]);
-                float[] drags = { 5f, 0.5f, 0f, 5f, 5f };
-                float[] masses = { 0.5f, 1.68f, 1f, 0.5f, 0.5f };
-                testBodies = new Rigidbody[5];
-                if (testFloor == null)
-                {
-                    // Mara's ground: a box with the game's Ground friction (0.4, Average), far from the area.
-                    testFloor = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                    testFloor.name = "CrowPhysTestFloor";
-                    testFloor.transform.position = new Vector3(130f, 149.5f, 0f);
-                    testFloor.transform.localScale = new Vector3(4f, 1f, 60f);
-                    testFloor.GetComponent<Collider>().sharedMaterial = new PhysicMaterial("Ground") { dynamicFriction = 0.4f, staticFriction = 0.4f, frictionCombine = PhysicMaterialCombine.Average };
-                    UnityEngine.Object.Destroy(testFloor.GetComponent<Renderer>());
-                }
-                for (int i = 0; i < 5; i++)
-                {
-                    if (i == 4)
-                    {
-                        // Mara: a capsule (0.25 m radius, 1.5 m) with the Player material, gravity, rotation frozen.
-                        var walker = new GameObject("CrowPhysTest4");
-                        walker.transform.position = new Vector3(130f, 150.76f, -25f);
-                        var capsule = walker.AddComponent<CapsuleCollider>();
-                        capsule.radius = 0.25f;
-                        capsule.height = 1.5f;
-                        capsule.sharedMaterial = new PhysicMaterial("Player") { dynamicFriction = 0.4f, staticFriction = 0.4f, frictionCombine = PhysicMaterialCombine.Average };
-                        Rigidbody walking = walker.AddComponent<Rigidbody>();
-                        walking.mass = 0.5f;
-                        walking.drag = 5f;
-                        walking.angularDrag = 0f;
-                        walking.constraints = RigidbodyConstraints.FreezeRotation;
-                        FixedStep.Adjust(walking);
-                        testBodies[i] = walking;
-                        continue;
-                    }
-                    var test = new GameObject("CrowPhysTest" + i);
-                    test.transform.position = new Vector3(100f + i * 5f, 200f, 0f);
-                    Rigidbody body = test.AddComponent<Rigidbody>();
-                    body.useGravity = false;
-                    body.mass = masses[i];
-                    body.drag = drags[i];
-                    body.angularDrag = 0f;
-                    FixedStep.Adjust(body);
-                    if (i == 3) body.velocity = new Vector3(0f, 0f, 5f);
-                    testBodies[i] = body;
-                }
-                trialStart = Time.fixedTime;
-            }
-            float t = Time.fixedTime - trialStart;
-            var line = new StringBuilder("CROW_PHYS ").Append(trial).Append(' ').Append(t.ToString("0.0000", Inv));
-            foreach (Rigidbody body in testBodies)
-                line.Append(' ').Append(body.position.z.ToString("0.0000", Inv)).Append(' ').Append(body.velocity.z.ToString("0.0000", Inv));
-            Debug.Log(line.ToString());
-            if (t < 1.5f - 1e-4f)
-                for (int i = 0; i < 3; i++) FixedStep.AddForce(testBodies[i], new Vector3(0f, 0f, 0.1f), ForceMode.Impulse, true);
-            // The walker: about Mara's 1 m/s at 0.02 (0.176 a step: 0.24 m/s of it goes to friction), from 0.3 s
-            // (landed) to 1.8 s.
-            if (t >= 0.3f - 1e-4f && t < 1.8f - 1e-4f) FixedStep.AddForce(testBodies[4], new Vector3(0f, 0f, 0.176f), ForceMode.Impulse, true);
-            if (t >= 2.5f - 1e-4f)
-            {
-                foreach (Rigidbody body in testBodies) UnityEngine.Object.Destroy(body.gameObject);
-                testBodies = null;
-                trial++;
-            }
-        }
-
-        // -crow-fight-fixed: what depends on the physics step. Each action that runs in FixedUpdate (its type
-        // overrides OnFixedUpdate, in every state of every FSM that handles FixedUpdate, loaded scenes and the
-        // player) with its fields (CROW_FIXED_ACTION, one line per distinct type and field values, with a
-        // count and the first owner), and every rigidbody's mass, drag and interpolation (CROW_FIXED_BODY).
-        static bool fixedDump;
-
-        static void FixedCensus()
-        {
-            var lines = new Dictionary<string, int>();
-            var owners = new Dictionary<string, string>();
-            Type actionBase = Type.GetType("HutongGames.PlayMaker.FsmStateAction, PlayMaker");
-            foreach (Component fsm in Resources.FindObjectsOfTypeAll(fsmComponent).Cast<Component>())
-            {
-                if (fsm == null || !fsm.gameObject.scene.IsValid()) continue;
-                object inner = fsmComponent.GetProperty("Fsm").GetValue(fsm, null);
-                if (!(bool)inner.GetType().GetProperty("HandleFixedUpdate").GetValue(inner, null)) continue;
-                var states = inner.GetType().GetProperty("States").GetValue(inner, null) as Array;
-                foreach (object state in states)
-                {
-                    var actions = state.GetType().GetProperty("Actions").GetValue(state, null) as Array;
-                    foreach (object action in actions)
-                    {
-                        if (action == null) continue;
-                        MethodInfo fixedUpdate = action.GetType().GetMethod("OnFixedUpdate", BindingFlags.Instance | BindingFlags.Public);
-                        if (fixedUpdate == null || fixedUpdate.DeclaringType == actionBase) continue;
-                        var line = new StringBuilder(action.GetType().Name);
-                        foreach (FieldInfo field in action.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public))
-                        {
-                            object value = field.GetValue(action);
-                            string text = FieldText(value);
-                            if (text != null) line.Append(' ').Append(field.Name).Append('=').Append(text);
-                        }
-                        string key = line.ToString();
-                        int count;
-                        lines.TryGetValue(key, out count);
-                        lines[key] = count + 1;
-                        if (!owners.ContainsKey(key))
-                            owners[key] = RelPath(fsm.transform, fsm.transform.root) + ":" + ((string)state.GetType().GetProperty("Name").GetValue(state, null)).Replace(' ', '_');
-                    }
-                }
-            }
-            foreach (KeyValuePair<string, int> pair in lines.OrderBy(p => p.Key))
-                Debug.Log("CROW_FIXED_ACTION x" + pair.Value + " " + pair.Key + " first=" + owners[pair.Key]);
-            foreach (Rigidbody body in Resources.FindObjectsOfTypeAll<Rigidbody>())
-            {
-                if (body == null || !body.gameObject.scene.IsValid() || !body.gameObject.activeInHierarchy) continue;
-                Debug.Log("CROW_FIXED_BODY " + RelPath(body.transform, body.transform.root) + " mass=" + F(body.mass) + " drag=" + F(body.drag) +
-                          " angularDrag=" + F(body.angularDrag) + " kinematic=" + (body.isKinematic ? 1 : 0) + " gravity=" + (body.useGravity ? 1 : 0) +
-                          " interpolation=" + body.interpolation + " detection=" + body.collisionDetectionMode + " constraints=" + body.constraints);
-            }
-            Debug.Log("CROW_FIXED fixedDeltaTime=" + F(Time.fixedDeltaTime) + " maximumDeltaTime=" + F(Time.maximumDeltaTime) + " gravity=" + V(Physics.gravity));
-            // The friction a walking body meets: its colliders' materials and the ground's below it.
-            foreach (Rigidbody moving in Resources.FindObjectsOfTypeAll<Rigidbody>())
-            {
-                if (moving == null || !moving.gameObject.scene.IsValid() || !moving.gameObject.activeInHierarchy || moving.isKinematic) continue;
-                var line = new StringBuilder("CROW_FIXED_FRICTION " + RelPath(moving.transform, moving.transform.root).Split('/').Last());
-                foreach (Collider collider in moving.GetComponentsInChildren<Collider>(false))
-                {
-                    if (collider.isTrigger || !collider.enabled || collider.attachedRigidbody != moving) continue;
-                    PhysicMaterial material = collider.sharedMaterial;
-                    line.Append(' ').Append(collider.GetType().Name).Append(':').Append(material == null ? "default" : material.name.Replace(' ', '_') + "(" + F(material.dynamicFriction) + "/" + F(material.staticFriction) + "/" + material.frictionCombine + ")");
-                }
-                RaycastHit ground;
-                if (Physics.Raycast(moving.worldCenterOfMass, Vector3.down, out ground, 3f, Solid, QueryTriggerInteraction.Ignore))
-                {
-                    PhysicMaterial floor = ground.collider.sharedMaterial;
-                    line.Append(" ground=").Append(ground.collider.name.Replace(' ', '_')).Append(':').Append(floor == null ? "default" : floor.name.Replace(' ', '_') + "(" + F(floor.dynamicFriction) + "/" + F(floor.staticFriction) + "/" + floor.frictionCombine + ")");
-                }
-                Debug.Log(line.ToString());
-            }
-        }
-
-        static string fsmDump;
-
-        // -crow-fight-fsm: the FSMs on GameObjects with this name (CROW_FSM lines: state, then its actions).
-        static void DumpFsms(string name)
-        {
-            foreach (Component fsm in Resources.FindObjectsOfTypeAll(fsmComponent).Cast<Component>())
-            {
-                if (fsm == null || !fsm.gameObject.scene.IsValid() || fsm.gameObject.name != name) continue;
-                object inner = fsmComponent.GetProperty("Fsm").GetValue(fsm, null);
-                Debug.Log("CROW_FSM " + RelPath(fsm.transform, fsm.transform.root) + " fixed=" + inner.GetType().GetProperty("HandleFixedUpdate").GetValue(inner, null));
-                foreach (object state in (Array)inner.GetType().GetProperty("States").GetValue(inner, null))
-                {
-                    var line = new StringBuilder("CROW_FSM  state ").Append(((string)state.GetType().GetProperty("Name").GetValue(state, null)).Replace(' ', '_'));
-                    foreach (object transition in (Array)state.GetType().GetProperty("Transitions").GetValue(state, null))
-                        line.Append(' ').Append(Convert.ToString(transition.GetType().GetProperty("EventName").GetValue(transition, null)).Replace(' ', '_'))
-                            .Append("->").Append(Convert.ToString(transition.GetType().GetProperty("ToState").GetValue(transition, null)).Replace(' ', '_'));
-                    Debug.Log(line.ToString());
-                    foreach (object action in (Array)state.GetType().GetProperty("Actions").GetValue(state, null))
-                    {
-                        if (action == null) continue;
-                        var text = new StringBuilder("CROW_FSM    ").Append(action.GetType().Name);
-                        foreach (FieldInfo field in action.GetType().GetFields(BindingFlags.Instance | BindingFlags.Public))
-                        {
-                            string value = FieldText(field.GetValue(action));
-                            if (value != null) text.Append(' ').Append(field.Name).Append('=').Append(value);
-                        }
-                        Debug.Log(text.ToString());
-                    }
-                }
-            }
-        }
-
-        // An action field's value as text: PlayMaker's variables by value (or the variable's name), enums,
-        // numbers, strings; null for the rest.
-        static string FieldText(object value)
-        {
-            if (value == null) return null;
-            Type type = value.GetType();
-            if (type.IsEnum || type.IsPrimitive || value is string) return value.ToString().Replace(' ', '_');
-            if (type.Namespace == "HutongGames.PlayMaker" && type.Name.StartsWith("Fsm", StringComparison.Ordinal))
-            {
-                PropertyInfo name = type.GetProperty("Name");
-                string variable = name == null ? null : name.GetValue(value, null) as string;
-                if (!string.IsNullOrEmpty(variable)) return "$" + variable.Replace(' ', '_');
-                PropertyInfo none = type.GetProperty("IsNone");
-                if (none != null && (bool)none.GetValue(value, null)) return "none";
-                PropertyInfo raw = type.GetProperty("RawValue");
-                object v = raw == null ? null : raw.GetValue(value, null);
-                if (v == null || v is UnityEngine.Object) return null;
-                return Convert.ToString(v, Inv).Replace(' ', '_');
-            }
-            return null;
-        }
-
-        // -crow-fight-dump: an awake enemy's enabled renderers by mesh and material (CROW_FIGHT_DRAW).
-        static void DumpRenderers()
-        {
-            foreach (Enemy enemy in enemies.Where(e => IsAwake(e)).GroupBy(e => e.Type).Select(g => g.First()))
-            {
-                var groups = new Dictionary<string, int>();
-                foreach (Renderer renderer in enemy.Root.GetComponentsInChildren<Renderer>(false))
-                {
-                    if (!renderer.enabled) continue;
-                    var filter = renderer.GetComponent<MeshFilter>();
-                    Mesh mesh = filter == null ? null : filter.sharedMesh;
-                    string key = renderer.GetType().Name.Replace("Renderer", "") + ":" + (mesh == null ? "-" : mesh.name.Replace(' ', '_') + "(" + mesh.vertexCount + "v)") +
-                                 ":" + string.Join("+", renderer.sharedMaterials.Select(m => m == null ? "-" : m.name.Replace(' ', '_') + "/" + m.shader.name.Replace(' ', '_')).ToArray()) +
-                                 ":" + renderer.transform.parent.name.Replace(' ', '_');
-                    int count;
-                    groups.TryGetValue(key, out count);
-                    groups[key] = count + 1;
-                }
-                foreach (KeyValuePair<string, int> pair in groups.OrderByDescending(p => p.Value))
-                    Debug.Log("CROW_FIGHT_DRAW " + enemy.Type + " x" + pair.Value + " " + pair.Key);
-                foreach (Renderer renderer in enemy.Root.GetComponentsInChildren<Renderer>(false))
-                    if (renderer.enabled)
-                        Debug.Log("CROW_FIGHT_DRAWPATH " + enemy.Type + " " + RelPath(renderer.transform, enemy.Root.transform) +
-                                  " readable=" + (renderer.GetComponent<MeshFilter>() != null && renderer.GetComponent<MeshFilter>().sharedMesh != null &&
-                                                  renderer.GetComponent<MeshFilter>().sharedMesh.isReadable ? 1 : 0));
-            }
-        }
-
-        // -crow-fight-dump: a dead enemy's enabled renderers, and whether they moved since the last
-        // window (CROW_FIGHT_CORPSE); the death debris (spikes, shards, chunks, limbs) wherever it is.
-        static readonly Dictionary<Renderer, Matrix4x4> lastPose = new Dictionary<Renderer, Matrix4x4>();
-
-        static void DumpCorpses()
-        {
-            foreach (Enemy enemy in enemies)
-            {
-                if (enemy.Root == null || IsAlive(enemy)) continue;
-                foreach (Renderer renderer in enemy.Root.GetComponentsInChildren<Renderer>(false))
-                {
-                    if (!renderer.enabled) continue;
-                    Matrix4x4 pose = renderer.transform.localToWorldMatrix, before;
-                    bool known = lastPose.TryGetValue(renderer, out before);
-                    lastPose[renderer] = pose;
-                    Debug.Log("CROW_FIGHT_CORPSE " + enemy.Root.name.Replace(' ', '_') + " " + RelPath(renderer.transform, enemy.Root.transform).Replace("spawn/kill/Enemy_Set/", "") +
-                              " visible=" + (renderer.isVisible ? 1 : 0) + " moved=" + (!known ? "?" : pose == before ? "0" : "1") + " type=" + renderer.GetType().Name);
-                }
-            }
-            var debris = new Dictionary<string, int[]>();
-            foreach (Rigidbody body in UnityEngine.Object.FindObjectsOfType<Rigidbody>())
-            {
-                string name = body.name;
-                if (!(name.StartsWith("GrinnerSpike") || name.StartsWith("GrinnerBlobShard") || name.StartsWith("blob chunk") || name.StartsWith("rigidbody "))) continue;
-                string key = name.Split(' ', '(')[0] + "@" + (body.transform.root.name.Replace(' ', '_'));
-                int[] c;
-                if (!debris.TryGetValue(key, out c)) debris[key] = c = new int[4];
-                c[0]++;
-                if (body.isKinematic) c[1]++;
-                else if (!body.IsSleeping()) c[2]++;
-                c[3] += body.GetComponentsInChildren<Collider>(false).Count(x => x.enabled);
-            }
-            foreach (KeyValuePair<string, int[]> pair in debris)
-                Debug.Log("CROW_FIGHT_DEBRIS " + pair.Key + " bodies=" + pair.Value[0] + " kinematic=" + pair.Value[1] + " awake=" + pair.Value[2] + " colliders=" + pair.Value[3]);
-        }
-
-        // -crow-fight-dump, at each window's end: what each dead or culled enemy still has running.
-        static void DumpDead()
-        {
-            foreach (Enemy enemy in enemies)
-            {
-                if (enemy.Root == null || IsAwake(enemy)) continue;
-                Transform root = enemy.Root.transform;
-                var line = new StringBuilder(IsAlive(enemy) ? "CROW_FIGHT_CULLED " : "CROW_FIGHT_DEAD ").Append(enemy.Root.name.Replace(' ', '_'));
-                line.Append(" rootActive=").Append(enemy.Root.activeInHierarchy ? 1 : 0);
-                Transform[] all = root.GetComponentsInChildren<Transform>(false);
-                line.Append(" activeTransforms=").Append(all.Length);
-                Rigidbody[] bodies = root.GetComponentsInChildren<Rigidbody>(false);
-                line.Append(" bodies=").Append(bodies.Length).Append(" awake=").Append(bodies.Count(b => !b.isKinematic && !b.IsSleeping()))
-                    .Append(" kinematic=").Append(bodies.Count(b => b.isKinematic));
-                Collider[] colliders = root.GetComponentsInChildren<Collider>(false).Where(c => c.enabled).ToArray();
-                line.Append(" colliders=").Append(colliders.Length).Append(" triggers=").Append(colliders.Count(c => c.isTrigger));
-                line.Append(" renderers=").Append(root.GetComponentsInChildren<Renderer>(false).Count(r => r.enabled));
-                line.Append(" audio=").Append(root.GetComponentsInChildren<AudioSource>(false).Count(a => a.enabled))
-                    .Append(" playing=").Append(root.GetComponentsInChildren<AudioSource>(false).Count(a => a.enabled && a.isPlaying));
-                line.Append(" particles=").Append(root.GetComponentsInChildren<ParticleSystem>(false).Count(p => p.isPlaying));
-                foreach (AudioSource source in root.GetComponentsInChildren<AudioSource>(false))
-                    if (source.enabled && source.isPlaying)
-                        line.Append(" sound=").Append(source.gameObject.name.Replace(' ', '_')).Append(':').Append(source.clip == null ? "-" : source.clip.name.Replace(' ', '_'))
-                            .Append(source.loop ? ":loop" : ":once").Append(":v").Append(F(source.volume)).Append(":t").Append(F(source.time));
-                line.Append(" behaviours=").Append(root.GetComponentsInChildren<MonoBehaviour>(false).Count(b => b.enabled));
-                line.Append(" fsms=");
-                PropertyInfo state = fsmComponent.GetProperty("ActiveStateName");
-                foreach (Component fsm in root.GetComponentsInChildren(fsmComponent, false))
-                    if (((Behaviour)fsm).enabled)
-                        line.Append(fsm.gameObject.name.Replace(' ', '_')).Append(':').Append(((string)state.GetValue(fsm, null) ?? "").Replace(' ', '_')).Append(',');
-                line.Append(" others=");
-                foreach (var group in root.GetComponentsInChildren<MonoBehaviour>(false).Where(b => b.enabled && b.GetType() != fsmComponent)
-                             .GroupBy(b => b.GetType().Name))
-                    line.Append(group.Key).Append('x').Append(group.Count()).Append(',');
-                Debug.Log(line.ToString());
-            }
-        }
-
-        static string RelPath(Transform t, Transform root)
-        {
-            var path = new StringBuilder(t.name.Replace(' ', '_'));
-            for (Transform p = t.parent; p != null && p != root.parent; p = p.parent) path.Insert(0, p.name.Replace(' ', '_') + "/");
-            return path.ToString();
         }
 
         // What one enemy of each type is made of (CROW_FIGHT_TYPE), for what its physics and scripts cost.
@@ -1522,7 +1092,7 @@ namespace CrowCompat
             try
             {
                 if (sendEvent == null) sendEvent = fsmComponent.GetMethod("SendEvent", new[] { typeof(string) });
-                bool shootMe = enemy.Damage.gameObject.name == "shoot me";  // Blobs (no health: "hit" kills) and Spiders
+                bool shootMe = enemy.Damage.gameObject.name == EnemyNames.ShootMe;  // Blobs (no health: "hit" kills) and Spiders
                 if (shootMe) sendEvent.Invoke(enemy.Damage, new object[] { "hit" });
                 else if (explosionKills)
                 {
@@ -1616,7 +1186,7 @@ namespace CrowCompat
             {
                 if (totalPlaying == null)
                 {
-                    Type dotween = Type.GetType("DG.Tweening.DOTween, DOTween");
+                    Type dotween = GameTypes.DOTween;
                     totalPlaying = dotween == null ? null : dotween.GetMethod("TotalPlayingTweens", BindingFlags.Static | BindingFlags.Public);
                     if (totalPlaying == null)
                     {
@@ -1672,8 +1242,8 @@ namespace CrowCompat
 
         static float fixedStart, fixedRunStart = -1f;
 
-        // -crow-fight-cycle: each window's change set (Quality.Change: -crow-ab's, Perf.cs's and
-        // EnemyCost.cs's keys), the sets in turn; "-" changes nothing.
+        // -crow-fight-cycle: each window's change set (Quality.Change: -crow-ab's keys and every module's), the sets
+        // in turn; "-" changes nothing.
         static string[] cycleSets;
         static string windowSet;
 
@@ -1765,11 +1335,12 @@ namespace CrowCompat
             gcMsAll += gcMs;
             gcAllRuns += gcRuns;
             stepsFrom = fixedStart;
-            var line = Line("CROW_FIGHT_WINDOW", windowFrames, windowCount, now - windowStart, cpuFrames > 0 ? windowCpu / cpuFrames : -1,
+            const string tag = "CROW_FIGHT_WINDOW";
+            var line = Line(tag, windowFrames, windowCount, now - windowStart, cpuFrames > 0 ? windowCpu / cpuFrames : -1,
                             loopStart, GC.CollectionCount(0) - gcStart, gcMs, allocStart, shots - shotsStart,
                             (getKills == null ? 0 : getKills()) - killsStart, aliveSamples > 0 ? aliveSum / aliveSamples : -1,
                             aliveSamples > 0 ? awakeSum / aliveSamples : -1, freeMin);
-            line.Insert(17, " w=" + windowIndex);
+            line.Insert(tag.Length, " w=" + windowIndex);
             line.Append(" reloads=").Append(reloads - reloadsStart).Append(" hits=").Append(hits - hitsStart)
                 .Append(" shotkills=").Append(shotKills - shotKillsStart);
             if (windowSet != null) line.Append(" set=").Append(windowSet);
@@ -1794,11 +1365,6 @@ namespace CrowCompat
             Debug.Log(line.ToString());
             LoopProfile.Flush("fight-w" + windowIndex);
             ActionProfile.Report("fight-w" + windowIndex + (windowSet != null ? " set=" + windowSet : ""), windowCount);
-            if (dump)
-            {
-                DumpDead();
-                DumpCorpses();
-            }
             if (windowIndex * window >= seconds - 0.01f)
             {
                 Summary(now);
@@ -1893,56 +1459,15 @@ namespace CrowCompat
             return 9;
         }
 
-        // Bytes the IL2CPP collector has handed out since startup (Boehm's GC_get_total_bytes); -1
-        // elsewhere (Mono).
-        [DllImport("__Internal")] static extern UIntPtr GC_get_total_bytes();
-        static bool noTotal;
-
+        // Bytes the IL2CPP collector has handed out since startup; -1 elsewhere (Mono).
         static long AllocatedBytes()
         {
-            if (noTotal) return -1;
-            try
-            {
-                return (long)(ulong)TotalBytes();
-            }
-            catch (Exception)
-            {
-                noTotal = true;
-                return -1;
-            }
+            return GcTotal.Bytes();
         }
-
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        static UIntPtr TotalBytes()
-        {
-            return GC_get_total_bytes();
-        }
-
-        static MethodInfo freeLpddr;
-        static bool noFree;
 
         static float FreeMainMB()
         {
-            if (noFree || Application.platform != RuntimePlatform.PSP2) return -1f;
-            try
-            {
-                if (freeLpddr == null)
-                {
-                    Type diagnostics = Type.GetType("UnityEngine.PSVita.Diagnostics, UnityEngine.PSVitaModule");
-                    freeLpddr = diagnostics == null ? null : diagnostics.GetMethod("GetFreeMemoryLPDDR");
-                    if (freeLpddr == null)
-                    {
-                        noFree = true;
-                        return -1f;
-                    }
-                }
-                return (int)freeLpddr.Invoke(null, null) / 1048576f;
-            }
-            catch (Exception)
-            {
-                noFree = true;
-                return -1f;
-            }
+            return VitaMemory.FreeMainMB();
         }
 
         static float stepsFrom;

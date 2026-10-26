@@ -18,9 +18,9 @@ using UnityEngine;
 // it. Meshes with the same data share one. They go to the GPU only, but those of a MeshCollider.
 // Nothing in the game changes a ProBuilderMesh at run time (CombinedMaterial.ApplyToProBuilder, the
 // only caller of its API, is an editor tool's), so then the ProBuilderMesh and ProBuilderShape
-// components are left out. From CROW_PROBUILDER: on (the PS Vita's default), bake (the meshes built
-// and the components kept: Awake finds the mesh and builds nothing; the meshes stay readable, as
-// Awake reads uv2), off (other platforms' default). The project's prefab doesn't change.
+// components are left out. From CROW_PROBUILDER (common.BUILD_SWITCHES): on (the default with the PS
+// Vita's scene data), bake (the meshes built and the components kept: Awake finds the mesh and builds
+// nothing; the meshes stay readable, as Awake reads uv2), off. The project's prefab doesn't change.
 class CrowProBuilderMeshes : UnityEditor.Build.IProcessSceneWithReport
 {
     static Type proBuilderMesh, proBuilderShape;
@@ -33,17 +33,10 @@ class CrowProBuilderMeshes : UnityEditor.Build.IProcessSceneWithReport
         get { return -10; }  // before CrowMergeScenes
     }
 
-    static string Mode()
-    {
-        string mode = Environment.GetEnvironmentVariable("CROW_PROBUILDER");
-        if (!string.IsNullOrEmpty(mode)) return mode;
-        return EditorUserBuildSettings.activeBuildTarget == BuildTarget.PSP2 ? "on" : "off";
-    }
-
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        string mode = Mode();
+        string mode = BuildUtil.Switch("CROW_PROBUILDER");
         if (mode == "off") return;
         if (proBuilderMesh == null)
         {
@@ -107,14 +100,7 @@ class CrowProBuilderMeshes : UnityEditor.Build.IProcessSceneWithReport
         int unreadable = 0;
         if (mode == "on")
             foreach (Mesh mesh in shared.Values.Where(m => !collided.Contains(m)))
-            {
-                var serialized = new SerializedObject(mesh);
-                SerializedProperty readable = serialized.FindProperty("m_IsReadable");
-                if (readable == null) continue;
-                readable.boolValue = false;
-                serialized.ApplyModifiedPropertiesWithoutUndo();
-                unreadable++;
-            }
+                if (BuildUtil.MarkUnreadable(mesh)) unreadable++;
         int dropped = 0;
         if (mode == "on" && failed == 0)
         {

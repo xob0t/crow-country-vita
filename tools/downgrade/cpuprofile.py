@@ -33,6 +33,7 @@ from pathlib import Path
 
 import vitalike
 from common import EDITORS, ROOT, TARGET, WORK, split_at_dashes
+from playerlog import heartbeats
 
 OUT = ROOT / 'artifacts' / 'cpuprofile'
 # The installed editor's UnityPlayer.pdb for the IL2CPP player (the engine's names).
@@ -48,6 +49,11 @@ TH32CS_SNAPTHREAD = 0x4
 THREAD_ALL = 0x0008 | 0x0010 | 0x0040 | 0x0002  # GET_CONTEXT | SET_CONTEXT | QUERY_INFORMATION | SUSPEND_RESUME
 CONTEXT_FULL = 0x10000B
 MAX_FRAMES = 128
+# The x64 CONTEXT: its size (it must be 16-byte aligned) and where ContextFlags, Rsp, Rbp and Rip are.
+CONTEXT_SIZE = 1232
+CONTEXT_FLAGS, CONTEXT_RSP, CONTEXT_RBP, CONTEXT_RIP = 0x30, 0x98, 0xA0, 0xF8
+IMAGE_FILE_MACHINE_AMD64 = 0x8664
+ADDR_MODE_FLAT = 3
 
 
 class ThreadEntry(ctypes.Structure):
@@ -160,39 +166,38 @@ class Sampler:
     def __init__(self, process, thread_id):
         self.process = process
         self.thread = kernel32.OpenThread(THREAD_ALL, False, thread_id)
-        self.buffer = ctypes.create_string_buffer(1232 + 16)
+        self.buffer = ctypes.create_string_buffer(CONTEXT_SIZE + 16)
         self.context = (ctypes.addressof(self.buffer) + 15) & ~15
-        ctypes.c_uint32.from_address(self.context + 0x30).value = CONTEXT_FULL
         self.stacks = collections.Counter()  # committed: whole heartbeat intervals in the scene
         self.segment = collections.Counter()  # since the last heartbeat
         self.on = False
         self.ready = False
         self.failed = 0
+        self.last_error = None
 
     def init_symbols(self, build):
         dbghelp.SymSetOptions(0x2 | 0x4 | 0x200)  # UNDNAME | DEFERRED_LOADS | FAIL_CRITICAL_ERRORS
-        backup = build / 'CrowCountry_BackUpThisFolder_ButDontShipItWithYourGame'  # GameAssembly.pdb
-        path = ';'.join(str(p) for p in (build, backup, UNITY_PDB_DIR))
-        if not dbghelp.SymInitializeW(self.process, path, True):
+        if not dbghelp.SymInitializeW(self.process, symbol_path(build), True):
             raise OSError(ctypes.get_last_error(), 'SymInitialize failed')
         self.ready = True
 
     def sample(self):
         if not self.on or not self.ready:
             return
-        ctypes.c_uint32.from_address(self.context + 0x30).value = CONTEXT_FULL
+        ctypes.c_uint32.from_address(self.context + CONTEXT_FLAGS).value = CONTEXT_FULL
         if not kernel32.GetThreadContext(self.thread, ctypes.c_void_p(self.context)):
             self.failed += 1
+            self.last_error = f'GetThreadContext: error {ctypes.get_last_error()}'
             return
         frame = StackFrame64()
-        frame.AddrPC.Offset = ctypes.c_uint64.from_address(self.context + 0xF8).value
-        frame.AddrStack.Offset = ctypes.c_uint64.from_address(self.context + 0x98).value
-        frame.AddrFrame.Offset = ctypes.c_uint64.from_address(self.context + 0xA0).value
-        frame.AddrPC.Mode = frame.AddrStack.Mode = frame.AddrFrame.Mode = 3  # AddrModeFlat
+        frame.AddrPC.Offset = ctypes.c_uint64.from_address(self.context + CONTEXT_RIP).value
+        frame.AddrStack.Offset = ctypes.c_uint64.from_address(self.context + CONTEXT_RSP).value
+        frame.AddrFrame.Offset = ctypes.c_uint64.from_address(self.context + CONTEXT_RBP).value
+        frame.AddrPC.Mode = frame.AddrStack.Mode = frame.AddrFrame.Mode = ADDR_MODE_FLAT
         pcs = []
         while len(pcs) < MAX_FRAMES:
             if not dbghelp.StackWalk64(
-                0x8664,
+                IMAGE_FILE_MACHINE_AMD64,
                 self.process,
                 self.thread,
                 ctypes.byref(frame),
@@ -225,13 +230,19 @@ class Sampler:
         return cache
 
 
+def symbol_path(build):
+    """Where dbghelp looks for the PDBs: the build (GameAssembly.pdb is in its BackUpThisFolder) and
+    the editor's UnityPlayer."""
+    backup = build / 'CrowCountry_BackUpThisFolder_ButDontShipItWithYourGame'
+    return ';'.join(str(p) for p in (build, backup, UNITY_PDB_DIR))
+
+
 def symbolize(keys, build):
     """module!offset -> function name, from the build's modules and PDBs (System32 for Windows'
     own, which name exports only)."""
     process = wt.HANDLE(0x5EED)  # any value: no live process, the modules are loaded by hand
     dbghelp.SymSetOptions(0x2 | 0x200)  # UNDNAME | FAIL_CRITICAL_ERRORS (deferred loads fail without a process)
-    backup = build / 'CrowCountry_BackUpThisFolder_ButDontShipItWithYourGame'  # GameAssembly.pdb
-    if not dbghelp.SymInitializeW(process, ';'.join(str(p) for p in (build, backup, UNITY_PDB_DIR)), False):
+    if not dbghelp.SymInitializeW(process, symbol_path(build), False):
         raise OSError(ctypes.get_last_error(), 'SymInitialize failed')
     system = SYSTEM32
     bases, names = {}, {}
@@ -312,42 +323,18 @@ def module_name(process, base):
 
 
 class SamplingDuty(vitalike.Duty):
-    """vitalike's duty controller with a stack sample of the main thread in every off slice."""
+    """vitalike's duty controller with a stack sample of the main thread in every pause."""
 
-    def __init__(self, *args, sampler, **kwargs):
+    def __init__(self, *args, thread_id, **kwargs):
         super().__init__(*args, **kwargs)
-        self.sampler = sampler
+        self.sampler = Sampler(self.handle, thread_id)
 
-    def cycle(self):
-        kernel32.SetThreadAffinityMask(kernel32.GetCurrentThread(), self.cpu_mask)
-        kernel32.SetThreadPriority(kernel32.GetCurrentThread(), 15)
-        self.timer = kernel32.CreateWaitableTimerExW(None, None, 0x2, 0x1F0003)
-        run_slice = self.period * self.fraction
-        ntdll.NtResumeProcess(self.handle)
-        while not self.stop.is_set():
-            start = time.perf_counter()
-            self.wait(run_slice)
-            if ntdll.NtSuspendProcess(self.handle) != 0:
-                break
-            suspended = time.perf_counter()
-            self.ran += suspended - start
-            try:
-                self.sampler.sample()
-            except Exception as error:  # one bad sample shouldn't stop the run
-                self.sampler.failed += 1
-                self.sampler.last_error = repr(error)
-            for guard in self.guards:
-                ntdll.NtResumeProcess(guard)
-            target = self.ran * (1 - self.fraction) / self.fraction - self.off - (time.perf_counter() - suspended)
-            self.wait(min(max(target, 0.0), 4 * self.period))
-            for guard in self.guards:
-                ntdll.NtSuspendProcess(guard)
-            ntdll.NtResumeProcess(self.handle)
-            self.off += time.perf_counter() - suspended
-            self.cycles += 1
-
-
-HEARTBEAT = re.compile(r'^HEARTBEAT t=\S+ scene=(\S+)', re.M)
+    def paused(self):
+        try:
+            self.sampler.sample()
+        except Exception as error:  # one bad sample shouldn't stop the run
+            self.sampler.failed += 1
+            self.sampler.last_error = repr(error)
 
 
 COPY = WORK / 'cpuprofile' / 'player'
@@ -368,8 +355,6 @@ def run(args, flags):
     duty cycle and the sampler attach to it, and the main thread's stack is sampled in each off slice."""
     import run_player
 
-    kernel32.OpenProcess.restype = wt.HANDLE
-    kernel32.TerminateProcess.argtypes = [wt.HANDLE, wt.UINT]
     exe = prepare_player(args.build.resolve())
     out = (OUT / args.tag).resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -383,7 +368,6 @@ def run(args, flags):
     if '-crow-quit-after' not in flags:
         flags += ['-crow-quit-after', '1200']
     flags = ['-crow-no-vsync', *flags]
-    game_mask, controller_mask = vitalike.pick_cpus(args.cores)
     (out / 'cpuprofile.txt').write_text(
         f'cap {args.cap}% period {args.period} ms cores {args.cores} scene {args.scene} '
         f'skip {args.skip} beats {args.beats}\n'
@@ -393,27 +377,13 @@ def run(args, flags):
     attached = {}
 
     def on_start(pid):
-        handle = wt.HANDLE(kernel32.OpenProcess(0x1F0FFF, False, pid))  # PROCESS_ALL_ACCESS
-        if not handle:
-            return None
-        kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(game_mask))
-        kernel32.SetPriorityClass(handle, 0x80)  # HIGH_PRIORITY_CLASS
-        guards = vitalike.start_guards(game_mask) if args.guard else None
-        sampler = Sampler(handle, first_thread(pid))
-        attached['pid'] = pid
-        duty = SamplingDuty(
-            handle, args.cap / 100, args.period / 1000, controller_mask, guards[1] if guards else (), sampler=sampler
+        slowed = vitalike.slow_down(
+            pid, args.cap, args.period, args.cores, args.guard, SamplingDuty, thread_id=first_thread(pid)
         )
-        duty.start()
-        attached.update(handle=handle, sampler=sampler, duty=duty, guards=guards)
-
-        def stop():
-            duty.stop.set()
-            duty.join(5)
-            if guards is not None:
-                kernel32.TerminateJobObject(guards[0], 0)
-                kernel32.CloseHandle(guards[0])
-
+        if slowed is None:
+            return None
+        duty, stop = slowed
+        attached.update(pid=pid, handle=duty.handle, sampler=duty.sampler, duty=duty)
         return stop
 
     runner = threading.Thread(
@@ -436,7 +406,7 @@ def run(args, flags):
             time.sleep(1)
             if not log_path.exists():
                 continue
-            beats = HEARTBEAT.findall(log_path.read_text(encoding='utf-8', errors='replace'))
+            beats = [b.get('scene') for b in heartbeats(log_path.read_text(encoding='utf-8', errors='replace'))]
             if not beats:
                 continue
             if not sampler.ready:
@@ -481,6 +451,8 @@ def run(args, flags):
             file.write(';'.join(names.get(pc, '?') for pc in reversed(stack)) + f' {count}\n')
     note = f'run {time.time() - started:.0f} s; {duty.report() if duty else ""}; '
     note += f'{total} samples, {sampler.failed} failed'
+    if sampler.last_error:
+        note += f' (the last: {sampler.last_error})'
     with open(out / 'cpuprofile.txt', 'a') as file:
         file.write(note + '\n')
     print(note)
@@ -576,6 +548,8 @@ def category(frames):
 
 def report(tag, top=60):
     out = OUT / tag
+    if not (out / 'stacks.txt').exists():
+        sys.exit(f'No profile {tag}: {out} has no stacks.txt')
     named = out / 'named-stacks.txt'
     if named.exists() and named.stat().st_mtime >= (out / 'stacks.txt').stat().st_mtime:
         source, raw = named, False  # named with the player the samples came from
@@ -649,7 +623,7 @@ def main():
     parser.add_argument('--beats', type=int, default=12, help='heartbeats to sample')
     parser.add_argument('--cap', type=float, default=vitalike.DEFAULT_CAP)
     parser.add_argument('--period', type=float, default=vitalike.DEFAULT_PERIOD_MS)
-    parser.add_argument('--cores', type=int, default=3)
+    parser.add_argument('--cores', type=int, default=vitalike.DEFAULT_CORES)
     parser.add_argument('--timeout', type=float, default=1500)
     parser.add_argument('--build', type=Path, default=vitalike.BUILD)
     parser.add_argument('--no-guard', dest='guard', action='store_false')

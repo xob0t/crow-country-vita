@@ -23,6 +23,7 @@ from pathlib import Path
 
 import run_player
 from common import ROOT, TARGET, WORK, build_folder, number, project_folder, split_at_dashes
+from playerlog import heartbeats
 
 OUT = ROOT / 'artifacts' / 'sweep'
 COPY = WORK / 'sweep' / 'player'
@@ -42,8 +43,11 @@ KINDS = [
 STACK = re.compile(
     r'^(\s+at |\[[^\]]*line \d+\]|\(wrapper |[\w.`<>$|\[\],+]+:[\w.`<>$|\[\],]+ ?\(.*\)( \(at .*\))?\s*$)'
 )
+# Lines of a normal start and run that the kinds above would count: Unity 2018.2's and the game's own
+# (a baseline: add to it when a new harmless line shows up in every scene). CrowCompat's CROW_* lines
+# are left out wherever they are (analyse).
 NOISE = re.compile(
-    r'^(CROW_\w+|HEARTBEAT|Map: |Change fullscreen|Steam |Setting language|Language |Lang Value|Load slot|'
+    r'^(HEARTBEAT|Map: |Change fullscreen|Steam |Setting language|Language |Lang Value|Load slot|'
     r'Create new API|Setting breakpad|SteamInternal|Unloading \d+|UnloadTime|Total: |Setting up \d+ worker|'
     r'  Thread ->|Mono path|Mono config|Initialize engine|GfxDevice|Direct3D|    \w+:|Begin MonoManager|'
     r'- Completed reload|<RI>|Property \(lut\) exceeds|'
@@ -93,11 +97,13 @@ def analyse(scene, log: Path, png: Path, first_scene):
     loaded = re.findall(r'CROW_DIAG scene loaded (.+?) \(\w+\) at ([\d,.]+) s', text)
     loaded_names = [name for name, _ in loaded]
     load_time = next((number(t) for name, t in loaded if name == scene), None)
-    beats = re.findall(r'HEARTBEAT t=([\d,.]+) scene=(\S+) fps=([\d,.]+) ms=([\d,.]+) .*?visible=(\d+)', text)
-    last = beats[-1] if beats else None
+    beats = list(heartbeats(text))
+    last = beats[-1] if beats else {}
     groups = {}
     for lines, stack in messages(text):
-        # Drop noise lines at the start (several Unity lines can come without a Filename trailer).
+        # CrowCompat's lines (they report, and say "not found" or "failed" in normal cases), then noise
+        # lines at the start (several Unity lines can come without a Filename trailer).
+        lines = [line for line in lines if not line.startswith('CROW_')]
         while lines and NOISE.match(lines[0]):
             lines.pop(0)
         if not lines:
@@ -115,9 +121,9 @@ def analyse(scene, log: Path, png: Path, first_scene):
         'load_time': load_time,
         'quit': 'CROW_DIAG quitting' in text,
         'screenshot': str(png) if png.exists() else None,
-        'fps': number(last[2]) if last else None,
-        'visible': int(last[4]) if last else None,
-        'last_beat_scene': last[1] if last else None,
+        'fps': last.get('fps'),
+        'visible': int(last['visible']) if isinstance(last.get('visible'), float) else None,
+        'last_beat_scene': last.get('scene'),
         'messages': sorted(groups.values(), key=lambda g: (g['kind'], -g['count'])),
         'crashed': bool(re.search(r'Crash!!!|Received signal|access violation', text, re.I)),
     }

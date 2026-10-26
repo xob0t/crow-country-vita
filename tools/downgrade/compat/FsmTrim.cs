@@ -54,7 +54,7 @@ using UnityEngine;
 // F<calls>/<idle>/<proxy skips> L<the same> per frame.
 // Console, steady fights, off -> on: Station Square (330 Updates a frame, 120 skipped; 41 of 47
 // FixedUpdate and 17 of 29 LateUpdate targets) main thread -0.3 ms, scripts -0.4; Fairy Forest -0.6 and
-// -0.7 (status.md, PlayMaker runtime trim): 1.5-3.5 us a skipped update.
+// -0.7 (status-log.md, PlayMaker runtime trim): 1.5-3.5 us a skipped update.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -74,11 +74,9 @@ namespace CrowCompat
         // From Diag.Install (every player).
         internal static void Install(string[] args)
         {
-            Set(Application.platform == RuntimePlatform.PSP2 ? "on" : "off");
-            string value = CrowFlags.Value(args, "-crow-fsm-trim");
-            if (value != null) Set(value);
+            Set(CrowFlags.Value(args, "-crow-fsm-trim", "on", "off"));
             logStart = reportStart = Counters();
-            log = Array.IndexOf(args, "-crow-fsm-trim-log") >= 0;
+            log = CrowFlags.Has(args, "-crow-fsm-trim-log");
             if (log) CrowEvents.Canvases("FsmTrim.Frame", Frame);
             Debug.Log("CROW_FSM_TRIM " + Describe());
         }
@@ -195,7 +193,7 @@ namespace CrowCompat
         {
             try
             {
-                Type component = Type.GetType("PlayMakerFSM, PlayMaker");
+                Type component = GameTypes.PlayMakerFsm;
                 var list = component.GetProperty("FsmList").GetValue(null, null) as IList;
                 FieldInfo fsmField = Field(component, "fsm");
                 int updated = 0, finished = 0, idle = 0, quiet = 0, delayed = 0, busy = 0;
@@ -503,7 +501,7 @@ namespace CrowCompat
                 object name = type.GetProperty("Name").GetValue(fsm, null);
                 object state = fsmInfo[0].GetValue(fsm);
                 object stateName = state == null ? null : state.GetType().GetProperty("Name").GetValue(state, null);
-                return (owner == null ? "?" : Perf.Path(owner.transform, 3)) + ":" + name + " state=" + stateName;
+                return (owner == null ? "?" : Hierarchy.Path(owner.transform, 3)) + ":" + name + " state=" + stateName;
             }
             catch (Exception)
             {

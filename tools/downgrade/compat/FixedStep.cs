@@ -24,17 +24,17 @@ using UnityEngine.SceneManagement;
 // One-off impulses, set velocities (the Grinners' walk), gravity and forces are already step-independent.
 // -crow-physics-cap on|off|<n> (on is 1; the PS Vita's default is 2): Time.maximumDeltaTime at n thirtieths
 // of a second (n physics steps at the PS Vita's 1/30, whatever the step: a time, so -crow-fixed-dt game or
-// fixeddt=game keeps 66.7 ms at 2, not 2 x 0.02 = 40 ms, which slowed the fights' 50-65 ms frames and biased
-// the step's A/B until 21 Oct; never under the step, as Unity keeps it), so a slower frame advances game time
+// fixeddt=game keeps 66.7 ms at 2, not 2 x 0.02 = 40 ms, which would slow the fights' 50-65 ms frames and bias
+// the step's A/B; never under the step, as Unity keeps it), so a slower frame advances game time
 // by the cap (Unity clamps Time.deltaTime, Time.time and the fixed steps' clock alike), instead of 3 or more
 // steps in one long frame making the next one long too; off keeps the project's maximumDeltaTime (0.3333 s).
 // In a clamped frame the whole game slows with it, physics, scripts, animation, tweens and timers together;
 // sound and unscaled time don't. One step a frame (on) saves 2-4 ms of physics in a 50-65 ms fight frame but
 // runs the fight at 55-66% of real time; at 2 a frame up to 66.7 ms keeps the game's speed and only hitches
 // are clamped. -crow-cycle / -crow-fight-cycle / -crow-ab take physcap=on|off|<n>.
-// -crow-ground-cache <steps>|off (groundcache=; Cuts.cs sets the PS Vita's 4): the ground friction under a body
-// that Gain looks up with a raycast at every AddForce (84 us a call on the PS Vita, ~1 ms a frame in Station
-// Square's fight) is kept per body for that many physics steps (off: looked up at every call, as before).
+// -crow-ground-cache <steps>|off (groundcache=; the PS Vita's default 4, also set by Cuts' cuts=): the ground
+// friction under a body that Gain looks up with a raycast at every AddForce (84 us a call on the PS Vita, ~1 ms a
+// frame in Station Square's fight) is kept per body for that many physics steps (off: looked up at every call).
 // -crow-fixed-check: bodies scanned every frame; CROW_FIXED_CLONE for each clone of an adjusted body (its game
 // drags, the copied ones, and what Drag() twice would have made), CROW_FIXED_AMBIGUOUS for a prefab's drags
 // that look like a pair FixedStep set, and every 10 s CROW_FIXED_CHECK: the bodies whose drags aren't Drag()
@@ -47,7 +47,7 @@ namespace CrowCompat
     {
         public const float GameStep = 0.02f;
         static float step = GameStep;
-        static bool on, compensate = true, bulletCcd = true;
+        static bool on, bulletCcd = true;
         // Per body: the game's drag and angular drag, before Adjust.
         static readonly Dictionary<Rigidbody, Vector2> gameDrag = new Dictionary<Rigidbody, Vector2>();
         // The drags (drag, angular drag; their bits) FixedStep has set, at every step used, with the game's they
@@ -60,12 +60,19 @@ namespace CrowCompat
         static float capSeconds;
         static float gameMaxDelta = -1f;
 
-        // -crow-cycle / -crow-fight-cycle / -crow-ab: fixeddt=<s or fps> (game for 0.02), as -crow-fixed-dt.
+        // -crow-cycle / -crow-fight-cycle / -crow-ab: fixeddt=<s or fps> (game for 0.02), as -crow-fixed-dt;
+        // physcap=, as -crow-physics-cap; groundcache=, as -crow-ground-cache.
         internal static bool Change(string key, string value)
         {
             if (key == "physcap")
             {
                 Cap(value);
+                return true;
+            }
+            if (key == "groundcache")
+            {
+                SetGroundCache(value);
+                Debug.Log("CROW_FIXED groundcache=" + GroundCacheSteps);
                 return true;
             }
             if (key != "fixeddt") return false;
@@ -96,24 +103,19 @@ namespace CrowCompat
         // The destroyed bodies' entries (spent chambers, debris and an unloaded area's bodies), at each unload.
         static void Forget()
         {
-            var dead = new List<Rigidbody>();
-            foreach (Rigidbody body in gameDrag.Keys) if (body == null) dead.Add(body);
-            foreach (Rigidbody body in dead) gameDrag.Remove(body);
-            dead.Clear();
-            foreach (Rigidbody body in ownCollider.Keys) if (body == null) dead.Add(body);
-            foreach (Rigidbody body in dead) ownCollider.Remove(body);
+            Destroyed.Forget(gameDrag);
+            Destroyed.Forget(ownCollider);
         }
 
         // From Diag.Install (every player, flags or not).
         internal static void Install(string[] args)
         {
-            string value = CrowFlags.Value(args, "-crow-fixed-dt");
+            // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
+            string value = CrowFlags.Value(args, "-crow-fixed-dt", "30");
             bulletCcd = CrowFlags.Value(args, "-crow-bullet-ccd") != "off";
             Check.On = CrowFlags.Has(args, "-crow-fixed-check");
-            Check.Old = CrowFlags.Optional(args, "-crow-fixed-check") == "old";
-            string capValue = CrowFlags.Value(args, "-crow-physics-cap") ?? (Application.platform == RuntimePlatform.PSP2 ? "2" : null);
-            // The PS Vita's default: 30 steps a second, one a frame at its 30 fps.
-            if (value == null && Application.platform == RuntimePlatform.PSP2) value = "30";
+            string capValue = CrowFlags.Value(args, "-crow-physics-cap", "2");
+            SetGroundCache(CrowFlags.Value(args, "-crow-ground-cache", "4", "off"));
             float number;
             if (Check.On) Hook();  // also at the game's step, for its numbers
             if (value != null && value != "game" && float.TryParse(value, System.Globalization.NumberStyles.Float,
@@ -122,17 +124,15 @@ namespace CrowCompat
                 Hook();
                 Set(number > 1f ? 1f / number : number);
             }
-            // After the step, so the cap's line gives the step in use (it said fixedDeltaTime=0.0200 and
-            // maximumDeltaTime=0.0400 on every PS Vita launch before 21 Oct).
+            // After the step, so the cap's line gives the step in use.
             if (capValue != null) Cap(capValue);
         }
 
-        // The step from now on (also Fight's physics test).
-        internal static void Set(float seconds, bool keepGame = true)
+        // The step from now on.
+        internal static void Set(float seconds)
         {
             step = seconds;
-            compensate = keepGame;
-            on = Mathf.Abs(step - GameStep) > 1e-6f && keepGame;
+            on = Mathf.Abs(step - GameStep) > 1e-6f;
             Time.fixedDeltaTime = step;
             if (capSeconds > 0f) ApplyCap();
             // The bodies seen so far get their drags for the new step, from the game's.
@@ -150,7 +150,7 @@ namespace CrowCompat
                 if (on) madeFrom[Key(body.drag, body.angularDrag)] = game;
             }
             if (on && Time.timeSinceLevelLoad > 1f) fullScan = true;
-            Debug.Log("CROW_FIXED step " + step.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) + " s" + (on ? " (game kept as at 0.02)" : compensate ? "" : " (uncompensated)"));
+            Debug.Log("CROW_FIXED step " + step.ToString("0.0000", System.Globalization.CultureInfo.InvariantCulture) + " s" + (on ? " (game kept as at 0.02)" : ""));
         }
 
         // -crow-physics-cap's value: on (1), off, or a number of thirtieths of a second (steps at 1/30).
@@ -229,7 +229,7 @@ namespace CrowCompat
             float drag = body.drag, angularDrag = body.angularDrag;
             Vector2 game;
             bool copied = madeFrom.TryGetValue(Key(drag, angularDrag), out game);
-            if (!copied || Check.Old) game = new Vector2(drag, angularDrag);
+            if (!copied) game = new Vector2(drag, angularDrag);
             gameDrag[body] = game;
             float made = Drag(game.x), madeAngular = Drag(game.y);
             if (made != drag) body.drag = made;
@@ -250,10 +250,10 @@ namespace CrowCompat
             return name.IndexOf("bullet", StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
-        // -crow-fixed-check (old: clones get Drag() of their copied drags, as before 19 Oct, for A/B).
+        // -crow-fixed-check.
         static class Check
         {
-            internal static bool On, Old, Scanning;
+            internal static bool On, Scanning;
             static readonly Dictionary<string, int> clones = new Dictionary<string, int>();
             static readonly HashSet<string> ambiguous = new HashSet<string>();
             class Track
@@ -288,7 +288,7 @@ namespace CrowCompat
                 if (copied && (twice != drag || twiceAngular != angularDrag))
                     key = "CROW_FIXED_CLONE " + name + " game=" + F(game.x) + "," + F(game.y) + " copied=" + F(drag) + "," + F(angularDrag) +
                           " twice=" + F(twice) + "," + F(twiceAngular) + " keep/s game=" + Keep(game.x, GameStep).ToString("0.00000", Inv) +
-                          " twice=" + Keep(twice, step).ToString("0.00000", Inv) + (Old ? " (old: twice)" : "");
+                          " twice=" + Keep(twice, step).ToString("0.00000", Inv);
                 else if (!Scanning && Time.timeSinceLevelLoad > 2f)
                     key = "CROW_FIXED_NEW " + name + " drags=" + F(drag) + "," + F(angularDrag) + (copied ? " (copied, unchanged by Drag)" : "");
                 else if (Scanning && !body.gameObject.activeInHierarchy && !copied)
@@ -395,7 +395,7 @@ namespace CrowCompat
                     }
                     else if (pair.Key.StartsWith("CROW_FIXED_INACTIVE", StringComparison.Ordinal)) inactive++;
                 Debug.Log("CROW_FIXED_CHECK t=" + now.ToString("0.0", Inv) + " bodies=" + gameDrag.Count + " wrong=" + wrong + (names.Count > 0 ? " " + string.Join(" ", names.ToArray()) : "") +
-                          " clones=" + clonesSeen + " kinds=" + kinds + " new=" + (clones.Count - kinds - inactive) + " ambiguous=" + ambiguous.Count + (Old ? " old" : ""));
+                          " clones=" + clonesSeen + " kinds=" + kinds + " new=" + (clones.Count - kinds - inactive) + " ambiguous=" + ambiguous.Count);
                 foreach (KeyValuePair<string, float[]> pair in moved)
                 {
                     float n = pair.Value[0];
@@ -461,6 +461,14 @@ namespace CrowCompat
 
         static readonly Dictionary<Rigidbody, Collider> ownCollider = new Dictionary<Rigidbody, Collider>();
         internal static int GroundCacheSteps;
+
+        // A number of physics steps, or off (game: the same).
+        internal static void SetGroundCache(string value)
+        {
+            int steps;
+            GroundCacheSteps = value != "off" && value != "game" && int.TryParse(value, System.Globalization.NumberStyles.Integer,
+                System.Globalization.CultureInfo.InvariantCulture, out steps) ? Math.Max(0, steps) : 0;
+        }
         static readonly Dictionary<Rigidbody, Vector2> groundCache = new Dictionary<Rigidbody, Vector2>();  // friction, step
 
         // GroundFriction, kept per body for GroundCacheSteps physics steps.

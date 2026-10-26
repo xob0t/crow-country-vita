@@ -2,16 +2,14 @@
 
     uv run tools/downgrade/vita.py <command> [options]
 
-The console is at CROW_VITA_HOST (or DRIFTER_VITA_HOST). sync, log, args and crashes need only an FTP server
-on port 1337: VitaShell's (press Select in VitaShell) or vitacompanion's; seed needs no
-console. The other commands need vitacompanion's command server on port 1338; install, perf
-and shot use commands the released vitacompanion lacks (install, perf, screenshot) and stop
-with a message without them. The app must have been installed once from the VPK (install, or
-the VPK in VitaShell); after that:
+The console is at CROW_VITA_HOST (or DRIFTER_VITA_HOST). sync, log, args, files and crashes need
+only an FTP server on port 1337: VitaShell's (press Select in VitaShell) or vitacompanion's; seed
+needs no console. The other commands need vitacompanion's command server on port 1338. The app
+must have been installed once from the VPK (install, or the VPK in VitaShell); after that:
 
   sync [--build dir]    upload the files that changed since the last sync into
                         ux0:app/<title> (the first sync uploads everything)
-  seed --build dir      record that build as installed (e.g. from its VPK) without
+  seed [--build dir]    record that build as installed (e.g. from its VPK) without
                         uploading, so the next sync sends only differences
   install [--build dir] package the build as a VPK and stream it to the installer (also
                         what applies param.sfo changes such as the memory expansion)
@@ -36,31 +34,10 @@ the VPK in VitaShell); after that:
                         artifacts/vita/symbols, and the copy whose fingerprint the dump lists is
                         used); --dump FILE reads a local dump
 
-The commands that change the console's state (sync, install, launch, quit, run, do,
-reboot, args) refuse while someone else holds the vita-device lock (lock.py): they run inside
-`lock.py run vita-device ...` (CROW_LOCK) or with CROW_HOLDER=<the lock's holder name> after
-`lock.py take`. A free lock lets them run as before.
-
-sync, install and seed (and run, before it quits the game) read the build folder under the vita-build
-lock, so a build or quickcode can't rewrite the files while they go out: before (21 Oct) a sync during
-a quickcode could send the new il2CppAssemblies.suprx with the old global-metadata.dat, or a module
-half copied, and the game crashed at launch. They hold it as a reader (lock.take): a PC build
-(pc-build) neither waits for them nor holds them up. They wait up to --build-wait seconds (default
-900) for a build that holds it, then stop (exit 75). Inside `lock.py run vita-build ...` (CROW_LOCKS,
-also through a `lock.py run vita-device` in it) or with CROW_HOLDER naming the holder of a `lock.py
-take vita-build`, the build is the caller's and they don't wait. A job holding vita-device that waits
-here for a build that wants vita-device next waits until one of the two waits ends.
-
-An FTP transfer cut off mid-way (vita.py killed while it sends or reads a file) can leave the
-console's FTP server hung until the console reboots, so don't kill vita.py while it transfers. Ctrl+C
-or Ctrl+Break lets the file in progress finish and then stops; a second one ends the transfer at once
-by closing its connection cleanly. sync and args write each file under <name>.part and rename it into
-place, so an interrupted upload never leaves the app a file cut short.
-
-The log and the flags are CrowCompat Diag's: on the PS Vita it reads its flags from
-ux0:data/crow/args.txt and writes the player's log to ux0:data/crow/log.txt.
-vitacompanion 1.20 or later (install, press/release, screenshot) is needed for
-install, do and shot; 1.33 for perf.
+The commands that change the console (sync, install, launch, quit, run, do, reboot, args) refuse
+while someone else holds the vita-device lock, and sync, install and seed read the build under the
+vita-build lock. docs/vita.md (vita.py) has the locks, the vitacompanion versions each command needs,
+why not to kill vita.py while it transfers a file, and keeping the display on.
 """
 
 import argparse
@@ -115,26 +92,30 @@ def ftp():
         connection.connect(*pipeline.VITA_FTP, timeout=FTP_SECONDS)
     except OSError as error:
         raise Unreachable(
-            f"No FTP server at {VITA_HOST}:1337 ({error}). Start VitaShell's FTP "
+            f"No FTP server at {VITA_HOST}:{pipeline.VITA_FTP[1]} ({error}). Start VitaShell's FTP "
             f'server (press Select in VitaShell), or run vitacompanion.'
         ) from error
     connection.login()
     return connection
 
 
-def command(chain, timeout=10):
-    """Runs a vitacompanion command chain ("quit all; wait 2s; launch ...") and returns its output."""
+def connect_commands(timeout=10):
+    """A connection to vitacompanion's command server, or Unreachable."""
     vita_host()
     try:
-        connection = socket.create_connection(pipeline.VITA_COMMANDS, timeout=10)
+        return socket.create_connection(pipeline.VITA_COMMANDS, timeout=timeout)
     except OSError as error:
         raise Unreachable(
-            f"vitacompanion's command server does not answer at {VITA_HOST}:1338 "
+            f"vitacompanion's command server does not answer at {VITA_HOST}:{pipeline.VITA_COMMANDS[1]} "
             f'({error}). This needs vitacompanion running on the console. Without it, install '
             f"the VPK in VitaShell, update with VitaShell's FTP server and `vita.py sync`, and "
             f'start the game from the LiveArea.'
         ) from error
-    with connection:
+
+
+def command(chain, timeout=10):
+    """Runs a vitacompanion command chain ("quit all; wait 2s; launch ...") and returns its output."""
+    with connect_commands() as connection:
         connection.sendall((chain + '\n').encode())
         connection.settimeout(timeout)
         output = b''
@@ -152,10 +133,13 @@ EXTENDED = ('install', 'perf', 'screenshot')
 
 
 def require(name):
-    """Stops with a message if the console's vitacompanion lacks the command `name`."""
+    """Stops with a message if the console's vitacompanion lacks the command `name`. An empty answer
+    to help (the connection closed early) can't tell: the command goes ahead, with a note."""
     listed = command('help', timeout=4)
     names = {line.split()[0] for line in listed.splitlines() if line.strip()}
-    if listed and name not in names:
+    if not listed:
+        log(f"vitacompanion's help came back empty: can't tell whether it has `{name}`; trying it")
+    elif name not in names:
         hint = (
             ' To install, make the VPK with `pipeline.py package`, copy it to the console and install it in VitaShell.'
             if name == 'install'
@@ -192,8 +176,12 @@ def wake():
         except OSError:
             return
         fps = re.search(r'fps: app=([\d.]+) shell=([\d.]+)', out)
-        if not fps or float(fps.group(1)) > 0 or float(fps.group(2)) > 0:
-            return  # no perf command, or drawing
+        if not fps:
+            if out and 'fps' in out:
+                log(f"wake: perf's answer has no frame rates it can read, so it doesn't wait: {out[:200]}")
+            return  # no perf command
+        if float(fps.group(1)) > 0 or float(fps.group(2)) > 0:
+            return  # drawing
 
 
 def keep_awake():
@@ -239,7 +227,7 @@ def install(build: Path, build_wait=BUILD_WAIT_SECONDS):
         vpk = pipeline.package_vita(build)
         size = vpk.stat().st_size
         with (
-            socket.create_connection(pipeline.VITA_COMMANDS, timeout=30) as connection,
+            connect_commands(timeout=30) as connection,
             vpk.open('rb') as handle,
             transferring(f'sending and installing {vpk.name}'),
         ):
@@ -375,10 +363,8 @@ def seed(build: Path):
 @contextlib.contextmanager
 def reading(build: Path, wait=BUILD_WAIT_SECONDS):
     """Holds the vita-build lock while the build's files are read, unless the caller's job holds it
-    (lock.held_here, or CROW_HOLDER naming the holder of a take): see the module's description."""
-    text = lock.holder_of('vita-build')
-    mine = os.environ.get('CROW_HOLDER', '')
-    if 'vita-build' in lock.held_here() or (text and mine and lock.owner(mine) == lock.owner(text)):
+    (lock.ours), as a reader: a PC build neither waits for it nor holds it up (docs/vita.md)."""
+    if lock.ours('vita-build'):
         yield
         return
     holder = f'vita.py {os.getpid()}: reading {build.name} for the console'
@@ -659,8 +645,10 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
     game, exact = game_symbols(build, module_fingerprints(core).get('LIBIL2CPP_PRX'), dump)
     symbols = {'LIBIL2CPP_PRX': game}
     modules = {m.name: m for m in core.modules}
+    engine = next((name for name in modules if name.startswith('UnityPlayer')), None)
+    if 'LIBIL2CPP_PRX' not in modules or engine is None:
+        sys.exit(f'The dump has no game module or no Unity player loaded; its modules: {", ".join(modules)}')
     remap = None if exact else exidx_remap(core, modules['LIBIL2CPP_PRX'], game)
-    engine = next(name for name in modules if name.startswith('UnityPlayer'))
     symbols[engine] = player
 
     def locate(address):
@@ -682,7 +670,12 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
             sys.exit('No thread named like ' + thread_name + '; threads: ' + ', '.join(t.name for t in core.threads))
         thread = matching[0]
     else:
-        thread = next(t for t in core.threads if t.stop_reason)
+        thread = next((t for t in core.threads if t.stop_reason), None)
+        if thread is None:
+            sys.exit(
+                'No thread of the dump stopped (a dump taken by hand?); pick one with --thread: '
+                + ', '.join(t.name for t in core.threads)
+            )
     print(
         f'thread {thread.name}, stop reason 0x{thread.stop_reason:x}, registers '
         + ' '.join(f'r{i}={v:x}' for i, v in enumerate(thread.regs.gpr[:13]))
@@ -760,16 +753,12 @@ def files(folder: str):
 
 
 def check_lock(name):
-    """Stop a changing command while the vita-device lock is someone else's: before, a job whose
-    lock take failed went on and quit another job's run, and overwrote its flags. Any run this process
-    is in counts (lock.held_here), not only the innermost (CROW_LOCK): inside `lock.py run vita-device
-    -- lock.py run vita-build -- ...` the console is ours."""
+    """Stop a changing command while the vita-device lock is someone else's (lock.ours: any run this
+    process is in, or CROW_HOLDER): a job whose lock take failed would otherwise quit another job's run
+    and overwrite its flags."""
     lock.clear_stale('vita-device')
     text = lock.holder_of('vita-device')
-    if text is None or 'vita-device' in lock.held_here():
-        return
-    mine = os.environ.get('CROW_HOLDER', '')
-    if mine and lock.owner(mine) == lock.owner(text):
+    if text is None or lock.ours('vita-device'):
         return
     sys.exit(
         f'vita.py {name}: the console is held by "{text}" (vita-device lock). Run inside '

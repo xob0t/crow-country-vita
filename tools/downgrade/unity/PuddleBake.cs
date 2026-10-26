@@ -1,13 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using System.Reflection;
 using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
 
-// The Enemy Puddle's random looks picked as the PS Vita build writes the scene (M2, 22 Oct; the user's call: the
-// same puddle at every visit). Haunted Hilltop's Enemy Puddle is 3,613 transforms, 1,822 behaviours and 1,371
+// The Enemy Puddle's random looks picked as the PS Vita build writes the scene (the user's call: the same
+// puddle at every visit). Haunted Hilltop's Enemy Puddle is 3,613 transforms, 1,822 behaviours and 1,371
 // renderers in the export: 68 copies of a blob part, each made of RandomVariant sets (252 scripts, 2 to 18 variants
 // each) of which its Awake keeps one and switches the others off, so about 2,700 of those transforms are loaded at
 // every visit only to stay off. Haunted Hilltop's load after Ocean Kingdom bottomed at 4-7 MB of free main memory.
@@ -18,28 +17,16 @@ using UnityEngine;
 // it references it or anything in it (a behaviour's serialized data, PlayMaker FSMs and their templates included; a
 // joint's body; an LODGroup's renderer; a particle system's shape), or a string in a behaviour names it; the script
 // then stays too, with its pick made (onAwake and onEnable off, its list the picked variant alone), and so does a
-// script anything references. From CROW_PUDDLE_BAKE: on (Haunted Hilltop's puddles; the default with the PS Vita's
-// scene data), all (every scene's), off.
+// script anything references. From CROW_PUDDLE_BAKE (common.BUILD_SWITCHES): on (Haunted Hilltop's puddles; the
+// default with the PS Vita's scene data), all (every scene's), off.
 class CrowPuddleBake : UnityEditor.Build.IProcessSceneWithReport
 {
     const string Puddle = "Enemy Puddle";
     static readonly HashSet<string> Scenes = new HashSet<string> { "Haunted Hilltop" };
-    static readonly HashSet<string> Plain = new HashSet<string>
-    {
-        "int", "unsigned int", "SInt8", "UInt8", "SInt16", "UInt16", "SInt64", "UInt64", "float", "double", "bool", "char",
-        "Vector2f", "Vector3f", "Vector4f", "Quaternionf", "ColorRGBA", "Rectf",
-    };
 
     public int callbackOrder
     {
         get { return -20; }  // before CrowProBuilderMeshes (-10) and CrowMergeScenes (0): the merge sees the picks
-    }
-
-    static string Mode()
-    {
-        string mode = Environment.GetEnvironmentVariable("CROW_PUDDLE_BAKE");
-        if (!string.IsNullOrEmpty(mode)) return mode;
-        return DowngradeBuild.VitaData ? "on" : "off";  // the PS Vita, or CROW_VITA_DATA=1
     }
 
     static Transform Of(UnityEngine.Object target)
@@ -57,39 +44,57 @@ class CrowPuddleBake : UnityEditor.Build.IProcessSceneWithReport
         return false;
     }
 
-    // The objects a behaviour's serialized data references, and its strings (an FsmTemplate it references is read too).
-    static void Walk(UnityEngine.Object behaviour, List<UnityEngine.Object> objects, HashSet<string> names, HashSet<UnityEngine.Object> walked)
+    // Who references what inside the puddles: a target's transform -> the referrers' transforms; and every
+    // string of the scene's behaviours, into names.
+    static Dictionary<Transform, List<Transform>> Referrers(UnityEngine.SceneManagement.Scene scene, List<Transform> puddles, HashSet<string> names)
     {
-        if (!walked.Add(behaviour)) return;
-        var serialized = new SerializedObject(behaviour);
-        SerializedProperty property = serialized.GetIterator();
-        bool enter = true;
-        while (property.Next(enter))
+        var referrers = new Dictionary<Transform, List<Transform>>();
+        var walked = new HashSet<UnityEngine.Object>();
+        Action<Transform, UnityEngine.Object> note = (from, target) =>
         {
-            enter = true;
-            if (property.propertyType == SerializedPropertyType.ObjectReference)
+            Transform t = Of(target);
+            if (t == null || !puddles.Any(p => Inside(t, p))) return;
+            List<Transform> list;
+            if (!referrers.TryGetValue(t, out list)) referrers[t] = list = new List<Transform>();
+            list.Add(from);
+        };
+        var targets = new List<UnityEngine.Object>();
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
             {
-                UnityEngine.Object target = property.objectReferenceValue;
-                if (target != null)
+                if (behaviour == null) continue;  // a missing script
+                // The puddle's ManualRandomiser lists every random script in it (1,507), for its editor menu
+                // only; nothing calls it in the player and CrowStripScenes leaves it out (it checks for null).
+                if (behaviour.GetType().Name == "ManualRandomiser") continue;
+                targets.Clear();
+                if (behaviour.GetType().Name == "RandomVariant")
                 {
-                    objects.Add(target);
-                    if (target is ScriptableObject && target.GetType().Name == "FsmTemplate") Walk(target, objects, names, walked);
+                    // Its own list doesn't count; whatever else it holds does.
+                    var self = new List<UnityEngine.Object>();
+                    BuildUtil.Walk(behaviour, self, names, false, walked);
+                    var own = BuildUtil.Field(behaviour, "variants") as System.Collections.IList;
+                    targets.AddRange(self.Where(o => own == null || !own.Contains(o)));
                 }
-                enter = false;
+                else BuildUtil.Walk(behaviour, targets, names, false, walked);
+                foreach (UnityEngine.Object target in targets) note(behaviour.transform, target);
             }
-            else if (property.propertyType == SerializedPropertyType.String)
-            {
-                if (!string.IsNullOrEmpty(property.stringValue)) names.Add(property.stringValue);
-                enter = false;
-            }
-            else if (property.isArray && Plain.Contains(property.arrayElementType)) enter = false;
+            foreach (Joint joint in root.GetComponentsInChildren<Joint>(true))
+                if (joint.connectedBody != null) note(joint.transform, joint.connectedBody);
+            foreach (LODGroup group in root.GetComponentsInChildren<LODGroup>(true))
+                foreach (LOD lod in group.GetLODs())
+                    foreach (Renderer renderer in lod.renderers)
+                        if (renderer != null) note(group.transform, renderer);
+            foreach (ParticleSystem system in root.GetComponentsInChildren<ParticleSystem>(true))
+                if (system.shape.meshRenderer != null) note(system.transform, system.shape.meshRenderer);
         }
+        return referrers;
     }
 
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        string mode = Mode();
+        string mode = BuildUtil.Switch("CROW_PUDDLE_BAKE");
         if (mode == "off" || (mode != "all" && !Scenes.Contains(scene.name))) return;
         var puddles = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren<Transform>(true))
             .Where(t => t.name.StartsWith(Puddle, StringComparison.Ordinal)).ToList();
@@ -100,55 +105,15 @@ class CrowPuddleBake : UnityEditor.Build.IProcessSceneWithReport
         var reasons = new List<string>();
         try
         {
-            // Who references what inside the puddles: target's transform -> the referrers' transforms.
-            var referrers = new Dictionary<Transform, List<Transform>>();
             var names = new HashSet<string>();
-            var walked = new HashSet<UnityEngine.Object>();
-            Action<Transform, UnityEngine.Object> note = (from, target) =>
-            {
-                Transform t = Of(target);
-                if (t == null || !puddles.Any(p => Inside(t, p))) return;
-                List<Transform> list;
-                if (!referrers.TryGetValue(t, out list)) referrers[t] = list = new List<Transform>();
-                list.Add(from);
-            };
-            var targets = new List<UnityEngine.Object>();
-            foreach (GameObject root in scene.GetRootGameObjects())
-            {
-                foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
-                {
-                    if (behaviour == null) continue;  // a missing script
-                    // The puddle's ManualRandomiser lists every random script in it (1,507), for its editor menu
-                    // only; nothing calls it in the player and CrowStripScenes leaves it out (it checks for null).
-                    if (behaviour.GetType().Name == "ManualRandomiser") continue;
-                    targets.Clear();
-                    if (behaviour.GetType().Name == "RandomVariant")
-                    {
-                        // Its own list doesn't count; whatever else it holds does.
-                        var self = new List<UnityEngine.Object>();
-                        Walk(behaviour, self, names, walked);
-                        var own = CrowMeshCombineBake.Get(behaviour, "variants") as System.Collections.IList;
-                        targets.AddRange(self.Where(o => own == null || !own.Contains(o)));
-                    }
-                    else Walk(behaviour, targets, names, walked);
-                    foreach (UnityEngine.Object target in targets) note(behaviour.transform, target);
-                }
-                foreach (Joint joint in root.GetComponentsInChildren<Joint>(true))
-                    if (joint.connectedBody != null) note(joint.transform, joint.connectedBody);
-                foreach (LODGroup group in root.GetComponentsInChildren<LODGroup>(true))
-                    foreach (LOD lod in group.GetLODs())
-                        foreach (Renderer renderer in lod.renderers)
-                            if (renderer != null) note(group.transform, renderer);
-                foreach (ParticleSystem system in root.GetComponentsInChildren<ParticleSystem>(true))
-                    if (system.shape.meshRenderer != null) note(system.transform, system.shape.meshRenderer);
-            }
+            Dictionary<Transform, List<Transform>> referrers = Referrers(scene, puddles, names);
             var random = new System.Random(20221022);
             foreach (Transform puddle in puddles)
             {
                 foreach (MonoBehaviour script in puddle.GetComponentsInChildren<MonoBehaviour>(true))
                 {
                     if (script == null || script.GetType().Name != "RandomVariant") continue;  // gone with an outer pick
-                    var list = CrowMeshCombineBake.Get(script, "variants") as System.Collections.IList;
+                    var list = BuildUtil.Field(script, "variants") as System.Collections.IList;
                     if (list == null) continue;
                     var options = list.Cast<object>().OfType<GameObject>().Where(g => g != null).ToList();
                     if (options.Count == 0) continue;
@@ -194,10 +159,8 @@ class CrowPuddleBake : UnityEditor.Build.IProcessSceneWithReport
                     keptScripts++;
                     list.Clear();
                     list.Add(picked);
-                    FieldInfo awake = script.GetType().GetField("onAwake", BindingFlags.Public | BindingFlags.Instance);
-                    FieldInfo enable = script.GetType().GetField("onEnable", BindingFlags.Public | BindingFlags.Instance);
-                    if (awake != null) awake.SetValue(script, false);
-                    if (enable != null) enable.SetValue(script, false);
+                    BuildUtil.SetField(script, "onAwake", false);
+                    BuildUtil.SetField(script, "onEnable", false);
                 }
             }
         }
