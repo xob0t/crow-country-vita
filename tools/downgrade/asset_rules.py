@@ -1673,16 +1673,23 @@ DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectric
 # `-crow-lit-debug 1` switches the layers off at run time, for comparisons (22 Oct: there is no build
 # switch any more; CROW_DEPTH_LAYERS=off built without them and nothing recorded it, so a quickcode on
 # such a project didn't warn).
+# 26 Oct (CHAIN): the survey left out faces drawn twice with the same vertices; the PS Vita resolves such a
+# tie (and a gap under a depth step) differently in blocks of the screen, which change as the camera moves.
+# Corridor A's `black top/wall (12)` (by the door to Tolman's Office) draws its 14 m2 top with `liminal walls`
+# and again with the black UnlitVertColourOpaque: Windows shows the black, the PS Vita showed big
+# beige-and-black blocks; `liminal walls` -1 puts the black in front. Corridor B's wallpaper gap strips
+# (Fade, laid 0.46 mm over `hallway wall 1` in pairs, 1.8-1.9 m2 a pair) +1, in front of the wall.
 DEPTH_LAYERS = {
     -1: [
         'break room floor', 'cell floor 1', 'concrete floor 2', 'door metal 3', 'handgun ammo card 1',
-        'lab floor 1', 'leaf floor', 'main wall', 'mega byte magazine 2', 'metal trash can 2',
+        'lab floor 1', 'leaf floor', 'liminal walls', 'main wall', 'mega byte magazine 2', 'metal trash can 2',
         'parking concrete 1', 'road sign 1', 'shotgun case 2', 'shower 2', 'side wall 1', 'soda cup 2',
         'soil', 'stone 1', 'toy shop carpet', 'white painted wall',
     ],
     1: [
         'concrete floor 12', 'concrete gradient', 'concrete gradient 1', 'grass 4', 'handgun ammo box',
-        'soil circle', 'text', 'window blood',
+        'soil circle', 'text', 'wallpaper gap 1', 'wallpaper gap 2', 'wallpaper gap 3', 'wallpaper gap 4',
+        'wallpaper gap 5', 'wallpaper gap 6', 'wallpaper gap 7', 'wallpaper gap 8', 'window blood',
     ],
 }
 

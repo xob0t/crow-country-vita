@@ -204,6 +204,20 @@ Shader "CrowVita/Lit"
                 #endif
                 half3 c = BRDF3_Indirect(s.diffColor, s.specColor, gi.indirect, grazing, i.normalWorld.w);
                 c += BRDF3DirectSimple(s.diffColor, s.specColor, s.smoothness, rl) * (gi.light.color * ndotl);
+                // Metals: the main light also as a broad highlight (26 Oct, CHAIN). BRDF3's highlight is a
+                // narrow lobe from unity_NHxRoughness (about 0.7 at its peak for a smoothness of 0.5, where
+                // Windows' Standard, BRDF1's GGX, spreads about 2 over the curve), and a metal keeps little
+                // diffuse (metallic 0.745: a fifth of its albedo), so a metal lit by the main light alone
+                // drew nearly black: the inventory's chain, whose only light is the menu's directional one.
+                // As the fill and key lights below do, the main light lights the specular colour too, in
+                // proportion to how metallic the surface is (0 for dielectrics: their look is unchanged), on
+                // materials with highlights: the game darkens many walls and floors with metallic and
+                // highlights off (Corridor A's liminal walls and floor, 0.275), which Standard lights with
+                // no direct specular at all.
+                #if !defined(_SPECULARHIGHLIGHTS_OFF)
+                    half metal = saturate(1 - s.oneMinusReflectivity / unity_ColorSpaceDielectricSpec.a);
+                    c += s.specColor * (metal * ndotl) * gi.light.color;
+                #endif
 
                 // The fill and key lights, Lambert only; metals (specular colour, no diffuse) take them
                 // as broad highlights.
