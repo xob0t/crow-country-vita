@@ -108,7 +108,7 @@ namespace CrowCompat
             VitaLit.Change, GfxThreads.Change, Perf.Change, Cameras.Change, UiPark.Change, RigPark.Change,
             EnemyRebuild.Change, PhysCost.Change, Merge.ChangePlayer, FixedStep.Change, FastPaths.Change, Decor.Change,
             SharedClosures.Change, FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change,
-            Pad.Change, Clock.Change, TweenProbe.Change, GcHandles.Change
+            Pad.Change, Clock.Change, TweenProbe.Change, GcHandles.Change, AudioCensus.Change
         };
 
         // Applies a change list (-crow-ab, -crow-cycle, -crow-fight-cycle).

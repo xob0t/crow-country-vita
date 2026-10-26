@@ -25,11 +25,6 @@ using UnityEngine.UI;
 //                          taking turns; on: both (the
 //                          PS Vita's default); game: every frame, as the game has them (other
 //                          players' default). -crow-cycle / -crow-ab take rtcams=<mode>.
-//   -crow-fog-far off|on    on: the main camera's far plane at the linear fog's end and its background
-//                          the fog's colour (what lies wholly past the fog's end draws as flat fog
-//                          colour, so the picture is the same but where nothing was within the far
-//                          plane, black before); Pool has 53 of its 144 renderers in view there.
-//                          -crow-cycle / -crow-ab take fogfar=.
 //   -crow-menu-cull on|off  on (the PS Vita's default): while a full-screen menu covers the world (the
 //                          inventory and status screen, the map, the pause menu: their canvases
 //                          "UI Canvas Inventory OFF", "UI Canvas Map OFF", "UI Canvas Pause OFF" active)
@@ -88,60 +83,10 @@ namespace CrowCompat
             if (value != null) Diag.Guard("Cameras.RtCameras", () => Set(value));
             string menu = CrowFlags.Value(args, "-crow-menu-cull", "on");
             if (menu != null) Diag.Guard("MenuCull", () => MenuCull.Set(menu == "on"));
-            string fog = CrowFlags.Value(args, "-crow-fog-far");
-            if (fog != null) Diag.Guard("FogFar", () => FogFar(fog == "on"));
             string near = CrowFlags.Value(args, "-crow-near-plane", "1");
             if (CrowFlags.Value(args, "-crow-near-fog") == "off") NearPlane.FogMap(false);
             if (near != null) Diag.Guard("NearPlane", () => NearPlane.Set(near));
             UiPark.Install(args);  // UiPark.cs: the gameplay canvas's switched-off screens and the rig's parked (each guarded there)
-        }
-
-        // -crow-fog-far: the main camera's far plane and background, and what they were.
-        static bool fogFar;
-        static Camera fogCamera;
-        static float gameFar, setFar = -1f;
-        static Color gameBackground;
-        static float nextFog;
-
-        static void FogFar(bool on)
-        {
-            fogFar = on;
-            Hook();
-            nextFog = 0f;
-            if (!on) UndoFog();
-            Debug.Log("CROW_CAMERA fog far " + (on ? "on" : "off"));
-        }
-
-        static void UndoFog()
-        {
-            if (fogCamera != null && setFar > 0f && Mathf.Approximately(fogCamera.farClipPlane, setFar))
-            {
-                fogCamera.farClipPlane = gameFar;
-                fogCamera.backgroundColor = gameBackground;
-            }
-            fogCamera = null;
-            setFar = -1f;
-        }
-
-        static void FogTick(float now)
-        {
-            if (now < nextFog) return;
-            nextFog = now + 2f;
-            Camera camera = Camera.main;
-            if (camera == null || camera != fogCamera || (setFar > 0f && !Mathf.Approximately(camera.farClipPlane, setFar))) UndoFog();
-            if (camera == null || !RenderSettings.fog || RenderSettings.fogMode != FogMode.Linear) return;
-            float end = RenderSettings.fogEndDistance;
-            if (fogCamera == null)
-            {
-                if (end <= camera.nearClipPlane || end >= camera.farClipPlane) return;
-                fogCamera = camera;
-                gameFar = camera.farClipPlane;
-                gameBackground = camera.backgroundColor;
-            }
-            setFar = Mathf.Min(end, gameFar);
-            camera.farClipPlane = setFar;
-            Color fog = RenderSettings.fogColor;
-            camera.backgroundColor = new Color(fog.r, fog.g, fog.b, gameBackground.a);
         }
 
         static void Hook()
@@ -150,7 +95,7 @@ namespace CrowCompat
             hooked = true;
             CrowEvents.Loaded("Cameras.sceneLoaded", (scene, mode) =>
             {
-                nextScan = nextShown = nextFog = 0f;
+                nextScan = nextShown = 0f;
                 if (nextReport >= 0f) nextReport = Time.realtimeSinceStartup + 5f;
                 rendered.Clear();
             });
@@ -164,11 +109,6 @@ namespace CrowCompat
             if (key == "menucull")
             {
                 MenuCull.Set(value == "on");
-                return true;
-            }
-            if (key == "fogfar")
-            {
-                FogFar(value == "on");
                 return true;
             }
             if (key == "near")
@@ -284,7 +224,6 @@ namespace CrowCompat
                 Report();
                 nextReport = reportEvery > 0f ? now + reportEvery : -1f;
             }
-            if (fogFar) FogTick(now);
             if (mode == null || mode == "game") return;
             Restore();
             if (now >= nextScan && CrowEvents.Turn(nextScan <= 0f))  // the 2 s scans in a frame of their own

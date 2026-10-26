@@ -45,7 +45,6 @@ FUNCTIONS = {
     b'scePowerGetArmClockFrequency': 0xABC6F88F,
     b'scePowerSetGpuClockFrequency': 0x717DB06C,
     b'scePowerGetGpuClockFrequency': 0x1B04A1D6,
-    b'scePowerSetBusClockFrequency': 0xB8D7B3FB,
     b'scePowerGetBusClockFrequency': 0x478FE6F5,
     b'scePowerSetGpuXbarClockFrequency': 0xA7739DBE,
     b'scePowerGetGpuXbarClockFrequency': 0x0A750DEE,

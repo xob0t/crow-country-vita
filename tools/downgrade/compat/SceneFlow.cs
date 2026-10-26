@@ -431,7 +431,6 @@ namespace CrowCompat
         {
             long assets = clock.ElapsedMilliseconds;
             RestoreMasks();
-            Prewarm.ProBuilder();  // the inventory's ProBuilder meshes, once (Prewarm.cs)
             GC.Collect();
             string name = target;
             target = null;

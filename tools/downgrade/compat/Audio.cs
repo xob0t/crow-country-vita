@@ -114,6 +114,7 @@ namespace CrowCompat
             FilterGate.Install(Args);
             SharedReverb.Install(Args, FilterGate.GatesReverbs);
             Threads.MoveLoader(Args);
+            AudioCensus.Install(Args);  // AudioCensus.cs: -crow-audio-census, a probe
         }
 
         // From Diag.Install, after the probe's object has its Diag (and its AudioSource, for the tap).

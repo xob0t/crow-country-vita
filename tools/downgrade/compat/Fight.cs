@@ -51,6 +51,10 @@ using UnityEngine.SceneManagement;
 //                              the camera to another spot (as the setup puts them), pinned there from then on
 //                              (CROW_FIGHT_MOVE): enemies near the new spot wake from their culling, those at
 //                              the old one are culled
+//   -crow-fight-hold <type>:x,z  every enemy of that type (Lumber, Human_Guest...) held at x,z on the ground
+//                              (its body put back there each frame, its height left to physics): it walks
+//                              towards Mara on the spot, its scripts and body as busy as when it walks, at a
+//                              distance of the run's choosing (an enemy the fight wakes walks up to her)
 // The dumps of 16-18 Oct (-crow-fight-dump, -crow-fight-fixed, -crow-fight-fsm) and the fixed step's test
 // (-crow-fight physics, FixedStep.cs' rule since 19 Oct) are gone; CROW_FIGHT_TYPE, one line per enemy type at the
 // setup, stays.
@@ -67,7 +71,8 @@ using UnityEngine.SceneManagement;
 // Each window logs CROW_FIGHT_WINDOW: frame time mean and percentiles, the main thread's own run time
 // (PS Vita), player loop time by subsystem (from Quality.cs's LoopProfile: -crow-loop-profile, which
 // Fight installs if missing), collections and their pause (-crow-gc-log), the allocation rate (IL2CPP),
-// enemies alive and awake, shots and kills, the lowest free main memory (PS Vita); the windows'
+// enemies alive and awake, shots and kills, the lowest free main memory (PS Vita), each awake enemy's distance and
+// renderers on and drawn at the window's end (near=); the windows'
 // CROW_LOOP and CROW_CAMS lines follow (cycle=fight-wN). Then CROW_FIGHT_SUMMARY over all windows,
 // and the player quits.
 // Part of CrowCompat; see Compat2018.cs.
@@ -169,6 +174,18 @@ namespace CrowCompat
             explosionKills = CrowFlags.Value(args, "-crow-fight-kill-mode") == "explosion";
             noAim = CrowFlags.Value(args, "-crow-fight-aim") == "off";
             extraGlobals = CrowFlags.Value(args, "-crow-fight-globals");
+            string holdValue = CrowFlags.Value(args, "-crow-fight-hold");
+            if (holdValue != null)
+            {
+                int colon = holdValue.LastIndexOf(':');
+                float[] place = colon > 0 ? Floats(holdValue.Substring(colon + 1)) : null;
+                if (place != null && place.Length == 2)
+                {
+                    holdType = holdValue.Substring(0, colon);
+                    holdAt = new Vector2(place[0], place[1]);
+                }
+                else Debug.Log("CROW_FIGHT bad -crow-fight-hold " + holdValue + ": <type>:x,z");
+            }
             string movesValue = CrowFlags.Value(args, "-crow-fight-moves");
             if (movesValue != null)
                 foreach (string move in movesValue.Split(';'))
@@ -492,9 +509,6 @@ namespace CrowCompat
         static readonly List<KeyValuePair<float, float[]>> moves = new List<KeyValuePair<float, float[]>>();
         static float fightStart, moveCheckAt = -1f;
 
-        // When the fight started (CROW_FIGHT_START, realtimeSinceStartup), or -1 before (EnemyRebuild's shots).
-        internal static float StartedAt { get { return phase >= Phase.Engage ? fightStart : -1f; } }
-
         // -crow-fight-moves: Mara and the camera to the next spot, pinned there.
         static void Move(float[] place, float now)
         {
@@ -687,22 +701,53 @@ namespace CrowCompat
             return enemy.SpawnState == null || enemy.SpawnState() == "currently alive";
         }
 
-        // The enemy shots (EnemyRebuild.cs): the last enemy the fight killed, and one awake enemy of each type.
-        internal static GameObject LastKilled;
-        internal static GameObject PlayerBody { get { return body; } }
-        internal static float LastKilledAt = -1f;
-
-        internal static Dictionary<string, GameObject> AwakeByType()
-        {
-            var found = new Dictionary<string, GameObject>();
-            foreach (Enemy enemy in enemies)
-                if (IsAwake(enemy) && !found.ContainsKey(enemy.Type)) found[enemy.Type] = enemy.Root;
-            return found;
-        }
-
         static bool IsAwake(Enemy enemy)
         {
             return IsAlive(enemy) && (enemy.CullState == null || enemy.CullState() == "visible");
+        }
+
+        static string holdType;
+        static Vector2 holdAt;
+
+        // -crow-fight-hold: the type's enemies back on their spot, their height and velocity's fall kept.
+        static void Hold()
+        {
+            foreach (Enemy enemy in enemies)
+            {
+                if (enemy.Root == null || enemy.Type.Replace("Enemy_", "").Replace(' ', '_') != holdType) continue;
+                Rigidbody rigid = enemy.Root.GetComponent<Rigidbody>();
+                if (rigid == null) continue;
+                Vector3 place = rigid.position;
+                place.x = holdAt.x;
+                place.z = holdAt.y;
+                rigid.position = place;
+                enemy.Root.transform.position = place;
+                rigid.velocity = new Vector3(0f, rigid.velocity.y, 0f);
+            }
+        }
+
+        // The awake enemies at the window's end (the window line's near=): type, metres from Mara on the ground and
+        // above her, renderers on and of those drawn in the last frame, as "Lumber:5.2:-0.3:31/27,..."; "-" for none.
+        static string Near()
+        {
+            var parts = new List<string>();
+            foreach (Enemy enemy in enemies)
+            {
+                if (!IsAwake(enemy)) continue;
+                Rigidbody rigid = enemy.Root.GetComponentInChildren<Rigidbody>();  // the root's, or its walking body's
+                Vector3 offset = (rigid != null ? rigid.position : enemy.Root.transform.position) - pinned;
+                float above = offset.y;
+                offset.y = 0f;
+                int on = 0, drawn = 0;
+                foreach (Renderer renderer in enemy.Root.GetComponentsInChildren<Renderer>(false))
+                {
+                    if (!renderer.enabled) continue;
+                    on++;
+                    if (renderer.isVisible) drawn++;
+                }
+                parts.Add(enemy.Type.Replace("Enemy_", "").Replace(' ', '_') + ":" + F(offset.magnitude) + ":" + F(above) + ":" + on + "/" + drawn);
+            }
+            return parts.Count == 0 ? "-" : string.Join(",", parts.ToArray());
         }
 
         static int Alive(bool awake)
@@ -949,6 +994,7 @@ namespace CrowCompat
                 nextRefill = now + 1f;
                 if (setBox != null) setBox(boxMax);
             }
+            if (holdType != null) Hold();
             if (body != null && now >= nextPin)
             {
                 nextPin = now + 0.5f;
@@ -1103,8 +1149,6 @@ namespace CrowCompat
                 killed++;
                 enemy.Forced = true;
                 victim = enemy;
-                LastKilled = enemy.Root;
-                LastKilledAt = Time.realtimeSinceStartup;
                 victimCheck = Time.realtimeSinceStartup + 1.5f;
             }
             catch (Exception e)
@@ -1357,6 +1401,7 @@ namespace CrowCompat
                     if (!rigid.IsSleeping()) debrisAwake++;
                 }
             line.Append(" debris=").Append(debrisBodies).Append('/').Append(debrisAwake);
+            line.Append(" near=").Append(Near());
             int tweens = PlayingTweens();
             if (tweens >= 0) line.Append(" tweens=").Append(tweens);
             if (EnemySplit.Report() != null) line.Append(' ').Append(EnemySplit.Report());

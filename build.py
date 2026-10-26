@@ -84,13 +84,12 @@ def rip_current(args):
     (pipeline.rip_is_current); the rip stage itself always exports again."""
     if args.start != 'rip':
         return True
-    if not (WORK / f'rip-{TARGET}' / 'crow-rip.txt').exists():  # pipeline.RIP_STAMP: no export yet
-        return False
     import pipeline
 
-    check = getattr(pipeline, 'rip_is_current', None)
+    if not (WORK / f'rip-{TARGET}' / pipeline.RIP_STAMP).exists():  # no export yet
+        return False
     game = Path(args.game) if args.game else default_game()
-    return bool(check) and check(game, WORK / f'rip-{TARGET}', TARGET)
+    return pipeline.rip_is_current(game, WORK / f'rip-{TARGET}', TARGET)
 
 
 def build(args):

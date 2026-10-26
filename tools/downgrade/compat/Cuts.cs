@@ -54,8 +54,6 @@ using UnityEngine.SceneManagement;
 //                                  frame; first leaves only the first with a name on (looked at every 2 s) and
 //                                  Unity's joysticks past it unread (rewriter CutsRewired). Taking the others from
 //                                  player 0 didn't hold (Rewired gives them back) nor save anything.
-//   -crow-input-bench              8 s after the first area load, the cost of those Unity input calls (CROW_INPUT_BENCH)
-//                                  and Rewired's players, controllers and maps (CROW_REWIRED_REPORT)
 // Test key: pmglobal=<name>:true|false (a PlayMaker global bool, e.g. pause mode: the enemies held as in a menu).
 // cuts=on|off also sets FixedStep's ground cache (groundcache=, -crow-ground-cache; 4 steps with the cuts) and Decor's
 // visible rate (decorvisible=, -crow-decor-visible; 2 with the cuts), which those modules own.
@@ -105,7 +103,6 @@ namespace CrowCompat
             if ((value = CrowFlags.Value(args, "-crow-rewired-mouse")) != null) Change("rwmouse", value);
             if ((value = CrowFlags.Value(args, "-crow-rewired-joysticks")) != null) Change("rwjoys", value);
             log = CrowFlags.Has(args, "-crow-cuts-log");
-            if (CrowFlags.Has(args, "-crow-input-bench")) InputBench.Install();
             CrowEvents.Unloaded("Cuts.sceneUnloaded", scene => FsmGate.Clear());
             CrowEvents.Loaded("Cuts.sceneLoaded", (scene, mode) => stainsAt = Time.realtimeSinceStartup + 2f);
             CrowEvents.Canvases("Cuts.Frame", Frame);
@@ -727,62 +724,7 @@ namespace CrowCompat
         }
     }
 
-    // -crow-input-bench: what Rewired's per-frame Unity input calls cost on this player.
-    static class InputBench
-    {
-        static float due = -1f;
-
-        internal static void Install()
-        {
-            CrowEvents.Loaded("InputBench.sceneLoaded", (scene, mode) =>
-            {
-                if (due == -1f && Scenes.IsArea(scene))
-                    due = Time.realtimeSinceStartup + 8f;
-            });
-            CrowEvents.Canvases("InputBench.willRenderCanvases", () =>
-            {
-                if (due < 0f || Time.realtimeSinceStartup < due) return;
-                due = -2f;
-                Run();
-                RewiredProbe.Report();
-            });
-        }
-
-        static double Measure(Action action, int count)
-        {
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-            for (int i = 0; i < count; i++) action();
-            watch.Stop();
-            return watch.Elapsed.TotalMilliseconds * 1000.0 / count;
-        }
-
-        static void Run()
-        {
-            var line = new StringBuilder("CROW_INPUT_BENCH us/call:");
-            float sink = 0f;
-            bool flag = false;
-            string[] names = Input.GetJoystickNames();
-            line.Append(" GetJoystickNames=").Append(Measure(() => names = Input.GetJoystickNames(), 100).ToString("0.0"));
-            line.Append(" GetAxis(Joy1Axis1)=").Append(Measure(() => sink += Input.GetAxis("Joy1Axis1"), 500).ToString("0.0"));
-            line.Append(" GetAxis(Joy1Axis29)=").Append(Measure(() => sink += Input.GetAxis("Joy1Axis29"), 500).ToString("0.0"));
-            line.Append(" GetAxisRaw(Joy1Axis1)=").Append(Measure(() => sink += Input.GetAxisRaw("Joy1Axis1"), 500).ToString("0.0"));
-            line.Append(" GetAxisRaw(MouseAxis1)=").Append(Measure(() =>
-            {
-                try { sink += Input.GetAxisRaw("MouseAxis1"); } catch (Exception) { }
-            }, 200).ToString("0.0"));
-            line.Append(" GetButton(MouseButton0)=").Append(Measure(() =>
-            {
-                try { flag |= Input.GetButton("MouseButton0"); } catch (Exception) { }
-            }, 200).ToString("0.0"));
-            line.Append(" GetKey(Joystick1Button0)=").Append(Measure(() => flag |= Input.GetKey(KeyCode.Joystick1Button0), 500).ToString("0.0"));
-            line.Append(" mousePosition=").Append(Measure(() => sink += Input.mousePosition.x, 500).ToString("0.0"));
-            line.Append(" joysticks=").Append(names.Length).Append(" [").Append(string.Join("|", names)).Append("]");
-            Debug.Log(line.ToString() + (sink > 1e9f || flag ? "" : ""));
-        }
-    }
-
-    // Rewired's players and maps, by its public API through reflection (-crow-input-bench).
-    // Its InputManager's time (Begin/End, rewriter CutsRewired) for -crow-cuts-log, and the joystick rule
+    // Rewired through its public API by reflection: its InputManager's time (Begin/End, rewriter CutsRewired) for -crow-cuts-log, and the joystick rule
     // (-crow-rewired-joysticks first|all, Cuts.cs): Unity on the PS Vita reports four joysticks, the pad and
     // three with no name, and Rewired gives all four to player 0 and polls each (29 axes by name, 20 buttons)
     // every frame; first keeps only the first joystick with a name.
@@ -895,57 +837,6 @@ namespace CrowCompat
             Type input = Type.GetType("Rewired.ReInput, Rewired_Core");
             System.Reflection.PropertyInfo property = input == null ? null : input.GetProperty(name, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
             return property == null ? null : property.GetValue(null, null);
-        }
-
-        static System.Collections.IEnumerable Players()
-        {
-            return Get(Static("players"), "AllPlayers") as System.Collections.IEnumerable ?? new object[0];
-        }
-
-        static System.Collections.IEnumerable Maps(object player)
-        {
-            object maps = Get(Get(player, "controllers"), "maps");
-            System.Reflection.MethodInfo all = null;
-            if (maps != null)
-                foreach (System.Reflection.MethodInfo method in maps.GetType().GetMethods())
-                    if (method.Name == "GetAllMaps" && !method.IsGenericMethodDefinition && method.GetParameters().Length == 0) all = method;
-            return all == null ? new object[0] : (System.Collections.IEnumerable)all.Invoke(maps, null);
-        }
-
-        internal static void Report()
-        {
-            try
-            {
-                var line = new StringBuilder("CROW_REWIRED_REPORT");
-                object mapping = Static("mapping");
-                var actions = Get(mapping, "Actions") as System.Collections.ICollection;
-                var categories = Get(mapping, "MapCategories") as System.Collections.ICollection;
-                line.Append(" actions=").Append(actions == null ? -1 : actions.Count).Append(" categories=").Append(categories == null ? -1 : categories.Count);
-                foreach (object player in Players())
-                {
-                    object controllers = Get(player, "controllers");
-                    line.Append(" | player ").Append(Get(player, "id")).Append(' ').Append(Get(player, "name")).Append(" playing=").Append(Get(player, "isPlaying"))
-                        .Append(" joysticks=").Append(Get(controllers, "joystickCount")).Append(" kb=").Append(Get(controllers, "hasKeyboard")).Append(" mouse=").Append(Get(controllers, "hasMouse"));
-                    var byType = new Dictionary<string, int[]>();
-                    foreach (object map in Maps(player))
-                    {
-                        string type = Convert.ToString(Get(map, "controllerType"));
-                        int[] counts;
-                        if (!byType.TryGetValue(type, out counts)) byType[type] = counts = new int[3];
-                        counts[0]++;
-                        if ((bool)Get(map, "enabled")) counts[1]++;
-                        var elements = Get(map, "AllMaps") as System.Collections.ICollection;
-                        if (elements != null) counts[2] += elements.Count;
-                    }
-                    foreach (KeyValuePair<string, int[]> pair in byType)
-                        line.Append(' ').Append(pair.Key).Append("=maps").Append(pair.Value[0]).Append("/on").Append(pair.Value[1]).Append("/elements").Append(pair.Value[2]);
-                }
-                Debug.Log(line.ToString());
-            }
-            catch (Exception exception)
-            {
-                Debug.Log("CROW_REWIRED_REPORT failed: " + exception);
-            }
         }
     }
 }

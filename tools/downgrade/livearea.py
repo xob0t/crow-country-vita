@@ -22,7 +22,7 @@ import hashlib
 import urllib.request
 from pathlib import Path
 
-from common import WORK, log
+from common import STEAM_APP_ID, WORK, log
 from PIL import Image
 
 OUT = WORK / 'livearea'
@@ -30,7 +30,6 @@ STORE = OUT / 'store'
 FILES = ['icon0.png', 'bg0.png', 'gate.png', 'pic0.png', 'splash.png']
 PALETTE_COLORS = 256  # 8-bit indexed
 
-STEAM_APP_ID = '1996010'
 CDN = f'https://cdn.akamai.steamstatic.com/steam/apps/{STEAM_APP_ID}/'
 # Cached name: (URL, SHA-256 of the file the crops below were made for). A changed file is only
 # reported: Valve can replace store art at the same URL.

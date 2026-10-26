@@ -142,14 +142,6 @@ def run(command):
     subprocess.run([str(c) for c in command], check=True)
 
 
-def unity_files(version):
-    """A folder of Unity's files extracted from its installers, which earlier setups of The Drifter's port
-    made. Nothing reads it any more: every stage reads the installed editor (editor_data), which the
-    editor's own build uses too, so quickcode's linker and IL2CPP are the full build's. doctor.py still
-    names it."""
-    return EXTERNAL / f'unity-{version}'
-
-
 def editor_folder(version):
     """The installed editor's Editor folder (setup.py installs it there)."""
     return EDITORS / version / 'Editor'
@@ -645,8 +637,9 @@ class Switch(NamedTuple):
 BUILD_SWITCHES = {
     # 1: a Windows player with the PS Vita's scene data (the defaults below as on the PS Vita), for measurements.
     'CROW_VITA_DATA': Switch('build', '0 1', '0', '0'),
-    # The Enemy Puddle's random looks picked at build time (unity/PuddleBake.cs): on, Haunted Hilltop's; all.
-    'CROW_PUDDLE_BAKE': Switch('build', 'on all off', 'on', 'off'),
+    # Enemies' random looks (RandomVariant) picked at build time (unity/VariantBake.cs): on, Haunted Hilltop's Enemy
+    # Puddle and every Lumber; all, also the puddle in every scene.
+    'CROW_VARIANT_BAKE': Switch('build', 'on all off', 'on', 'off'),
     # The player's ProBuilder meshes built at build time (unity/ProBuilderMeshes.cs); bake keeps the components.
     'CROW_PROBUILDER': Switch('build', 'on bake off', 'on', 'off'),
     # The static merge (unity/MergeScenes.cs, compat/Merge.cs); ab keeps the parts' meshes for -crow-merge off.

@@ -11,7 +11,6 @@ int scePowerSetArmClockFrequency(int mhz);
 int scePowerGetArmClockFrequency(void);
 int scePowerSetGpuClockFrequency(int mhz);
 int scePowerGetGpuClockFrequency(void);
-int scePowerSetBusClockFrequency(int mhz);
 int scePowerGetBusClockFrequency(void);
 int scePowerSetGpuXbarClockFrequency(int mhz);
 int scePowerGetGpuXbarClockFrequency(void);
@@ -56,13 +55,7 @@ PRX_EXPORT int CrowClockGetGpu(void)
 	return scePowerGetGpuClockFrequency();
 }
 
-/* The bus clock (the memory bus; at most 222 MHz). Returns the system's result. */
-PRX_EXPORT int CrowClockSetBus(int mhz)
-{
-	return scePowerSetBusClockFrequency(mhz);
-}
-
-/* The bus clock in MHz. */
+/* The bus clock in MHz (the memory bus; only logged: an application's set returns 0 and changes nothing). */
 PRX_EXPORT int CrowClockGetBus(void)
 {
 	return scePowerGetBusClockFrequency();

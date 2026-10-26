@@ -313,11 +313,11 @@ COMPAT_SOURCES = [
             'MapPan',
             'Clock',
             'Audio',
+            'AudioCensus',
             'Threads',
             'Alloc',
             'IdleAudio',
             'VitaLit',
-            'Prewarm',
             'Fight',
             'EnemyCost',
             'ActionProfile',
@@ -349,7 +349,7 @@ COMPAT_MODULES = [
     'ScreenCaptureModule',
     'PhysicsModule',  # compat/Memory.cs: MeshCollider.sharedMesh
     'AnimationModule',  # compat/Decor.cs: Animator, Animation
-    'ImageConversionModule',  # compat/EnemyRebuild.cs: the enemy shots' PNGs
+    'ImageConversionModule',  # compat/PlayerMerge.cs: the player merge's look-check PNGs
 ]
 REWRITER_SOURCES = [
     HERE / 'DowngradeAssemblies.cs',
@@ -975,12 +975,12 @@ def check_build_output(output: Path, platform: str, started: float, log_path: Pa
 # area whose MeshCombineStudio bake failed combines at run time again (Station Square -> Pool ran out
 # of memory that way). check_build_output prints their failure lines and stops: MergeScenes.cs and
 # PlayerMerge.cs write "<step> <scene> failed: <exception>"; an enemy type's or the player's atlas
-# (EnemyRebuild.cs, compat/PlayerMerge.cs) "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>";
-# MeshCombineBake.cs (the bake's and the strip's), ProBuilderMeshes.cs and PuddleBake.cs a summary with
+# (compat/MergeEnemies.cs, compat/PlayerMerge.cs) "CROW_ENEMY_ATLAS scene=<scene> type=<type> failed: <exception>";
+# MeshCombineBake.cs (the bake's and the strip's), ProBuilderMeshes.cs and VariantBake.cs a summary with
 # failed=N. Any other error (a script without a failure line) counts in DOWNGRADE_BUILD's errors.
 SCENE_STEP_FAILED = re.compile(
     r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE|CROW_ENEMY_ATLAS) .* failed: .*$'
-    r'|^DOWNGRADE_(?:MCS|PROBUILDER|PUDDLE) .*\bfailed=[1-9].*$',
+    r'|^DOWNGRADE_(?:MCS|PROBUILDER|VARIANT_BAKE) .*\bfailed=[1-9].*$',
     re.M,
 )
 

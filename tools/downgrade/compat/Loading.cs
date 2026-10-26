@@ -22,7 +22,6 @@ using Debug = UnityEngine.Debug;
 //                           -crow-gc-log the collections in the window, with -crow-load-stats the sums)
 //   -crow-load-stats        PlayMaker's load-time methods timed per thread (CROW_LOADSTATS after each
 //                           area load): OnAfterDeserialize, InitData, LoadActions, CreateAction, ...
-//   -crow-read-test <files> read build files at startup and log the card's MB/s (CROW_READ)
 // Loading.Install also installs SceneFlow.cs' PS Vita defaults: the player's scene beside the title (MaraScene), the
 // title read while the logos play (ScenePrefetch; -crow-no-prefetch leaves it to the logos) and the empty scene
 // between areas (SceneGap; -crow-no-gap leaves it out on the PS Vita, -crow-gap puts it in elsewhere).
@@ -40,8 +39,6 @@ namespace CrowCompat
             if (CrowFlags.Has(args, "-crow-load-trace"))
                 Diag.Guard("Trace", () => Trace.Install(CrowFlags.Number(args, "-crow-load-trace", 200f)));
             if (CrowFlags.Has(args, "-crow-load-stats")) Diag.Guard("LoadStats", LoadStats.Install);
-            string read = CrowFlags.Value(args, "-crow-read-test");
-            if (read != null) Diag.Guard("ReadTest", () => ReadTest(read));
             if (CrowFlags.Has(args, "-crow-load-cpu"))
             {
                 if (CrowFlags.Has(args, "-crow-audio")) Debug.Log("CROW_LOADCPU off: -crow-audio reads the threads' shares (one reader at a time)");
@@ -125,40 +122,6 @@ namespace CrowCompat
                 }
                 Array.Clear(ticks, 0, ticks.Length);
             }
-        }
-
-        // -crow-read-test <files>: how fast the card reads the build's data. On a thread of its own at
-        // startup, each file (comma-separated, under Application.dataPath, e.g. level5,sharedassets5.assets)
-        // read whole, in 1 MB blocks and then in 64 KB blocks (CROW_READ lines: MB, ms, MB/s).
-        static void ReadTest(string files)
-        {
-            string root = Application.dataPath;
-            new System.Threading.Thread(() =>
-            {
-                foreach (int block in new[] { 1 << 20, 64 << 10 })
-                    foreach (string file in files.Split(','))
-                    {
-                        string path = root + "/" + file;
-                        try
-                        {
-                            var buffer = new byte[block];
-                            var watch = Stopwatch.StartNew();
-                            long total = 0;
-                            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.Read, 4096))
-                            {
-                                int n;
-                                while ((n = stream.Read(buffer, 0, block)) > 0) total += n;
-                            }
-                            double ms = watch.Elapsed.TotalMilliseconds;
-                            Debug.Log("CROW_READ " + file + " block=" + (block >> 10) + "KB MB=" + (total / 1048576.0).ToString("F1") + " ms=" + ms.ToString("F0") +
-                                      " MB/s=" + (total / 1048576.0 / (ms / 1000.0)).ToString("F1"));
-                        }
-                        catch (Exception e)
-                        {
-                            Debug.Log("CROW_READ " + path + " failed: " + e.GetType().Name + " " + e.Message);
-                        }
-                    }
-            }) { IsBackground = true, Name = "CrowReadTest" }.Start();
         }
 
         // -crow-load-cpu [ms]: through each area load (from the gap's first step, or any scene load,

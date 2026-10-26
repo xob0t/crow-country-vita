@@ -30,6 +30,7 @@ from common import (
     ROOT,
     SOURCE_VERSION,
     STEAM,
+    STEAM_APP_ID,
     STEAM_GAME,
     TARGET,
     WORK,
@@ -37,7 +38,6 @@ from common import (
     editor_data,
     env,
     file_hash,
-    unity_files,
 )
 from rich.text import Text
 
@@ -105,7 +105,6 @@ DOTNET = EXTERNAL / 'dotnet'
 GAME_DIR = STEAM_GAME.name
 GAME_EXE = 'Crow Country.exe'
 GAME_DATA = 'Crow Country_Data'
-STEAM_APP_ID = '1996010'
 # The game's GOG product ID, and the folder GOG installs it in by default.
 GOG_ID = '1109825617'
 GOG_GAME = Path(r'C:\GOG Games\Crow Country')
@@ -558,18 +557,14 @@ def check_editor(module='editor'):
 def check_editor_data(version, vita):
     """The editor files the pipeline reads (common.editor_data)."""
     data = editor_data(version)
-    extracted = data.is_relative_to(unity_files(version))
     if not data.exists():
         return Check("Unity's files", False, f'no {data} (comes with the editor)', SETUP)
     gaps = missing(data, EDITOR_DATA_CHECKED + (EDITOR_DATA_CHECKED_VITA if vita else []))
     return Check(
         "Unity's files",
         not gaps,
-        f'{data} lacks ' + ', '.join(gaps)
-        if gaps
-        else str(data) + (' (tools/external, used instead of the editor)' if extracted else ''),
-        f'{SETUP}{" --vita" if vita else ""}'
-        + (f'; or delete {unity_files(version)}, which the pipeline reads instead of the editor' if extracted else ''),
+        f'{data} lacks ' + ', '.join(gaps) if gaps else str(data),
+        f'{SETUP}{" --vita" if vita else ""}',
     )
 
 
