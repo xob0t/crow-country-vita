@@ -33,7 +33,8 @@ using UnityEngine.SceneManagement;
 //            goes directly under it
 // The game's random transforms, materials and flips that run once in Awake (com.sfbgames' Random*)
 // run at build time instead and are switched off, so the merged mesh has the part's pick (the game
-// meant this for slow platforms: AbstractRandomElement.ShouldRandomiseAtRuntimeOnSlowPlatforms).
+// meant this for slow platforms: AbstractRandomElement.ShouldRandomiseAtRuntimeOnSlowPlatforms),
+// each with its own seed (PickSeed), so every build picks alike.
 // A renderer merges when nothing on it or above it excludes, it has no own mark, its mesh (at most
 // MaxPartVertices) renders triangles with opaque or cutout materials and no lightmap, and every
 // object between it and its anchor (the nearest anchor above it, or the scene) is active. Parts group
@@ -51,7 +52,7 @@ using UnityEngine.SceneManagement;
 // material, whatever their materials, lights and cell (they move); the enemy's MeshCombineStudio combiner,
 // which would otherwise combine them per material when the enemy first switches on, is switched off; and
 // its random materials, rotations and scales are picked once at build time even where the game picks them
-// again at each OnEnable (a fixed look per build, accepted for the PS Vita). The types in SeeThroughEnemies
+// again at each OnEnable (a fixed look, the same in every build, accepted for the PS Vita). The types in SeeThroughEnemies
 // (the Lumber) merge their see-through parts too. Their own budget is EnemyMaxBytes per scene, their part size EnemyMaxPartVertices. When the build drops the parts' meshes
 // (CROW_MERGE=on) it also removes the enemies' merged parts that are bare leaves (Strip below; not with
 // CROW_MERGE_ENEMY_STRIP=off).
@@ -528,9 +529,62 @@ namespace CrowCompat
             return analysis;
         }
 
-        // The enemy mode: a random pick on an enemy's part made once (at build time; at run time the game's
-        // pick stays) and the script's picks at Awake and OnEnable off. False when not an enemy's or the
-        // script can't be run.
+        // A random pick's seed, from where its script is: the scene's path, each object's name from the scene's root
+        // down with its place among the siblings of that name, and the script's type with its place among the
+        // object's scripts of that type (FNV-1a). Every pick the build makes (the game's DoRandom below, unity/
+        // VariantBake.cs' variants) seeds UnityEngine.Random with its own, so two builds of the same project pick
+        // alike, and a change elsewhere in the scene leaves the other picks as they were. Before, the picks drew on
+        // the editor's unseeded Random, and each build picked differently (26 Oct, LUMBER).
+        public static int PickSeed(Component component)
+        {
+            var key = new StringBuilder(component.gameObject.scene.path);
+            var path = new List<string>();
+            for (Transform t = component.transform; t != null; t = t.parent)
+            {
+                int same = 0;
+                if (t.parent != null)
+                {
+                    for (int i = 0; i < t.GetSiblingIndex(); i++)
+                        if (t.parent.GetChild(i).name == t.name) same++;
+                }
+                else
+                {
+                    foreach (GameObject root in t.gameObject.scene.GetRootGameObjects())
+                    {
+                        if (root.transform == t) break;
+                        if (root.name == t.name) same++;
+                    }
+                }
+                path.Add(t.name + "#" + same);
+            }
+            for (int i = path.Count - 1; i >= 0; i--) key.Append('/').Append(path[i]);
+            Component[] kind = component.GetComponents(component.GetType());
+            key.Append('|').Append(component.GetType().Name).Append('#').Append(Array.IndexOf(kind, component));
+            uint hash = 2166136261;
+            foreach (char c in key.ToString())
+            {
+                hash ^= c;
+                hash *= 16777619;
+            }
+            return (int)hash;
+        }
+
+        // The game's random pick (its DoRandom, which draws on UnityEngine.Random) made with the script's PickSeed;
+        // the editor's own Random state is left as it was.
+        static void SeededPick(Component component, MethodInfo random)
+        {
+            UnityEngine.Random.State state = UnityEngine.Random.state;
+            UnityEngine.Random.InitState(PickSeed(component));
+            try
+            {
+                random.Invoke(component, null);
+            }
+            finally
+            {
+                UnityEngine.Random.state = state;
+            }
+        }
+
         // A random pick made at Awake made now, at build time, and the script's Awake pick off: false when the script
         // can't be run so (no DoRandom or onAwake).
         static bool BakeAwakePick(Component component, Analysis analysis)
@@ -538,19 +592,22 @@ namespace CrowCompat
             MethodInfo random = component.GetType().GetMethod("DoRandom", Instance);
             FieldInfo awake = component.GetType().GetField("onAwake", Instance);
             if (random == null || awake == null) return false;
-            random.Invoke(component, null);
+            SeededPick(component, random);
             awake.SetValue(component, false);
             analysis.baked++;
             return true;
         }
 
+        // The enemy mode: a random pick on an enemy's part made once (at build time; at run time the game's
+        // pick stays) and the script's picks at Awake and OnEnable off. False when not an enemy's or the
+        // script can't be run.
         static bool EnemyPick(Component component, Transform transform, Analysis analysis, bool bake)
         {
             if (!analysis.InEnemy(transform)) return false;
             MethodInfo random = component.GetType().GetMethod("DoRandom", Instance);
             FieldInfo awake = component.GetType().GetField("onAwake", Instance), enable = component.GetType().GetField("onEnable", Instance);
             if (random == null || awake == null) return false;
-            if (bake) random.Invoke(component, null);
+            if (bake) SeededPick(component, random);
             awake.SetValue(component, false);
             if (enable != null) enable.SetValue(component, false);
             analysis.baked++;
@@ -638,8 +695,8 @@ namespace CrowCompat
         // game's code). The random transforms run once in Awake (onAwake) or at every OnEnable: with
         // bake (the build), those that run in Awake only run now and are switched off, so that the
         // merged mesh has the random rotation or scale the part will have (the game meant to do this
-        // on slow platforms: AbstractRandomElement.ShouldRandomiseAtRuntimeOnSlowPlatforms), and each
-        // build keeps its own pick; at run time they have run already. Returns whether it knew it.
+        // on slow platforms: AbstractRandomElement.ShouldRandomiseAtRuntimeOnSlowPlatforms), and every
+        // build makes the same pick (PickSeed); at run time they have run already. Returns whether it knew it.
         static bool Known(Component component, string name, Analysis analysis, bool bake)
         {
             Transform transform = component.transform;

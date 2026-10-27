@@ -96,6 +96,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 continue;
             }
             Set(combiner, "combineInRuntime", false);
+            Set(combiner, "combineTime", 0f);  // the combining's stopwatch time, written with the scene: not the same in two builds
             baked++;
             before += (int)Get(combiner, "originalTotalVertices");
             after += (int)Get(combiner, "newTotalVertices");

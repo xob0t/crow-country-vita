@@ -18,7 +18,9 @@ using UnityEngine;
 //   the picks made, 211 (Underground NW's): most of the rest is its translucent skin, which Merge.SeeThroughEnemies
 //   lets merge.
 // Here each RandomVariant of those enemies picks once, in hierarchy order (an outer pick first, so the variants it
-// drops take their inner scripts with them; System.Random with a fixed seed per scene, so every build picks alike):
+// drops take their inner scripts with them), as its DoRandom would (UnityEngine.Random.Range) but with its own seed
+// (CrowCompat's Merge.PickSeed: the scene, the script's place in it), so every build picks alike and a change
+// elsewhere in the scene leaves the other picks as they were:
 // the picked variant is switched on, the others are destroyed and the script goes, so the static merge after this
 // (callback order) sees plain parts. An unpicked variant stays, switched off as its Awake would leave it, if anything
 // outside it references it or anything in it (a behaviour's serialized data, PlayMaker FSMs and their templates
@@ -36,6 +38,8 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
         { "Enemy Puddle", new[] { "Haunted Hilltop" } },
         { "Enemy Lumber", null },
     };
+
+    static Func<Component, int> pickSeed;
 
     public int callbackOrder
     {
@@ -127,9 +131,21 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
         var reasons = new List<string>();
         try
         {
+            if (pickSeed == null)
+            {
+                Type merge = Type.GetType("CrowCompat.Merge, CrowCompat");
+                System.Reflection.MethodInfo method = merge == null ? null : merge.GetMethod("PickSeed");
+                if (method == null) throw new InvalidOperationException("No CrowCompat.Merge.PickSeed in the project's CrowCompat.dll");
+                pickSeed = (Func<Component, int>)Delegate.CreateDelegate(typeof(Func<Component, int>), method);
+            }
             var names = new HashSet<string>();
             Dictionary<Transform, List<Transform>> referrers = Referrers(scene, enemies, names);
-            var random = new System.Random(20221022);
+            // Every script's seed before any pick drops a variant, so that a pick doesn't change another's place.
+            var seeds = new Dictionary<MonoBehaviour, int>();
+            foreach (Transform enemy in enemies)
+                foreach (MonoBehaviour script in enemy.GetComponentsInChildren<MonoBehaviour>(true))
+                    if (script != null && script.GetType().Name == "RandomVariant") seeds[script] = pickSeed(script);
+            UnityEngine.Random.State state = UnityEngine.Random.state;
             foreach (Transform enemy in enemies)
             {
                 foreach (MonoBehaviour script in enemy.GetComponentsInChildren<MonoBehaviour>(true))
@@ -141,7 +157,8 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
                     if (options.Count == 0) continue;
                     scripts++;
                     variants += options.Count;
-                    GameObject picked = options[random.Next(options.Count)];
+                    UnityEngine.Random.InitState(seeds[script]);
+                    GameObject picked = options[UnityEngine.Random.Range(0, options.Count)];
                     picked.SetActive(true);
                     var left = new List<GameObject> { picked };
                     foreach (GameObject other in options)
@@ -185,6 +202,7 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
                     BuildUtil.SetField(script, "onEnable", false);
                 }
             }
+            UnityEngine.Random.state = state;
         }
         catch (Exception exception)
         {

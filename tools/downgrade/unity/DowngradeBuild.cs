@@ -146,7 +146,7 @@ public static class DowngradeBuild
     // background once the title has loaded and gives the instance to MaraLoader, where the game
     // cloned the prefab in its first area (a third of that load at the PS Vita's speed), and the
     // prefab no longer stays in memory for good among the preloaded assets.
-    const string MaraKey = "CharacterCameraPrefab", MaraScenePath = "Assets/CrowMara.unity";
+    const string MaraKey = "CharacterCameraPrefab", MaraScenePath = "Assets/CrowMara.unity", MaraInstanceId = "1000000001";
 
     static string SaveMaraScene(GameObject prefab)
     {
@@ -157,6 +157,19 @@ public static class DowngradeBuild
         instance.SetActive(false);
         if (!UnityEditor.SceneManagement.EditorSceneManager.SaveScene(scene, MaraScenePath))
             throw new InvalidOperationException("Could not save " + MaraScenePath);
+        UnityEditor.SceneManagement.EditorSceneManager.NewScene(
+            UnityEditor.SceneManagement.NewSceneSetup.EmptyScene, UnityEditor.SceneManagement.NewSceneMode.Single);
+        // The editor gives the instance a new random ID in the file at every save, the only difference between two
+        // builds' CrowMara.unity (the built scene doesn't depend on it): a fixed one, so the file is the same too.
+        string text = System.IO.File.ReadAllText(MaraScenePath);
+        var ids = System.Text.RegularExpressions.Regex.Matches(text, @"^--- !u!1001 &(\d+)\r?$", System.Text.RegularExpressions.RegexOptions.Multiline);
+        string id = ids.Count == 1 ? ids[0].Groups[1].Value : null;
+        if (id != null && System.Text.RegularExpressions.Regex.Matches(text, @"\b" + id + @"\b").Count == 1)
+        {
+            System.IO.File.WriteAllText(MaraScenePath, text.Replace("&" + id, "&" + MaraInstanceId));
+            AssetDatabase.ImportAsset(MaraScenePath, ImportAssetOptions.ForceUpdate);
+        }
+        else Debug.Log("DOWNGRADE_MARA the instance's ID left as saved: " + ids.Count + " prefab instances in " + MaraScenePath);
         Debug.Log("DOWNGRADE_MARA saved " + prefab.name + " in " + MaraScenePath);
         return MaraScenePath;
     }

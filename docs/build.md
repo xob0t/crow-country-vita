@@ -148,7 +148,7 @@ These environment variables change what a stage writes, for experiments and meas
 | Variable | Stage | Values (default with PS Vita data, without) | What |
 | --- | --- | --- | --- |
 | `CROW_VITA_DATA` | build | `0`, `1` (`0`) | A Windows player with the PS Vita's scene data, the defaults below as on the PS Vita, for measurements. |
-| `CROW_VARIANT_BAKE` | build | `on`, `all`, `off` (`on`, `off`) | Enemies' random looks (RandomVariant) picked at build time, a fixed look per build (`unity/VariantBake.cs`): Haunted Hilltop's Enemy Puddle and every Lumber (whose 72 variants kept its parts from merging: 289 renderers), or the puddle in every scene too. |
+| `CROW_VARIANT_BAKE` | build | `on`, `all`, `off` (`on`, `off`) | Enemies' random looks (RandomVariant) picked at build time, each from its own seed, so every build has the same look (`unity/VariantBake.cs`): Haunted Hilltop's Enemy Puddle and every Lumber (whose 72 variants kept its parts from merging: 289 renderers), or the puddle in every scene too. |
 | `CROW_PROBUILDER` | build | `on`, `bake`, `off` (`on`, `off`) | The player's ProBuilder meshes built at build time (`unity/ProBuilderMeshes.cs`); `bake` keeps the components. |
 | `CROW_MERGE` | build | `on`, `ab`, `off` (`on`, `off`) | The static merge (`unity/MergeScenes.cs`); `ab` keeps the parts' meshes, for `-crow-merge off`. |
 | `CROW_MERGE_MAX_VERTICES`, `CROW_MERGE_MAX_KB` | build | a whole number (unset: the merge's own) | The merge's largest part, and its budget per scene. |
@@ -181,6 +181,39 @@ Measured on an 8-core, 16-thread Ryzen 7 5800X3D with 32 GB and an SSD:
 A first `build` of a new project also imports all 92,800 assets of the export (the PS Vita's textures and audio converted for the console) and takes longer than a rebuild; it hasn't been timed from a clean state yet.
 
 A first build needs free space on the repository's drive. The export takes 2.6 GB, shared by the targets. The PS Vita project takes 5.4 GB with Unity's import cache (`Library`, 2.9 GB), its build 1.5 GB and the VPK 0.5 GB. The Windows project takes 6.3 GB, a Mono player 1.2 GB and an IL2CPP player 2.1 GB. With Unity's temporary files the doctor counts about 13 GB for a first PS Vita or Windows build. The editor with both modules takes another 3.9 GB in `%LOCALAPPDATA%`, and the PS Vita SDK 0.6 GB.
+
+### Checking that builds are reproducible
+
+Two builds of the same tree with the same switches give the same files, apart from what Unity's own tools write differently on every build (below). `tools/downgrade/buildcompare.py` checks it. It hashes what a build made into `work/buildcompare/<label>`, then compares two such snapshots file by file:
+
+```powershell
+uv run tools/downgrade/pipeline.py project
+uv run tools/downgrade/buildcompare.py snapshot A --what project   # before the build: the editor writes in Assets as it builds
+uv run tools/downgrade/pipeline.py build
+uv run tools/downgrade/pipeline.py package
+uv run tools/downgrade/buildcompare.py snapshot A --what build,vpk
+# ... the same again as B, then:
+uv run tools/downgrade/buildcompare.py compare A B                  # exit code 1 if anything differs
+```
+
+`--platform windows` (and `--backend il2cpp`) snapshots a Windows player and its project. The project part is the Unity project's `Assets`, `ProjectSettings` and `Packages` as the `project` stage leaves them. The build part is the player's folder, and the VPK part is each file in the VPK with its zip header.
+
+What makes them the same:
+
+- CrowCompat and the other tools compiled with the .NET Framework's `csc`, which has no `/deterministic`: `pipeline.reproducible_assembly` sets the time stamp, the module ID and the `<PrivateImplementationDetails>` GUID from a hash of the rest of the file.
+- The random picks the build makes for the game's scripts (the static merge's and the enemy rebuild's `DoRandom`, `unity/VariantBake.cs`'s variants) seed `UnityEngine.Random` from where each script is: its scene, its path in the hierarchy and its place among its object's scripts (`Merge.PickSeed`). So a change in a scene leaves the other picks in it as they were.
+- The project's `productGUID`, which the export wrote in a form 2018.2 can't read, so the editor made a new one at every build (`asset_rules.product_guid`).
+- The assets whose names can't be file names (`Legacy Shaders/Diffuse`): the editor renamed them after their files only when it had imported them in the same session, and the merged meshes are named after their materials. The `project` stage now writes the file's name into them (`asset_rules.name_overlay`).
+- `MeshCombiner.combineTime`, the combining's stopwatch time, zeroed after the build's bake.
+- The player scene's prefab instance ID in `Assets/CrowMara.unity`, which the editor draws at random at every save, set to a fixed one.
+- In `globalgamemanagers` after the build (`pipeline.reproducible_player_data`): the `[RuntimeInitializeOnLoadMethod]` list sorted, so these methods run in a fixed order (CrowCompat's first); MonoManager's list of scripts and ResourceManager's list of dependencies sorted; and the build GUID set from a hash of the player's scenes and assets.
+- The VPK's zip headers: one date and one set of attributes for every file.
+
+What still differs, and why:
+
+- The PS Vita's IL2CPP module (`Media/Modules/il2CppAssemblies.suprx` and its copy in `SymbolFiles`), in 36 bytes. IL2CPP links it in `Library/il2cpp_cache/linkresult_<hash>`, whose name changes on every build although the object files and their order are the same, and the module embeds that path; the linker's fingerprint of the module (`vita.py crashes` matches dumps to symbols by it) changes with it. `buildcompare.py` compares the module without those bytes. The VPK holds the module, so the VPK file differs too; its files are compared one by one.
+- After the build, the editor rewrites some project files it imported: the cubemaps' and the plugins' `.meta` files, the shared reverb mixers, `ProjectSettings` (adding files of its own) and the player scene. It writes them the same way in every build, and the next `project` stage puts the pipeline's versions back. So take the project snapshot before the build.
+- `rip` is left out: AssetRipper's export is redone only when the game or its settings change.
 
 ## 3. Install the PS Vita app
 

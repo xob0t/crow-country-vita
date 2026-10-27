@@ -1367,6 +1367,8 @@ def i2_font_overlay(exported: Path, overlay: dict, excluded: set):
         if guid not in listed or not name or re.search(r'[<>:"/\\|?*]', name):
             continue
         target = Path('Assets') / 'Resources' / (name + found.suffix)
+        if target in moved:  # two listed assets of one name: which one moved would follow the listing's order
+            sys.exit(f'I2 Localization: {relative} and another asset are both named {name!r}; move one by hand')
         moved[target] = overlay.pop(relative, None) or exported / relative
         moved[meta_of(target)] = overlay.pop(meta_of(relative), None) or exported / meta_of(relative)
         gone.update({relative, meta_of(relative)})
@@ -1434,7 +1436,14 @@ def name_overlay(exported: Path, game: Path, overlay: dict):
     "<stem>/<original name><ext>" with its .meta, so the GUID is kept. Resources paths are left
     alone; they are runtime load paths. Returns (moved overlay entries, excluded original paths);
     overlay entries already generated for a moved path are moved with it; other moved entries are the
-    exported file's Path, not its bytes."""
+    exported file's Path, not its bytes.
+
+    A name that can't be a file name ("Legacy Shaders/Diffuse": 45 materials, a mesh, TextMeshPro/Sprite)
+    becomes the file's name in the asset, as the editor renames such an object when it loads it. The editor
+    then also marked it changed and wrote it back at the build's first SaveAssets (DowngradeBuild's
+    SaveMaraScene), and the next project stage restored it: so the build named it after its file when the
+    editor had imported it in the same session, and kept the slashed name otherwise. The merged meshes
+    are named after their materials, so builds differed by their editor's history (27 Oct, DETERMINISM)."""
     original = original_asset_names(game)
     moved, excluded, skipped = {}, set(), 0
     assets = exported / 'Assets'
@@ -1460,6 +1469,13 @@ def name_overlay(exported: Path, game: Path, overlay: dict):
         if name is None:
             continue
         if not name or re.search(r'[<>:"/\\|?*]', name) or name.rstrip('. ') != name:
+            if path.suffix in NATIVE_ASSETS:
+                relative = path.relative_to(exported)
+                text = current_text(exported, overlay, relative)
+                name_line = '  m_Name: ' + path.stem
+                text, count = re.subn(r'^  m_Name: .*$', lambda _: name_line, text, count=1, flags=re.M)  # noqa: B023
+                if count:
+                    moved[relative] = text.encode('utf-8')
             skipped += 1
             continue
         relative = path.relative_to(exported)
@@ -1473,7 +1489,7 @@ def name_overlay(exported: Path, game: Path, overlay: dict):
         excluded.update({relative, meta})
     log(
         f'Restored original names for {len(excluded) // 2} assets'
-        + (f'; {skipped} names cannot be file names' if skipped else '')
+        + (f'; {skipped} names cannot be file names, and now match their files' if skipped else '')
     )
     return moved, excluded
 
@@ -1536,9 +1552,26 @@ PLATFORM_QUALITY_RULES = {
 PHYSICS_RULES = {'m_AutoSimulation': '1'}
 
 
+# The export writes the game's productGUID as Unity 2022 does, a mapping of its four 32-bit words, which 2018.2
+# doesn't read: the editor then made a new random one at every build, into the project's settings and the
+# player's PlayerSettings, so no two builds were the same. Written in 2018's form, 32 hex digits, each word's
+# from its lowest four bits up.
+PRODUCT_GUID = re.compile(r'^  productGUID:\n((?:    data\[\d\]: \d+\n){4})', re.M)
+
+
+def product_guid(text: str):
+    match = PRODUCT_GUID.search(text)
+    if not match:
+        sys.exit('ProjectSettings has no productGUID in the form the export writes (four data[] words)')
+    words = [int(word) for word in re.findall(r': (\d+)', match[1])]
+    digits = ''.join(f'{(word >> (4 * i)) & 15:x}' for word in words for i in range(8))
+    return text[: match.start()] + f'  productGUID: {digits}\n' + text[match.end() :]
+
+
 def settings_overlay(exported: Path, platform: str):
     relative = Path('ProjectSettings') / 'ProjectSettings.asset'
     text = (exported / relative).read_text(encoding='utf-8')
+    text = product_guid(text)
     for key, value in {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}.items():
         text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
         if count == 0:

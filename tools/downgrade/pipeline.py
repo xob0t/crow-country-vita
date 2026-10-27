@@ -256,8 +256,8 @@ def engine_library(version, out: Path, sources, modules=(), defines=()):
 
 def compile_csharp(command: list):
     """Run csc, unless its output is there from the same command line, sources and references
-    (<output>.stamp): csc writes other bytes on every run, and a CrowCompat.dll that changed makes the
-    editor import it, and reload the scripts, at the next build."""
+    (<output>.stamp): a CrowCompat.dll that changed makes the editor import it, and reload the scripts,
+    at the next build. The output is made reproducible (reproducible_assembly)."""
     out = Path(next(str(arg)[len('/out:') :] for arg in command if str(arg).startswith('/out:')))
     digest = hashlib.sha256()
     for arg in map(str, command):
@@ -272,7 +272,64 @@ def compile_csharp(command: list):
         return
     stamp.unlink(missing_ok=True)
     run(command)
+    reproducible_assembly(out)
     stamp.write_text(digest.hexdigest())
+
+
+PRIVATE_DETAILS = b'<PrivateImplementationDetails>{'
+
+
+def reproducible_assembly(path: Path):
+    """The .NET Framework's csc (C# 5) has no /deterministic: each compile of the same sources writes a new
+    PE time stamp, module version ID (MVID) and GUID in the name of its <PrivateImplementationDetails>{...}
+    class (the only bytes that differed between two compiles of CrowCompat). They are set here from a hash
+    of the rest of the file, as Roslyn's /deterministic does, so the same sources give the same bytes."""
+    data = bytearray(path.read_bytes())
+
+    def u16(at):
+        return int.from_bytes(data[at : at + 2], 'little')
+
+    def u32(at):
+        return int.from_bytes(data[at : at + 4], 'little')
+
+    coff = u32(0x3C) + 4
+    optional = coff + 20
+    directories = optional + (96 if u16(optional) == 0x10B else 112)
+    sections = [optional + u16(coff + 16) + 40 * i for i in range(u16(coff + 2))]
+
+    def offset(rva):
+        for s in sections:
+            if u32(s + 12) <= rva < u32(s + 12) + max(u32(s + 8), u32(s + 16)):
+                return rva - u32(s + 12) + u32(s + 20)
+        sys.exit(f'{path}: RVA {rva:#x} is in no section')
+
+    cli = offset(u32(directories + 14 * 8))
+    metadata = offset(u32(cli + 8))
+    at = metadata + 16 + u32(metadata + 12)  # past the version string: flags, then the stream count
+    streams, count = {}, u16(at + 2)
+    at += 4
+    for _ in range(count):
+        start, size = u32(at), u32(at + 4)
+        end = data.index(0, at + 8)
+        streams[data[at + 8 : end].decode()] = (metadata + start, size)
+        at = at + 8 + ((end - at - 8) // 4 + 1) * 4  # the name with its 0, padded to 4 bytes
+    mvid = streams['#GUID'][0]  # the module's, the heap's first (the only one csc writes)
+    strings_at, strings_size = streams['#Strings']
+    details = data.find(PRIVATE_DETAILS, strings_at, strings_at + strings_size)
+    details = details + len(PRIVATE_DETAILS) if details >= 0 else None
+    data[coff + 4 : coff + 8] = bytes(4)
+    data[mvid : mvid + 16] = bytes(16)
+    if details:
+        data[details : details + 36] = b'0' * 36
+    digest = hashlib.sha256(data).digest()
+    data[coff + 4 : coff + 8] = (int.from_bytes(digest[16:20], 'little') & 0x7FFFFFFF).to_bytes(4, 'little')
+    data[mvid : mvid + 16] = digest[:16]
+    if details:
+        hexits = digest[16:32].hex().upper()
+        name = f'{hexits[:8]}-{hexits[8:12]}-{hexits[12:16]}-{hexits[16:20]}-{hexits[20:32]}'
+        data[details : details + 36] = name.encode()
+    assert len(data) == path.stat().st_size
+    path.write_bytes(data)
 
 
 # The C# sources split into parts, each list in compile order: CrowCompat and the UnityEngine
@@ -838,7 +895,7 @@ def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: s
                 {k.relative_to(part) for k in excluded if k.parts[0] == part},
                 known.setdefault(part, {}),
             )
-    record.write_text(json.dumps(known), encoding='utf-8')
+    record.write_text(json.dumps(known, sort_keys=True), encoding='utf-8')
     (project / PROJECT_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
 
 
@@ -917,6 +974,7 @@ def build(
     if result.returncode != 0:
         sys.exit(result.returncode)
     check_build_output(output, platform, started, log_path)
+    reproducible_player_data(output / 'Media' if platform == 'vita' else output.parent / f'{output.stem}_Data')
     # What quickcode checks against, written right after the checks: a build that fails later (a native
     # plugin, Ctrl+C) still leaves it with the code stage the editor saved.
     if platform == 'vita' and not scenes:
@@ -1360,6 +1418,110 @@ def boot_config(output: Path):
     log(f'Graphics jobs {"on" if jobs else "off"} in {path}')
 
 
+def reproducible_player_data(data: Path):
+    """What the editor writes differently into globalgamemanagers on every build of the same project, set
+    in place (four objects, each the same size before and after), so two builds of one tree give the same
+    bytes there (docs/build.md, "Checking that builds are reproducible"):
+    - RuntimeInitializeOnLoadManager: the [RuntimeInitializeOnLoadMethod] methods, which the player runs in
+      the order listed. The editor lists them in another order on every build (CrowCompat's AssemblyAliases,
+      MainThread and ProbeFiles before or among I2 Localization's 15 AutoRegisters). Sorted here by
+      assembly, namespace, class and method name: CrowCompat's run first, each load type in a fixed order.
+    - MonoManager's list of the player's scripts (m_Scripts) and ResourceManager's list of the Resources
+      assets' dependencies (m_DependentAssets), each in another order on some builds: sorted by object (the
+      player looks things up in them; the orders the editor wrote varied and all worked).
+    - BuildSettings' buildGUID (Application.buildGUID), new on every build: set from a hash of the
+      player's scenes and assets (level*, sharedassets*, resources.assets and this file without it).
+    data: the player's data folder (the PS Vita's Media, a Windows player's <name>_Data)."""
+    import UnityPy
+
+    path = data / 'globalgamemanagers'
+    content = bytearray(path.read_bytes())
+    env = UnityPy.load(bytes(content))
+    objects = {o.type.name: o for o in env.objects}
+
+    written = {}  # each object's bytes as last written
+
+    def patch(obj, tree):
+        start = obj.byte_start
+        old = written.setdefault(obj.path_id, obj.get_raw_data())
+        if content[start : start + len(old)] != old:
+            sys.exit(f'{path}: {obj.type.name} is not where UnityPy reads it')
+        new = obj.save_typetree(tree)
+        if len(new) != len(old):
+            sys.exit(f'{path}: {obj.type.name} would change size ({len(old)} -> {len(new)} bytes)')
+        content[start : start + len(new)] = new
+        written[obj.path_id] = new
+
+    manager = objects['RuntimeInitializeOnLoadManager']
+    tree = manager.read_typetree()
+    assemblies, namespaces = tree['m_AssemblyNames'], tree['m_NamespaceNames']
+    classes, methods = tree['m_ClassInfos'], tree['m_ClassMethodInfos']
+    if tree['m_BeforeUnityMethodExecutionOrders'] or tree['m_AfterUnityMethodExecutionOrders']:
+        sys.exit(f'{path}: Unity classes among the RuntimeInitializeOnLoadMethods; sort them too')
+
+    def class_key(c):
+        return assemblies[c['m_AssemblyNameIndex']], namespaces[c['m_NamespaceIndex']], c['m_ClassName']
+
+    before = {id(methods[i]) for i in tree['m_BeforeMethodExecutionOrders']}
+    after = {id(methods[i]) for i in tree['m_AfterMethodExecutionOrders']}
+    new_assemblies, new_namespaces = sorted(assemblies), sorted(namespaces)
+    new_classes, new_methods, was = [], [], []
+    # Each class's methods follow one another (its m_MethodIndex and m_NumOfMethods): laid out again class by
+    # class, and run in that order within each load type.
+    for index, c in enumerate(sorted(classes, key=class_key)):
+        first = c['m_MethodIndex']
+        own = sorted(methods[first : first + c['m_NumOfMethods']], key=lambda m: m['m_MethodName'])
+        new_classes.append(
+            {
+                **c,
+                'm_AssemblyNameIndex': new_assemblies.index(assemblies[c['m_AssemblyNameIndex']]),
+                'm_NamespaceIndex': new_namespaces.index(namespaces[c['m_NamespaceIndex']]),
+                'm_MethodIndex': len(new_methods),
+            }
+        )
+        new_methods += [{**m, 'm_ClassIndex': index} for m in own]
+        was += [id(m) for m in own]
+    if sorted(was) != sorted(map(id, methods)):
+        sys.exit(f'{path}: RuntimeInitializeOnLoadManager lists methods outside their classes; sort it by hand')
+    tree.update(
+        m_AssemblyNames=new_assemblies,
+        m_NamespaceNames=new_namespaces,
+        m_ClassInfos=new_classes,
+        m_ClassMethodInfos=new_methods,
+        m_BeforeMethodExecutionOrders=[i for i, m in enumerate(was) if m in before],
+        m_AfterMethodExecutionOrders=[i for i, m in enumerate(was) if m in after],
+    )
+    patch(manager, tree)
+
+    mono = objects['MonoManager']
+    tree = mono.read_typetree()
+    tree['m_Scripts'] = sorted(tree['m_Scripts'], key=lambda s: (s['m_FileID'], s['m_PathID']))
+    patch(mono, tree)
+
+    resources = objects['ResourceManager']
+    tree = resources.read_typetree()
+    tree['m_DependentAssets'] = sorted(
+        tree['m_DependentAssets'], key=lambda d: (d['m_Object']['m_FileID'], d['m_Object']['m_PathID'])
+    )
+    patch(resources, tree)
+
+    settings = objects['BuildSettings']
+    tree = settings.read_typetree()
+    tree['buildGUID'] = dict.fromkeys(tree['buildGUID'], 0)
+    patch(settings, tree)
+    digest = hashlib.sha256(content)
+    for file in sorted(data.iterdir()):
+        if file.is_file() and file.name.startswith(('level', 'sharedassets', 'resources.assets')):
+            digest.update(file.name.encode() + bytes(1) + file_hash(file).encode())
+    words = digest.digest()[:16]
+    tree['buildGUID'] = {
+        key: int.from_bytes(words[4 * i : 4 * i + 4], 'little') for i, key in enumerate(tree['buildGUID'])
+    }
+    patch(settings, tree)
+    path.write_bytes(content)
+    log(f'{path}: RuntimeInitializeOnLoadMethods sorted ({len(new_methods)}), build GUID {words.hex()}')
+
+
 # Build log lines worth a look; the summary prints each distinct one with its count, the first
 # SUMMARY_LINES of them, cut at SUMMARY_WIDTH characters.
 LOG_KEYS = re.compile(
@@ -1454,6 +1616,7 @@ VITA_ARTWORK = {
     'sce_sys/livearea/contents/default_gate.png': 'gate.png',
 }
 PACKAGE_CHUNK = 1 << 22
+VPK_DATE = (2024, 1, 1, 0, 0, 0)  # every file's date in the VPK
 
 
 def package_vita(build: Path) -> Path:
@@ -1471,12 +1634,15 @@ def package_vita(build: Path) -> Path:
     ):
         for name, source in files:
             step.note(name)
+            # The same headers for every file, whatever the time of the build or the files' dates and
+            # attributes: two packagings of one build give the same VPK.
+            info = zipfile.ZipInfo(name, date_time=VPK_DATE)
+            info.compress_type = archive.compression
+            info.external_attr = 0o100644 << 16
             if isinstance(source, bytes):
-                archive.writestr(name, source)
+                archive.writestr(info, source)
                 step.advance(len(source))
                 continue
-            info = zipfile.ZipInfo.from_file(source, name)
-            info.compress_type = archive.compression
             with source.open('rb') as src, archive.open(info, 'w') as dest:
                 while chunk := src.read(PACKAGE_CHUNK):
                     dest.write(chunk)
