@@ -384,7 +384,20 @@ def reading(build: Path, wait=BUILD_WAIT_SECONDS):
 def sync(build: Path, build_wait=BUILD_WAIT_SECONDS):
     """Uploads the build's app files whose content changed since the last sync."""
     with reading(build, build_wait):
+        # Files replaced under a running game crash it (27 Oct: a sync while the game ran, started by
+        # hand to keep the console awake), so the game is quit first.
+        if game_running():
+            print('sync: the game is running; quitting it first')
+            print(quit_game())
         sync_files(build)
+
+
+def game_running():
+    """Whether the game is the running app (perf's "app:" line); False when perf can't tell."""
+    try:
+        return pipeline.VITA_TITLE_ID in command('perf', timeout=5)
+    except OSError:
+        return False
 
 
 def sync_files(build: Path):
