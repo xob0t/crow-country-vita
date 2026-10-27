@@ -894,7 +894,11 @@ def run_command():
         nudge()
         name = 'log.txt' if not args.prev else 'log.prev.txt' if args.prev == 1 else f'log.prev{args.prev}.txt'
         lines = read(f'{REMOTE}/{name}').decode(errors='replace').splitlines()
-        print('\n'.join(lines[-args.tail :] if args.tail else lines))
+        # As UTF-8 whatever the console's code page: print() on a Russian Windows (cp1251) stopped with
+        # UnicodeEncodeError at the first character it lacks (26 Oct, the crashed run's log).
+        sys.stdout.flush()
+        sys.stdout.buffer.write(('\n'.join(lines[-args.tail :] if args.tail else lines) + '\n').encode('utf-8'))
+        sys.stdout.flush()
     if args.command == 'args':
         line = show_args() if args.show else set_args(args.rest)
         print('args.txt: ' + (line or '(empty)'))

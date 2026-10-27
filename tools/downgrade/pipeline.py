@@ -1404,6 +1404,7 @@ def vita_app_files(build: Path):
     marker = player.find(b'trial.png')
     if marker >= 0:
         player[marker] = 0  # no trial watermark
+    patcher_usse(player)
     yield 'eboot.bin', bytes(player)
     art = livearea.generate()
     skip = {'SymbolFiles', 'configuration.psp2path'}
@@ -1413,6 +1414,36 @@ def vita_app_files(build: Path):
             continue
         name = relative.as_posix()
         yield name, art / VITA_ARTWORK[name] if name in VITA_ARTWORK else path
+
+
+# The USSE memory of GXM's shader patcher, which holds every patched vertex and fragment program (the shader
+# code for one vertex layout, blend state and output format). Unity 2018.2.19f1's PS Vita player allocates
+# a fixed 512 KB at start from g_ShaderPatcherCombinedUsseSize (an initialized global of its data segment;
+# no setting or boot.config key reads it), and frees a shader's patched programs only when the shader is
+# unloaded. CrowVita/Lit stays loaded all session, so its patched programs pile up over the areas played,
+# and when the 512 KB are used up GfxDeviceGXM::CreateFragmentProgram ignores sceGxmShaderPatcherCreate-
+# FragmentProgram's error and draws with a pointer it never set: the render thread's crash in
+# sceGxmSetFragmentProgram (26 Oct after 2 h 10 min of play, 17 Oct; both dumps show the patcher's USSE
+# 97-98% used; work/scratch/fix/CRASH.md). The player is a plain fself (no segment digests), so the
+# global's initial value is patched in eboot.bin. Costs the difference in main memory.
+VITA_PATCHER_USSE_OFFSET = 0x15D9164  # g_ShaderPatcherCombinedUsseSize in PSP2Player_Il2cpp.self, 2018.2.19f1
+VITA_PATCHER_USSE_UNITY = 0x80000  # its value, and that of g_ShaderPatcherBufferSize just before it
+VITA_PATCHER_USSE_BYTES = 0x100000
+
+
+def patcher_usse(player: bytearray):
+    """Sets the shader patcher's USSE memory in the player (eboot.bin) to VITA_PATCHER_USSE_BYTES."""
+    at = VITA_PATCHER_USSE_OFFSET
+
+    def word(offset):
+        return int.from_bytes(player[offset : offset + 4], 'little')
+
+    if word(at - 4) != VITA_PATCHER_USSE_UNITY or word(at) not in (VITA_PATCHER_USSE_UNITY, VITA_PATCHER_USSE_BYTES):
+        sys.exit(
+            f'The player has {word(at - 4):#x} {word(at):#x} where 2018.2.19f1 keeps the shader patcher\'s '
+            f'buffer and USSE sizes ({at - 4:#x}): another player; find g_ShaderPatcherCombinedUsseSize again'
+        )
+    player[at : at + 4] = VITA_PATCHER_USSE_BYTES.to_bytes(4, 'little')
 
 
 # LiveArea images from livearea.py, in place of Unity's placeholders.

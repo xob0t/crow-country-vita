@@ -47,7 +47,8 @@ using UnityEngine.SceneManagement;
 //   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
 //   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
-//   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off)
+//   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off);
+//                          2 lets the key lights light every layer, as before 27 Oct (their culling masks off)
 // -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m>,
 // litfade=<s> and litview=<m>.
 // Part of CrowCompat; see Compat2018.cs.
@@ -110,6 +111,7 @@ namespace CrowCompat
             fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", fadeTime));
             viewRadius = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-view", viewRadius));
             Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
+            allLayers = CrowFlags.Number(args, "-crow-lit-debug", 0f) == 2f;
             string value = CrowFlags.Value(args, "-crow-lit", "vita");
             if (value != null) Set(value);
         }
@@ -129,7 +131,7 @@ namespace CrowCompat
                 }
                 if (lit == null) lit = Shader.Find("CrowVita/Lit");
                 standard = Shader.Find("Standard");
-                if (lit == null || !lit.isSupported || !HasProperty(lit, "_CrowLitV3"))
+                if (lit == null || !lit.isSupported || !HasProperty(lit, "_CrowLitV4"))
                 {
                     Debug.Log("CROW_LIT CrowVita/Lit " + (lit == null ? "is not in the build" : !lit.isSupported ? "is not supported" : "is an older version") +
                               "; lights stay the game's");
@@ -391,9 +393,19 @@ namespace CrowCompat
                 Swap();
                 return;
             }
+            if (scanned) MaterialLayers();
             majorLayers = 0;
             for (int layer = 0; layer < 32; layer++)
                 if (perLayer[layer] * 10 >= litRenderers && perLayer[layer] > 0) majorLayers |= 1 << layer;
+            topLayer = 0;
+            for (int layer = 0, most = 0; layer < 32; layer++)
+                if (perLayer[layer] > most)
+                {
+                    most = perLayer[layer];
+                    topLayer = 1 << layer;
+                }
+            Array.Copy(perLayer, layerRenderers, 32);
+            litRendererCount = litRenderers;
             if (first)
             {
                 baked = bakedBuild || saved > 0;
@@ -403,7 +415,49 @@ namespace CrowCompat
                 Debug.Log("CROW_LIT " + count + " materials to CrowVita/Lit (" + transparent + " transparent, " + cutout + " cutout, " + changedQueue +
                           " render queues kept), " + (scanned ? saved + " saved so by the build" : "material scan left out (saved so by the build)") + "; " +
                           litRenderers + " renderers, " + lightmapped + " lightmapped (" + LightmapSettings.lightmaps.Length + " lightmaps); layers " +
-                          majorLayers.ToString("X") + "; pass " + swapPasses + " in " + clock.ElapsedMilliseconds + " ms");
+                          majorLayers.ToString("X") + " (" + LayerCounts() + "); pass " + swapPasses + " in " + clock.ElapsedMilliseconds + " ms");
+        }
+
+        // The key lights' culling masks (27 Oct, ARCADE): a key light lit every CrowVita/Lit renderer in its reach,
+        // where the game's lights leave out the layers their masks don't have. The game keeps its screens and
+        // displays to their own lights that way: each Arcade cabinet has a point light (intensity 5, 0.8 m) 8 cm in
+        // front of its screen that lights the cabinet around it and leaves out the screen's layer (28), and as a key
+        // light it washed the middle of the screen out to white. The shader drops a key from a material whose
+        // renderers are all on one layer (_CrowLayerLo/Hi) when the key's mask (_CrowKeyMaskLo/Hi, lane by
+        // lane) leaves that layer out. The PS Vita build saves the layers (asset_rules.material_layers, from every
+        // scene and prefab, those switched off at the load as well); a build without saved materials gets them here, from
+        // every renderer in the loaded scenes, after each material scan. -crow-lit-debug 2 switches it off.
+        static bool allLayers;
+        static readonly int LayerLoId = Shader.PropertyToID("_CrowLayerLo"), LayerHiId = Shader.PropertyToID("_CrowLayerHi");
+        static readonly Dictionary<Material, int> materialLayers = new Dictionary<Material, int>();
+        static readonly List<Material> rendererMaterials = new List<Material>();
+
+        static void MaterialLayers()
+        {
+            materialLayers.Clear();
+            foreach (Renderer renderer in Resources.FindObjectsOfTypeAll<Renderer>())
+            {
+                if (renderer == null || !renderer.gameObject.scene.IsValid()) continue;
+                int layer = renderer.gameObject.layer;
+                renderer.GetSharedMaterials(rendererMaterials);
+                foreach (Material material in rendererMaterials)
+                {
+                    if (material == null || material.shader != lit) continue;
+                    int seen;
+                    materialLayers[material] = materialLayers.TryGetValue(material, out seen) && seen != layer ? -1 : layer;
+                }
+            }
+            int layered = 0;
+            foreach (KeyValuePair<Material, int> pair in materialLayers)
+            {
+                int layer = pair.Value < 0 ? 0 : pair.Value;
+                pair.Key.SetFloat(LayerLoId, layer < 16 ? Mathf.Pow(2f, -layer) : 0f);
+                pair.Key.SetFloat(LayerHiId, layer >= 16 ? Mathf.Pow(2f, 16 - layer) : 0f);
+                if (layer != 0) layered++;
+            }
+            rendererMaterials.Clear();
+            materialLayers.Clear();
+            if (log) Debug.Log("CROW_LIT material layers: " + layered + " materials on one layer other than Default");
         }
 
         // Whether the material scan swaps a material on this shader (Standard, SFBStandard, Legacy Diffuse), by the
@@ -446,8 +500,50 @@ namespace CrowCompat
         // A key light lights every CrowVita/Lit renderer in its reach: only lights whose culling mask has
         // the layers most of them are on qualify (the game keeps some lights to a few layers: Pool's
         // "only below" and "only Object" spots, Mansion's ghosts' lights, the car's lamps in Driving
-        // Intro); the others stay Unity's, per vertex or in the harmonics.
-        static int majorLayers = ~(1 << MaraScene.UiLayer);
+        // Intro); the others stay Unity's, per vertex or in the harmonics. A narrow spot (10 degrees or
+        // less) also qualifies when it leaves out such a layer but lights Default, the layer with the most
+        // renderers or half of them (26 Oct, LASER): Unity drops a spot's cone per vertex and lights all it
+        // reaches, so the guns' laser sights, which leave out NotPlayer (Corridor A: 113 of 559 renderers,
+        // Default 412; Windows data) and Roots (Pool: 468 of 2217), lit whole walls red there as Mara aimed.
+        // Default counts on its own because the PS Vita build merges most Default renderers: there Roots is
+        // Pool's top layer (469 of 775, Default 230) and the sight covers 0.31, so it stayed per vertex and
+        // lit Pool's floor orange (27 Oct, VERIFY). As a key the sight lights the materials drawn on one layer
+        // only if its mask has it (_CrowLayerLo/Hi, ARCADE); those on several get its dot, which the game's
+        // doesn't draw. Wider spots stay out: Pool's path spotlight also leaves out Roots, and keyed it lit
+        // Pool's floor brighter than the game does. The lights the game keeps to a few layers light none of
+        // them (the survey of 26 Oct, every area: 6% of the renderers at most, never Default).
+        static int majorLayers = ~(1 << MaraScene.UiLayer), topLayer;
+        const float KeyCoverage = 0.5f, NarrowSpot = 10f;
+
+        static bool Qualifies(Light light, int mask)
+        {
+            if ((mask & majorLayers) == majorLayers) return true;
+            return light.type == LightType.Spot && light.spotAngle <= NarrowSpot &&
+                   ((mask & (1 | topLayer)) != 0 || Coverage(mask) >= KeyCoverage);
+        }
+
+        // The CrowVita/Lit renderers on each layer at the last pass, and all of them.
+        static readonly int[] layerRenderers = new int[32];
+        static int litRendererCount;
+
+        // The share of the CrowVita/Lit renderers on the layers of a culling mask (1 before a pass has counted them).
+        static float Coverage(int mask)
+        {
+            if (litRendererCount <= 0) return 1f;
+            int covered = 0;
+            for (int layer = 0; layer < 32; layer++)
+                if ((mask & (1 << layer)) != 0) covered += layerRenderers[layer];
+            return covered / (float)litRendererCount;
+        }
+
+        // -crow-lit-log: the renderers per layer ("0:412 31:120").
+        static string LayerCounts()
+        {
+            var text = new System.Text.StringBuilder();
+            for (int layer = 0; layer < 32; layer++)
+                if (layerRenderers[layer] > 0) text.Append(text.Length > 0 ? " " : "").Append(layer).Append(':').Append(layerRenderers[layer]);
+            return text.ToString();
+        }
 
         // Select runs every 0.25 s in play, so it allocates nothing (strings only with -crow-lit-log): the
         // scene's lights are listed again every 2 s and after each load, the buffers are reused, and the
@@ -484,7 +580,6 @@ namespace CrowCompat
                 if (light.cullingMask == 0 || (light.cullingMask & ~(1 << MaraScene.UiLayer)) == 0) continue;
                 if (main == null || light.intensity * Luminance(light.color) > main.intensity * Luminance(main.color)) main = light;
             }
-            int world = majorLayers;
             Camera view = MainCamera(now);
             if (view != null) GeometryUtility.CalculateFrustumPlanes(view, frustum);
             Vector3 focus = Focus(view, now);
@@ -520,12 +615,12 @@ namespace CrowCompat
                 if (off)
                 {
                     // Off: a spot light that could be a key light is picked the frame it comes on.
-                    if (type == LightType.Spot && (mask & world) == world) watched.Add(light);
+                    if (type == LightType.Spot && Qualifies(light, mask)) watched.Add(light);
                     continue;
                 }
-                if ((mask & world) != world)
+                if (!Qualifies(light, mask))
                 {
-                    if (log) excluded.Add(light.type + ":" + Hierarchy.Path(light.transform, 2) + "@" + light.range.ToString("F1") + "/mask=" + mask.ToString("X"));
+                    if (log) excluded.Add(light.type + ":" + Hierarchy.Path(light.transform, 2) + "@" + light.range.ToString("F1") + "/mask=" + mask.ToString("X") + "/cover=" + Coverage(mask).ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
                     continue;
                 }
                 if (light.type == LightType.Directional)
@@ -773,6 +868,9 @@ namespace CrowCompat
         static readonly Vector4[] lanes = new Vector4[8];
         static string keyword;
         static readonly int KeyColorId = Shader.PropertyToID("_CrowKeyColor"), FillId = Shader.PropertyToID("_CrowFill"), FillColorId = Shader.PropertyToID("_CrowFillColor");
+        // Each key's culling mask in its lane, the low and high 16 bits (floats hold them exactly); unused lanes: all layers.
+        static readonly int MaskLoId = Shader.PropertyToID("_CrowKeyMaskLo"), MaskHiId = Shader.PropertyToID("_CrowKeyMaskHi");
+        static Vector4 maskLo, maskHi, sentMaskLo, sentMaskHi;
         // The key lights' transforms (Select; a light's transform is an engine call), the colour space, and what the
         // globals were last given: a global is set again only when its value changed (exactly; NaN always), and all of
         // them when VitaLit comes on and after each load (sendAll). Until 22 Oct all of them every frame, the arrays and
@@ -823,14 +921,20 @@ namespace CrowCompat
                 if (used == Keys) continue;
                 Vector3 position = transform.position;
                 positions[used] = new Vector4(position.x, position.y, position.z, 1f / Mathf.Max(light.range * light.range, 0.0001f));
+                KeyValuePair<int, LightShadows> saved;
+                int mask = allLayers ? -1 : keyed.TryGetValue(light, out saved) ? saved.Key : light.cullingMask;
+                maskLo[used] = mask & 0xFFFF;
+                maskHi[used] = (mask >> 16) & 0xFFFF;
                 colors[used] = new Vector4(color.r, color.g, color.b, 1f);
                 if (light.type == LightType.Spot)
                 {
                     // The cone as a ramp in its cosine, from the edge (0) to where the default cookie
-                    // reaches full strength, about two thirds of the way out in the cone's tangent.
+                    // reaches full strength, about two thirds of the way out in the cone's tangent (a laser
+                    // sight's 1.5 degrees: 4.7e-5 of the cosine wide; until 26 Oct at least 1e-4, so its dot
+                    // reached 0.86 of its strength at the centre).
                     float half = Mathf.Clamp(light.spotAngle, 1f, 179f) * 0.5f * Mathf.Deg2Rad;
                     float outer = Mathf.Cos(half), inner = Mathf.Cos(Mathf.Atan(0.67f * Mathf.Tan(half)));
-                    float scale = 1f / Mathf.Max(inner - outer, 0.0001f);
+                    float scale = 1f / Mathf.Max(inner - outer, 1e-6f);
                     Vector3 forward = transform.forward * scale;
                     directions[used] = new Vector4(forward.x, forward.y, forward.z, -outer * scale);
                 }
@@ -839,6 +943,7 @@ namespace CrowCompat
             }
             for (int k = used; k < Keys; k++)
             {
+                maskLo[k] = maskHi[k] = 0xFFFF;
                 positions[k] = new Vector4(1e6f, 1e6f, 1e6f, 1f);
                 directions[k] = Vector4.zero;
                 colors[k] = Vector4.zero;
@@ -864,6 +969,8 @@ namespace CrowCompat
                 for (int i = 0; i < lanes.Length; i++) Shader.SetGlobalVector(laneIds[i], lanes[i]);
             }
             if (!Same(fill, sentFill) || all) Shader.SetGlobalVector(FillId, sentFill = fill);
+            if (!Same(maskLo, sentMaskLo) || all) Shader.SetGlobalVector(MaskLoId, sentMaskLo = maskLo);
+            if (!Same(maskHi, sentMaskHi) || all) Shader.SetGlobalVector(MaskHiId, sentMaskHi = maskHi);
             if (!Same(fillColor, sentFillColor) || all) Shader.SetGlobalVector(FillColorId, sentFillColor = fillColor);
             string wanted = used == 0 ? null : used <= 2 ? keywords[0] : keywords[1];
             if (wanted == keyword) return;

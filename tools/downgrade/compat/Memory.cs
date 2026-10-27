@@ -27,8 +27,9 @@ using GCHandle = System.Runtime.InteropServices.GCHandle;
 //                           the long frames of a scene load, when the main thread logs nothing: a
 //                           MEMWATCH line when a value moved by 1 MB or more, and every 10 s (the GC
 //                           heap's size and free part, bytes allocated since the last line, the PS
-//                           Vita's free LPDDR, CDRAM and PHYSCONT). The last lines before an
-//                           out-of-memory crash show which pool ran out.
+//                           Vita's free LPDDR, CDRAM and PHYSCONT, and the GXM shader patcher's USSE
+//                           memory in use: usseKB=fragment+vertex/size, ShaderPatcher). The last lines
+//                           before an out-of-memory crash show which pool ran out.
 //   -crow-gc-retries <n>    Boehm's GC_max_retries: collections tried when the GC heap can't grow,
 //                           before the out-of-memory abort (PS Vita default 2; Boehm's own is 0).
 //   -crow-gc-divisor <n>    Boehm's GC_free_space_divisor: the heap grows by about heap/n at a time,
@@ -325,11 +326,13 @@ namespace CrowCompat
         {
             Func<int>[] free = { VitaMemory.FreeLPDDR, VitaMemory.FreeCDRAM, VitaMemory.FreePHYSCONT };
             bool gc = Application.platform == RuntimePlatform.PSP2;
+            bool patcher = gc && ShaderPatcher.Find();
             var thread = new System.Threading.Thread(() =>
             {
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 float[] last = null;
                 long lastAt = -100000, lastTotal = 0;
+                int lastUsse = 0;
                 float lowest = float.MaxValue;
                 string[] names = { "gcHeap", "gcFree", "freeLPDDR", "freeCDRAM", "freePHYSCONT" };
                 while (true)
@@ -357,7 +360,9 @@ namespace CrowCompat
                         return;
                     }
                     if (free[0] != null && now[2] < lowest) lowest = now[2];
-                    bool moved = last == null;
+                    int fragment = 0, vertex = 0;
+                    if (patcher) ShaderPatcher.Usse(out fragment, out vertex);
+                    bool moved = last == null || Math.Abs(fragment + vertex - lastUsse) >= 32 * 1024;
                     for (int i = 0; !moved && i < now.Length; i++) moved = Math.Abs(now[i] - last[i]) >= 1f;
                     long at = clock.ElapsedMilliseconds;
                     if (moved || at - lastAt >= 10000)
@@ -368,7 +373,10 @@ namespace CrowCompat
                                 line.Append(' ').Append(names[i]).Append('=').Append(F(now[i]));
                         if (gc) line.Append(" allocdMB=").Append(F((total - lastTotal) / MB));
                         if (free[0] != null) line.Append(" lowestLPDDR=").Append(F(lowest));
+                        if (patcher)
+                            line.Append(" usseKB=").Append(fragment / 1024).Append('+').Append(vertex / 1024).Append('/').Append(ShaderPatcher.UsseBytes / 1024);
                         Debug.Log(line.ToString());
+                        lastUsse = fragment + vertex;
                         last = now;
                         lastAt = at;
                         lastTotal = total;
@@ -818,6 +826,82 @@ namespace CrowCompat
             {
                 return -1f;
             }
+        }
+    }
+
+    // The USSE memory of GXM's shader patcher in Unity 2018.2.19f1's PS Vita player, read from the player's
+    // own objects (no API gives it): every patched vertex and fragment program's code lives there, Unity
+    // frees a shader's only when the shader unloads, and when it is full the player draws with a fragment
+    // program pointer it never set and crashes on the render thread (pipeline.patcher_usse,
+    // work/scratch/fix/CRASH.md). The player's data segment loads at 0x82600000 (linked at 0x825CB000; both
+    // crash dumps): g_RealGfxDevice (the GfxDeviceGXM, its vtable at 0x825B00DC in the text, which is not
+    // relocated) and the patcher's buffer and USSE sizes are fixed addresses there; the device holds its
+    // SceGxmShaderPatcher at +0x2E90. Find checks every step (the
+    // patcher's first words are Unity's host allocation callbacks and itself; its USSE heap at +0x180 has
+    // the base at +0x74 and the size of the global) and gives up otherwise. The two counters read are the
+    // patcher's +0x8C and +0x90, taken for its fragment and vertex USSE bytes: in the crash dumps they add
+    // up to 97-98% of the 512 KB.
+    static class ShaderPatcher
+    {
+        const int RealDevice = unchecked((int)0x82606A5C), BufferSize = unchecked((int)0x8260D1E0), UsseSize = unchecked((int)0x8260D1E4);
+        const int DevicePatcher = 0x2E90, DeviceVtable = unchecked((int)0x825B00DC);  // GfxDeviceGXM's vtable (text, not relocated)
+        const int HostAlloc = unchecked((int)0x818AA3A9), HostFree = unchecked((int)0x818AA3DB);
+        static IntPtr patcher;
+        internal static int UsseBytes;
+
+        static int Word(int address)
+        {
+            return System.Runtime.InteropServices.Marshal.ReadInt32(new IntPtr(address));
+        }
+
+        // A pointer into the user heaps, word-aligned.
+        static bool Plausible(int address)
+        {
+            uint a = (uint)address;
+            return a >= 0x81000000u && a < 0xA0000000u && (a & 3u) == 0u;
+        }
+
+        // Whether the patcher was found; logs CROW_PATCHER either way.
+        internal static bool Find()
+        {
+            string why = null;
+            try
+            {
+                if (Application.unityVersion != "2018.2.19f1") why = "another player (" + Application.unityVersion + ")";
+                else if (Word(BufferSize) != 0x80000 || (Word(UsseSize) & 0xFFF) != 0 || Word(UsseSize) < 0x80000)
+                    why = "the player's data segment is not where it was (sizes " + Word(BufferSize).ToString("X") + " " + Word(UsseSize).ToString("X") + ")";
+                else
+                {
+                    int device = Word(RealDevice);
+                    int p = Plausible(device) && Word(device) == DeviceVtable ? Word(device + DevicePatcher) : 0;
+                    if (!Plausible(p)) why = "no device or patcher (" + device.ToString("X8") + " " + p.ToString("X8") + ")";
+                    else if (Word(p + 4) != HostAlloc || Word(p + 8) != HostFree || Word(p + 0xC) != p)
+                        why = "the patcher at " + p.ToString("X8") + " is not Unity's";
+                    else if (Word(p + 0x184) != Word(p + 0x74) || Word(p + 0x188) != Word(UsseSize))
+                        why = "the patcher's USSE heap is not as expected";
+                    else
+                    {
+                        patcher = new IntPtr(p);
+                        UsseBytes = Word(UsseSize);
+                        Debug.Log("CROW_PATCHER USSE " + UsseBytes / 1024 + " KB at " + Word(p + 0x74).ToString("X8") +
+                                  ", buffer " + Word(BufferSize) / 1024 + " KB; MEMWATCH lines give usseKB=fragment+vertex/size");
+                        return true;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                why = e.GetType().Name;
+            }
+            Debug.Log("CROW_PATCHER not read: " + why);
+            return false;
+        }
+
+        internal static void Usse(out int fragment, out int vertex)
+        {
+            int p = patcher.ToInt32();
+            fragment = Word(p + 0x8C);
+            vertex = Word(p + 0x90);
         }
     }
 }

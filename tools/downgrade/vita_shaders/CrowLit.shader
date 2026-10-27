@@ -4,11 +4,13 @@
 // an object once more for each pixel light after the main directional one (ForwardAdd); on the PS
 // Vita each of those draws costs the main thread about as much as the object itself, and the GPU a
 // second fill of its pixels. This shader has no ForwardAdd pass. Its base pass draws the main
-// directional light with Standard's simple BRDF, the harmonics and the four point lights Unity
-// gives each object per vertex (as Standard does), and adds per pixel, Lambert only:
+// directional light with Standard's BRDF2 highlight (its mobile GGX, in gamma space) and simple indirect
+// light, the harmonics and the four point lights Unity gives each object per vertex (as Standard does),
+// and adds per pixel, Lambert only (over the specular colour too, where the material has highlights):
 // - up to four "key" lights CrowCompat sets as globals (compat/VitaLit.cs): spot lights (with
 //   their cone) and point lights that reach the camera's view, which Unity no longer sees (their
-//   culling mask is 0 while they are key lights); CROW_KEYS_2/4 say how many. The lights are
+//   culling mask is 0 while they are key lights, and the shader leaves a key out of a material drawn on
+//   a layer its mask leaves out); CROW_KEYS_2/4 say how many. The lights are
 //   worked out side by side, one in each lane of float4s (_CrowKeyX/Y/Z: positions; _CrowKeyW:
 //   1/range^2; _CrowKeyDX/DY/DZ/DW: the cone), the SGX's vector instructions doing four at once:
 //   4 key lights cost 50 cycles a pixel instead of 87 one after another, 2 lights 34 instead of 43
@@ -41,7 +43,7 @@ Shader "CrowVita/Lit"
         [HideInInspector] _DstBlend ("__dst", Float) = 0.0
         [HideInInspector] _ZWrite ("__zw", Float) = 1.0
         // What compat/VitaLit.cs checks before using the shader (its globals are this version's).
-        [HideInInspector] _CrowLitV3 ("", Float) = 0
+        [HideInInspector] _CrowLitV4 ("", Float) = 0
         // A material the PS Vita build saved with this shader (asset_rules.vita_lit_overlay): the shader
         // it had, 1 Standard, 2 SFBStandard, 3 Legacy Shaders/Diffuse (0: made so at run time or a
         // variant keeper), and a Legacy Diffuse material's own colour; -crow-lit game puts them back.
@@ -49,6 +51,12 @@ Shader "CrowVita/Lit"
         [HideInInspector] _CrowLitColor ("", Color) = (1,1,1,1)
         // The material's depth layer (asset_rules.DEPTH_LAYERS, PS Vita build): see CrowDepthLayerZ.
         [HideInInspector] _CrowDepthLayer ("", Float) = 0
+        // The layer of the renderers that draw the material, when they are all on one (asset_rules.material_layers in
+        // the PS Vita build, compat/VitaLit.cs at run time elsewhere) as the scale that brings its bit of a key's mask
+        // to the units: 2^-layer for layers 0-15 (Lo), 2^-(layer - 16) for 16-31 (Hi), the other 0. The defaults are
+        // Default's (layer 0), which every key light lights.
+        [HideInInspector] _CrowLayerLo ("", Float) = 1
+        [HideInInspector] _CrowLayerHi ("", Float) = 0
     }
 
     CGINCLUDE
@@ -101,12 +109,20 @@ Shader "CrowVita/Lit"
             #endif
 
             // Key light k in lane k: X/Y/Z its position, W 1/range^2 (unused lanes: far away); DX/DY/DZ the
-            // spot's forward over the cone's ramp width, DW the ramp's offset (points: 0, 1).
+            // spot's forward over the cone's ramp width, DW the ramp's offset (points: 0, 1). The cone's are
+            // floats (26 Oct, LASER): a laser sight's ramp is a few hundred-thousandths of the cosine wide, so
+            // they run to 10^4 and more, and as halves (the PS Vita keeps a half uniform in 16 bits, 8 apart
+            // at 10^4) the dot was gone in half the directions Mara aimed and a wider disc in others.
             float4 _CrowKeyX, _CrowKeyY, _CrowKeyZ, _CrowKeyW;
-            half4 _CrowKeyDX, _CrowKeyDY, _CrowKeyDZ, _CrowKeyDW;
+            float4 _CrowKeyDX, _CrowKeyDY, _CrowKeyDZ, _CrowKeyDW;
             half4 _CrowKeyColor[4];   // colour times intensity
             half4 _CrowFill;          // a fill directional light: xyz the direction to it
             half4 _CrowFillColor;
+            // Each key light's culling mask in its lane, its low and high 16 bits (27 Oct, ARCADE): a key leaves out the
+            // material's layer as the game's light does (each Arcade cabinet's point light 8 cm in front of its screen
+            // lights the cabinet, not the screen, and as a key it washed the screen out to white).
+            float4 _CrowKeyMaskLo, _CrowKeyMaskHi;
+            float _CrowLayerLo, _CrowLayerHi;
 
             // Depth layers (21 Oct): surfaces laid a fraction of a millimetre over others (an end cap
             // 0.3 mm in front of Fairy Forest's pale wall, decals on floors and walls) fight on the PS
@@ -201,7 +217,7 @@ Shader "CrowVita/Lit"
                 #endif
                 FragmentCommonData s = CrowSetup (i.tex);
                 s.diffColor = PreMultiplyAlpha (s.diffColor, alpha, s.oneMinusReflectivity, /*out*/ s.alpha);
-                s.normalWorld = i.normalWorld.xyz;
+                s.normalWorld = normalize(i.normalWorld.xyz);
                 s.eyeVec = i.eyeVec.xyz;
                 s.posWorld = i.posWorld;
                 s.reflUVW = i.fogCoord.yzw;
@@ -210,32 +226,42 @@ Shader "CrowVita/Lit"
                 UnityLight mainLight = MainLight();
                 half ndotl = saturate(dot(s.normalWorld, mainLight.dir));
                 half atten = SHADOW_ATTENUATION(i);
-                half rl = dot(REFLECTVEC_FOR_SPECULAR(i, s), mainLight.dir);
                 UnityGI gi = FragmentGI (s, 1, i.ambientOrLightmapUV, atten, mainLight);
                 #if GLOSSMAP
                     half grazing = saturate(s.smoothness + (1 - s.oneMinusReflectivity));
                 #else
                     half grazing = i.eyeVec.w;
                 #endif
-                half3 c = BRDF3_Indirect(s.diffColor, s.specColor, gi.indirect, grazing, i.normalWorld.w);
-                c += BRDF3DirectSimple(s.diffColor, s.specColor, s.smoothness, rl) * (gi.light.color * ndotl);
-                // Metals: the main light also as a broad highlight (26 Oct, CHAIN). BRDF3's highlight is a
-                // narrow lobe from unity_NHxRoughness (about 0.7 at its peak for a smoothness of 0.5, where
-                // Windows' Standard, BRDF1's GGX, spreads about 2 over the curve), and a metal keeps little
-                // diffuse (metallic 0.745: a fifth of its albedo), so a metal lit by the main light alone
-                // drew nearly black: the inventory's chain, whose only light is the menu's directional one.
-                // As the fill and key lights below do, the main light lights the specular colour too, in
-                // proportion to how metallic the surface is (0 for dielectrics: their look is unchanged), on
-                // materials with highlights: the game darkens many walls and floors with metallic and
-                // highlights off (Corridor A's liminal walls and floor, 0.275), which Standard lights with
-                // no direct specular at all.
+                // Standard's BRDF2 (Unity's mobile GGX, its gamma-space form) for the main light, where the simple
+                // shader's BRDF3 had a narrow lookup lobe (ARCADE, 27 Oct). This project renders in gamma space,
+                // where Standard's highlight (BRDF1 on Windows) is the square root of GGX's: a lobe as broad as the
+                // surface's roughness allows and about 1 at its flank, over the specular colour (0.22 for
+                // dielectrics, most of the albedo for metals). BRDF3's lobe was about 0.7 at its peak and 0 beside
+                // it, so shiny items lit by one light drew much darker than the game: the inventory's chain, keys,
+                // crank, shotgun and mask (CHAIN's term for metals is replaced by this one). The half vector is the
+                // pixel's and the normal normalized per pixel, as Standard has them: from the interpolated normal
+                // or R.L, the narrow lobes of smooth surfaces fell short at their peak (the shotgun at half its
+                // brightness). With highlights off there is no direct specular, as in Standard.
+                half perceptualRoughness = SmoothnessToPerceptualRoughness(s.smoothness);
+                half roughness = PerceptualRoughnessToRoughness(perceptualRoughness);
+                half3 direct = s.diffColor;
                 #if !defined(_SPECULARHIGHLIGHTS_OFF)
-                    half metal = saturate(1 - s.oneMinusReflectivity / unity_ColorSpaceDielectricSpec.a);
-                    c += s.specColor * (metal * ndotl) * gi.light.color;
+                    float3 h = mainLight.dir - s.eyeVec;
+                    float hl = rsqrt(max(dot(h, h), 0.0001));
+                    half nh = saturate(dot(s.normalWorld, h) * hl);
+                    half lh = saturate(dot(mainLight.dir, h) * hl);
+                    float d = nh * nh * (roughness * roughness - 1.0) + 1.00001;
+                    half specular = roughness / (max(0.32, lh) * (1.5 + roughness) * d);
+                    direct += min(specular, 100.0) * s.specColor;
                 #endif
+                // The indirect light as BRDF3's, with Standard's surface reduction (gamma space) on its specular.
+                half3 c = gi.indirect.diffuse * s.diffColor
+                        + (1.0 - 0.28 * roughness * perceptualRoughness) * gi.indirect.specular * lerp(s.specColor, grazing, i.normalWorld.w);
+                c += direct * (gi.light.color * ndotl);
 
-                // The fill and key lights, Lambert only; metals (specular colour, no diffuse) take them
-                // as broad highlights.
+                // The fill and key lights, Lambert only; with highlights, metals (specular colour, no diffuse)
+                // take them as broad highlights. Without, Standard draws no highlight from them: the specular
+                // colour lit by them brightened Mansion's metallic rugs by half (highlights off, metallic 0.36-0.38).
                 half3 diffuse = _CrowFillColor.rgb * saturate(dot(s.normalWorld, _CrowFill.xyz));
                 #if CROW_KEYS > 0
                     // Each lane a light.
@@ -245,17 +271,24 @@ Shader "CrowVita/Lit"
                     float4 ty = _CrowKeyY - p.y;
                     float4 tz = _CrowKeyZ - p.z;
                     float4 d2 = tx * tx + ty * ty + tz * tz;
-                    half4 r = rsqrt(max(d2, 0.000001));
+                    float4 r = rsqrt(max(d2, 0.000001));
                     half4 ndl = (tx * nw.x + ty * nw.y + tz * nw.z) * r;
                     half4 cone = _CrowKeyDW - (tx * _CrowKeyDX + ty * _CrowKeyDY + tz * _CrowKeyDZ) * r;
                     half4 x = d2 * _CrowKeyW;
                     half4 w = saturate((1.0 - x) * CROW_KEY_FADE) / (1.0 + CROW_KEY_ATTEN * x) * saturate(cone) * saturate(ndl);
+                    // The mask's bit for the material's layer, lane by lane.
+                    float4 bits = floor(_CrowKeyMaskLo * _CrowLayerLo + _CrowKeyMaskHi * _CrowLayerHi);
+                    w *= frac(bits * 0.5) * 2.0;
                     diffuse += _CrowKeyColor[0].rgb * w.x + _CrowKeyColor[1].rgb * w.y;
                     #if CROW_KEYS > 2
                         diffuse += _CrowKeyColor[2].rgb * w.z + _CrowKeyColor[3].rgb * w.w;
                     #endif
                 #endif
-                c += (s.diffColor + s.specColor) * diffuse;
+                #if defined(_SPECULARHIGHLIGHTS_OFF)
+                    c += s.diffColor * diffuse;
+                #else
+                    c += (s.diffColor + s.specColor) * diffuse;
+                #endif
 
                 c += Emission(i.tex.xy);
                 UNITY_APPLY_FOG(i.fogCoord, c);

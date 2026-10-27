@@ -65,7 +65,7 @@ Shader "CrowVita/Particles Lit"
             // CrowVita/Lit's globals (vita_shaders/CrowLit.shader): the key lights side by side, a light in each
             // lane (unused lanes far away and black), and the fill directional light.
             float4 _CrowKeyX, _CrowKeyY, _CrowKeyZ, _CrowKeyW;
-            half4 _CrowKeyDX, _CrowKeyDY, _CrowKeyDZ, _CrowKeyDW;
+            float4 _CrowKeyDX, _CrowKeyDY, _CrowKeyDZ, _CrowKeyDW;   // floats: see CrowLit.shader
             half4 _CrowKeyColor[4];
             half4 _CrowFill;
             half4 _CrowFillColor;
@@ -111,7 +111,7 @@ Shader "CrowVita/Particles Lit"
                 float4 ty = _CrowKeyY - p.y;
                 float4 tz = _CrowKeyZ - p.z;
                 float4 d2 = tx * tx + ty * ty + tz * tz;
-                half4 r = rsqrt(max(d2, 0.000001));
+                float4 r = rsqrt(max(d2, 0.000001));
                 half4 ndl = (tx * n.x + ty * n.y + tz * n.z) * r;
                 half4 cone = _CrowKeyDW - (tx * _CrowKeyDX + ty * _CrowKeyDY + tz * _CrowKeyDZ) * r;
                 half4 x = d2 * _CrowKeyW;

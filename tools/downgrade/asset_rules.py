@@ -1690,10 +1690,55 @@ DEPTH_LAYERS = {
 }
 
 
+# The layer a CrowVita/Lit material is drawn on (vita_shaders/CrowLit.shader's _CrowLayerLo/Hi), so that a key light
+# whose culling mask leaves the layer out doesn't light it, as the game's light doesn't (each Arcade cabinet's point light
+# 8 cm in front of its screen lights the cabinet and leaves out the screen's layer, 28; as a key light it washed the screen
+# out to white). From the enabled renderers of every scene and prefab, those switched off at the load as well; a material
+# drawn on several layers keeps Default's (every key lights it). compat/VitaLit.cs gives each key's mask.
+LAYER_DOCUMENT = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n', re.M)
+GAME_OBJECT_LAYER = re.compile(rb'^  m_Layer: (\d+)$', re.M)
+COMPONENT_OWNER = re.compile(rb'^  m_GameObject: \{fileID: (-?\d+)\}', re.M)
+COMPONENT_ENABLED = re.compile(rb'^  m_Enabled: (\d)', re.M)
+RENDERER_MATERIALS = re.compile(rb'^  m_Materials:\n((?:  - \{[^\n]*\}\n)*)', re.M)
+MATERIAL_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
+
+
+def material_layers(exported: Path, overlay: dict):
+    """Material GUID -> the layers of the enabled MeshRenderers and SkinnedMeshRenderers that draw it."""
+    layers = {}
+    files = sorted((exported / 'Assets').rglob('*.unity')) + sorted((exported / 'Assets').rglob('*.prefab'))
+    for path in files:
+        data = current_bytes(exported, overlay, path.relative_to(exported))
+        heads = list(LAYER_DOCUMENT.finditer(data))
+        owners, renderers = {}, []
+        for index, head in enumerate(heads):
+            kind = head.group(1)
+            if kind not in (b'1', b'23', b'137'):  # GameObject, MeshRenderer, SkinnedMeshRenderer
+                continue
+            body = data[head.end() : heads[index + 1].start() if index + 1 < len(heads) else len(data)]
+            if kind == b'1':
+                layer = GAME_OBJECT_LAYER.search(body)
+                if layer:
+                    owners[head.group(2)] = int(layer.group(1))
+                continue
+            enabled, owner = COMPONENT_ENABLED.search(body), COMPONENT_OWNER.search(body)
+            materials = RENDERER_MATERIALS.search(body)
+            if enabled and enabled.group(1) == b'1' and owner and materials:
+                renderers.append((owner.group(1), MATERIAL_GUID.findall(materials.group(1))))
+        for owner, guids in renderers:
+            layer = owners.get(owner)
+            if layer is not None:
+                for guid in guids:
+                    layers.setdefault(guid.decode(), set()).add(layer)
+    return layers
+
+
 def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
     """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
-    with their DEPTH_LAYERS."""
+    with their DEPTH_LAYERS and the layer they are drawn on (material_layers)."""
     layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
+    drawn_on = material_layers(exported, overlay)
+    on_layer = 0
     layered = {}
     shaders = dict(VITA_LIT_FROM)
     sfb = exported / 'Assets' / 'Shader' / 'SFBStandard.shader.meta'
@@ -1725,6 +1770,12 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
         if name and name.group(1) in layers:
             floats['_CrowDepthLayer'] = str(layers[name.group(1)])
             layered[name.group(1)] = layered.get(name.group(1), 0) + 1
+        drawn = drawn_on.get(meta_guid(exported / meta_of(relative)), set())
+        if len(drawn) == 1 and 0 not in drawn:
+            layer = next(iter(drawn))
+            floats['_CrowLayerLo'] = repr(2.0**-layer) if layer < 16 else '0'
+            floats['_CrowLayerHi'] = repr(2.0 ** (16 - layer)) if layer >= 16 else '0'
+            on_layer += 1
         text = set_properties(text, 'm_Floats', floats)
         text = set_properties(text, 'm_Colors', colors)
         result[relative] = text.encode('utf-8')
@@ -1734,7 +1785,7 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
         sys.exit(f'DEPTH_LAYERS names no CrowVita/Lit material: {missing}')
     log(
         f'CrowVita/Lit saved into {sum(counts)} materials: {counts[1]} Standard, {counts[2]} SFBStandard, '
-        f'{counts[3]} Legacy Diffuse; depth layers in {sum(layered.values())} of them'
+        f'{counts[3]} Legacy Diffuse; depth layers in {sum(layered.values())} of them, {on_layer} on one layer other than Default'
     )
     return result
 
