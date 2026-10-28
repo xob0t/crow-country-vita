@@ -1008,7 +1008,8 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
 # bounds too: a combiner names each cell's mesh after its material, so cells of the same parts (two vents,
 # a pipe, a cabinet) have the same name, count and index buffer at other places (110 meshes in 50 such
 # groups; without the bounds, 55 drew with another's vertices, up to 17 m from their place). Only
-# Underground SE's and NW's `elevator 5` cells (80 of 1,680 vertices 0.44 m apart) also have the same bounds.
+# Underground SE's and NW's `elevator 5` cells (80 of 1,680 vertices 0.44 m apart) also have the same bounds:
+# a key with sources whose vertices differ takes the one in the level file of the scene that uses the mesh.
 STREAMED_MESHES = WORK / 'streamed-meshes.json'
 STREAMED_MESH_CACHE = WORK / 'streamed-meshes'
 NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.M)
@@ -1029,14 +1030,16 @@ def mesh_key(name: str, vertex_count: int, index_buffer: bytes, bounds):
 
 
 def original_streamed_meshes(game: Path):
-    """{mesh_key: [.resS file name, offset, size]} for the game's meshes with streamed vertex data. Reading
+    """{mesh_key: [[.resS file name, offset, size], ...]} for the game's meshes with streamed vertex data. Reading
     the data files takes UnityPy minutes, so the result is kept in work/, keyed by their sizes and times."""
     import json
 
     data = game_data(game)
     files = sorted(p for p in data.iterdir() if re.fullmatch(r'level\d+|.*\.assets', p.name))
     key = hashlib.sha256(
-        json.dumps([MESH_KEY_VERSION, *([p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files)]).encode()
+        json.dumps(
+            [MESH_KEY_VERSION, 'sources', *([p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files)]
+        ).encode()
     ).hexdigest()
     try:
         cached = json.loads(STREAMED_MESHES.read_text(encoding='utf-8'))
@@ -1059,7 +1062,7 @@ def original_streamed_meshes(game: Path):
             bounds = [aabb[part][axis] for part in ('m_Center', 'm_Extent') for axis in 'xyz']
             count = tree['m_VertexData']['m_VertexCount']
             found = mesh_key(tree['m_Name'], count, bytes(tree['m_IndexBuffer']), bounds)
-            meshes[found] = [Path(stream['path']).name, stream['offset'], stream['size']]
+            meshes.setdefault(found, []).append([Path(stream['path']).name, stream['offset'], stream['size']])
     STREAMED_MESHES.write_text(json.dumps({'key': key, 'meshes': meshes}), encoding='utf-8')
     return meshes
 
@@ -1076,6 +1079,34 @@ def exported_mesh_key(path: Path):
     if not (name and count and indices and bounds) or count[1] == b'0':
         return None
     return mesh_key(name[1].decode('utf-8'), int(count[1]), bytes.fromhex(indices[1].decode()), bounds.groups())
+
+
+def read_source(data: Path, source):
+    name, offset, length = source
+    with (data / name).open('rb') as handle:
+        handle.seek(offset)
+        return handle.read(length)
+
+
+def scene_source(exported: Path, relative: Path, sources):
+    """Of a key's sources whose vertices differ, the one in the level file (level<N>.resS,
+    sharedassets<N>.assets.resS) of the one scene that uses the mesh, N its build index."""
+    assets = exported / 'Assets'
+    guid = mesh_guids(assets).get(relative.with_name(relative.name + '.meta'))
+    scenes = [s for s, users in scene_mesh_scan(assets).items() if any(guid in found for found in users)]
+    settings = (exported / 'ProjectSettings' / 'EditorBuildSettings.asset').read_text(encoding='utf-8')
+    order = re.findall(r'^  - enabled: 1\n    path: Assets/(.*)$', settings, re.M)
+    levels = {order.index(s.as_posix()) for s in scenes if s.as_posix() in order}
+    level = re.compile(r'(?:level|sharedassets)(\d+)(?:\.assets)?\.resS')
+    picked = [s for s in sources if level.fullmatch(s[0]) and int(level.fullmatch(s[0])[1]) in levels]
+    if len(scenes) != 1 or len(picked) != 1:
+        sys.exit(
+            f'Meshes: {relative.as_posix()} matches {len(sources)} game meshes with other vertices '
+            f'({", ".join(s[0] for s in sources)}), and its scenes '
+            f'({", ".join(s.as_posix() for s in scenes) or "none"}) single out none of them'
+        )
+    log(f'Meshes: {relative.as_posix()} takes its vertices from {picked[0][0]}, the level of {scenes[0].stem}')
+    return picked[0]
 
 
 def streamed_mesh_overlay(exported: Path, game: Path):
@@ -1099,18 +1130,18 @@ def streamed_mesh_overlay(exported: Path, game: Path):
     files = listing(assets)
     result, missing = {}, []
     for relative, found in sorted(empty.items()):
-        source = originals.get(found)
-        if source is None:
+        sources = originals.get(found)
+        if sources is None:
             missing.append(relative.as_posix())
             continue
+        source = sources[0]
+        if len({read_source(data, s) for s in sources}) > 1:
+            source = scene_source(exported, relative, sources)
         cached = STREAMED_MESH_CACHE / relative
         size, modified = files[relative]
         stamp = cached.with_name(cached.name + '.source')
         if not (cached.exists() and stamp.exists() and stamp.read_text() == f'{size} {modified} {source}'):
-            name, offset, length = source
-            with (data / name).open('rb') as handle:
-                handle.seek(offset)
-                vertices = handle.read(length)
+            vertices = read_source(data, source)
             text = (exported / 'Assets' / relative).read_bytes()
             lines = f'    m_DataSize: {len(vertices)}\n    _typelessdata: {vertices.hex()}\n'.encode()
             text = NO_VERTEX_DATA.sub(lambda _, lines=lines: lines, text, count=1)
