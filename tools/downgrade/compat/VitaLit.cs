@@ -42,15 +42,13 @@ using UnityEngine.SceneManagement;
 //                          vita as above (the PS Vita's default)
 //   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 4; 8 slots cost Mansion
 //                          8 ms for nothing seen)
-//   -crow-lit-min-range <m>  point lights with a shorter range stay Unity's, per vertex (default 0)
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
 //   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
 //   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
 //   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off);
 //                          2 lets the key lights light every layer, as before 27 Oct (their culling masks off)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litrange=<m>,
-// litfade=<s> and litview=<m>.
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litfade=<s> and litview=<m>.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -75,10 +73,9 @@ namespace CrowCompat
         static int swapPasses;
         static string lastLog, bundle;
         static int maxKeys = 4;
-        static float minRange = 0f;
         static float fadeTime = 0.35f, viewRadius = 4f;
 
-        // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litrange=, litfade=, litview=;
+        // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litfade=, litview=;
         // false for other keys (Quality.Change asks the next module).
         internal static bool Change(string key, string value)
         {
@@ -92,7 +89,6 @@ namespace CrowCompat
             switch (key)
             {
                 case "litkeys": maxKeys = Mathf.Clamp((int)number, 0, Keys); break;
-                case "litrange": minRange = number; break;
                 case "litfade": fadeTime = Mathf.Max(0f, number); break;
                 case "litview": viewRadius = Mathf.Max(0f, number); break;
                 default: return false;
@@ -107,7 +103,6 @@ namespace CrowCompat
             log = CrowFlags.Has(args, "-crow-lit-log");
             bundle = CrowFlags.Value(args, "-crow-lit-bundle");
             maxKeys = Mathf.Clamp((int)CrowFlags.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
-            minRange = CrowFlags.Number(args, "-crow-lit-min-range", minRange);
             fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", fadeTime));
             viewRadius = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-view", viewRadius));
             Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
@@ -632,9 +627,7 @@ namespace CrowCompat
                 // Only lights that reach what the camera sees.
                 if (view != null && !GeometryUtility.TestPlanesAABB(frustum, new Bounds(position, Vector3.one * (2f * light.range)))) continue;
                 // Each key slot costs every pixel of the screen, so at most maxKeys (Mansion: 4 slots with
-                // its candles 33.3 ms a frame, 8 slots 41.9, the game 66); -crow-lit-min-range leaves
-                // short-range point lights to Unity (per vertex) instead.
-                if (light.type == LightType.Point && light.range < minRange) continue;
+                // its candles 33.3 ms a frame, 8 slots 41.9, the game 66).
                 // What it gives the ground around the player: out if its range ends short of the
                 // radius, else intensity x range, attenuated as Unity's lights are over the distance
                 // past the radius; a spot first only when the player is inside its range.

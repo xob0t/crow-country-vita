@@ -183,13 +183,22 @@ namespace CrowCompat
             return field == null ? null : field.GetValue(target);
         }
 
-        // PlayMaker's global bool of that name (FsmVariables.GlobalVariables.FindFsmBool): its FsmBool, null when the
-        // game has no such global; without PlayMaker it throws.
+        // PlayMaker's variable of that name (FsmVariables.FindVariable) in an FSM's FsmVariables, or with variables null
+        // in the globals (FsmVariables.GlobalVariables): its NamedVariable, null when there is none; without PlayMaker
+        // it throws.
+        internal static object Variable(object variables, string name)
+        {
+            Type type = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
+            if (variables == null) variables = type.GetProperty("GlobalVariables").GetValue(null, null);
+            return type.GetMethod("FindVariable", new[] { typeof(string) }).Invoke(variables, new object[] { name });
+        }
+
+        // PlayMaker's global bool of that name: its FsmBool, null when the game has no such global (a variable's name
+        // is unique among all its types'); without PlayMaker it throws.
         internal static object GlobalBool(string name)
         {
-            Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
-            object globals = variables.GetProperty("GlobalVariables").GetValue(null, null);
-            return variables.GetMethod("FindFsmBool", new[] { typeof(string) }).Invoke(globals, new object[] { name });
+            object variable = Variable(null, name);
+            return variable != null && variable.GetType().Name == "FsmBool" ? variable : null;
         }
     }
 }

@@ -153,7 +153,7 @@ namespace CrowCompat
     // title) and the scene gap's empty scene (SceneGap); every other scene counts as an area. One list since
     // 21 Oct: twelve sceneLoaded handlers in eight modules kept their own, and two had drifted (ReverbNull's
     // and Cycle's left out CrowGap; the same there, as the gap is made by CreateScene, which raises no
-    // sceneLoaded). PhysCost's census skips only CrowMara (it also runs on the title), as before.
+    // sceneLoaded).
     public static class Scenes
     {
         public const string Logos = "Logos", Title = "Title";

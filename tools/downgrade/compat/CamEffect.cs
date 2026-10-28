@@ -34,7 +34,6 @@ using UnityEngine.SceneManagement;
 //                         PSX in one pass at 550x400, the blur straight from it (no 624x351 PSX
 //                         texture), the CRT pass with its noise from a random texture. With filters left out it draws
 //                         those of its passes that still apply (sfb+psx: pass 0 only).
-//   -crow-post-bundle <path>  CrowVita/Post from an asset bundle (for a build without it)
 // -crow-cycle, -crow-fight-cycle and -crow-ab take postfilters=<value> and postvita=<value>
 // (postdiscard=on|off: the Vita chain's targets' DiscardContents before each pass, on by default).
 // Part of CrowCompat; see Compat2018.cs.
@@ -430,15 +429,7 @@ namespace CrowCompat
 
         static string LoadPost()
         {
-            Shader shader = null;
-            string bundle = CrowFlags.Value(ProbeFiles.Args, "-crow-post-bundle");
-            if (bundle != null)
-            {
-                AssetBundle loaded = AssetBundle.LoadFromFile(bundle);
-                if (loaded != null) shader = loaded.LoadAllAssets<Shader>().FirstOrDefault(s => s.name == "CrowVita/Post");
-                Debug.Log("CROW_POST bundle " + bundle + ": " + (loaded == null ? "failed" : shader == null ? "no CrowVita/Post" : "loaded"));
-            }
-            if (shader == null) shader = Shader.Find("CrowVita/Post");
+            Shader shader = Shader.Find("CrowVita/Post");
             if (shader == null) return "CrowVita/Post is not in the build";
             if (!shader.isSupported) return "CrowVita/Post is not supported";
             var material = new Material(shader) { hideFlags = HideFlags.HideAndDontSave };

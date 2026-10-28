@@ -37,7 +37,7 @@ using UnityEngine.SceneManagement;
 //                               own (SceneSplit.cs' PlayerSplit)
 //   -crow-scaled-colliders game|box|report
 //                               box (the PS Vita's default) gives each mesh collider whose scale keeps
-//                               changing a box instead (PhysCost.cs' ScaledColliders); report only logs them
+//                               changing a box instead (ScaledColliders.cs); report only logs them
 //                               (CROW_SCALED); -crow-cycle takes scaled=
 //   -crow-scene-split off|on|check|report
 //                               the PS Vita build's split areas (SceneSplit.cs): off puts the parts
