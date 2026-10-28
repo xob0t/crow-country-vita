@@ -250,3 +250,51 @@ class CrowMeshCombineStrip : UnityEditor.Build.IProcessSceneWithReport
                   " ms=" + clock.ElapsedMilliseconds);
     }
 }
+
+// MeshCombineStudio's GarbageCollectMesh destroys its mesh when its object is destroyed. In the game the
+// cells a combiner made in the editor hold their meshes inside the scene, so every load of the scene
+// has meshes of its own and the unload's destroy frees them. The export saved those meshes as assets
+// of their own, which every load of the scene shares: the scene's first unload destroyed them for the
+// rest of the session, and from the next load on those cells drew nothing (Underground NW's walkways,
+// floors and walls pitch black from the second visit on, through the PS Vita's area loads; 53 scenes
+// have such cells, 2,994 of them; 28 Oct). Such a GarbageCollectMesh is written with no mesh, so the
+// meshes go with the scene's assets as any other asset does; those of meshes the scene holds itself
+// (the cells CrowMeshCombineBake combines, and those combined in play) keep theirs.
+class CrowGarbageCollectMeshes : UnityEditor.Build.IProcessSceneWithReport
+{
+    public int callbackOrder
+    {
+        get { return 11; }  // after CrowMeshCombineBake (10), whose cells hold meshes of the scene's own
+    }
+
+    public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
+    {
+        if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
+        Type collector = Type.GetType("MeshCombineStudio.GarbageCollectMesh, MeshCombineStudio.Runtime");
+        if (collector == null) return;  // a project without MeshCombineStudio
+        int cleared = 0, kept = 0, failed = 0;
+        foreach (GameObject root in scene.GetRootGameObjects())
+            foreach (Component component in root.GetComponentsInChildren(collector, true))
+            {
+                try
+                {
+                    var mesh = BuildUtil.Field(component, "mesh") as Mesh;
+                    if (mesh == null) continue;
+                    if (!AssetDatabase.Contains(mesh))
+                    {
+                        kept++;
+                        continue;
+                    }
+                    BuildUtil.SetField(component, "mesh", null);
+                    cleared++;
+                }
+                catch (Exception exception)
+                {
+                    failed++;
+                    Debug.LogError("DOWNGRADE_MCS " + scene.name + " garbage meshes: " + exception);
+                }
+            }
+        if (cleared + kept + failed > 0)
+            Debug.Log("DOWNGRADE_MCS " + scene.name + " garbage meshes cleared=" + cleared + " kept=" + kept + " failed=" + failed);
+    }
+}

@@ -195,6 +195,38 @@ namespace CrowCompat
         }
 
         static float lastUpdateAt = -1f;
+        static Diag probe;
+
+        // A screenshot of the frame as shown (-crow-shot, -crow-pad-press's shot). On the PS Vita
+        // ScreenCapture writes nothing (and vitacompanion's screenshot can run out of memory), so there the
+        // frame is read back at its end and saved as a PNG (960x544 RGB, about 1.5 MB while it is made).
+        internal static void Shot(string path)
+        {
+            if (Application.platform != RuntimePlatform.PSP2 || probe == null) ScreenCapture.CaptureScreenshot(path);
+            else probe.StartCoroutine(SaveFrame(path));
+        }
+
+        static System.Collections.IEnumerator SaveFrame(string path)
+        {
+            yield return new WaitForEndOfFrame();
+            var picture = new Texture2D(Screen.width, Screen.height, TextureFormat.RGB24, false);
+            try
+            {
+                picture.ReadPixels(new Rect(0, 0, Screen.width, Screen.height), 0, 0, false);
+                picture.Apply(false);
+                System.IO.File.WriteAllBytes(path, picture.EncodeToPNG());
+            }
+            catch (Exception exception)
+            {
+                Debug.Log("CROW_DIAG screenshot " + path + " failed: " + exception.Message);
+            }
+            Destroy(picture);
+        }
+
+        void Awake()
+        {
+            probe = this;
+        }
 
         void Update()
         {
@@ -251,7 +283,7 @@ namespace CrowCompat
             if (shotAfter >= 0f && !shotTaken && shotPath != null && now - lastLoad >= shotAfter)
             {
                 shotTaken = true;
-                ScreenCapture.CaptureScreenshot(shotPath);
+                Shot(shotPath);
                 Debug.Log("CROW_DIAG screenshot " + shotPath);
             }
             if (findPattern != null && !found && now - lastLoad >= findAfter)

@@ -128,7 +128,8 @@ namespace CrowCompat
         {
             Set(CrowFlags.Value(args, "-crow-pad", "reader", "rewired"));
             log = CrowFlags.Has(args, "-crow-pad-log");
-            Presses.Install(CrowFlags.Value(args, "-crow-pad-press"), CrowFlags.Value(args, "-crow-pad-press-from"), CrowFlags.Value(args, "-crow-pad-shots"));
+            Presses.Install(CrowFlags.Value(args, "-crow-pad-press"), CrowFlags.Value(args, "-crow-pad-press-from"), CrowFlags.Value(args, "-crow-pad-shots"),
+                            CrowFlags.Word(args, "-crow-pad-press-from", 2) == "each");
             if (log || mode != (CrowFlags.Vita ? Reader : Rewired)) Debug.Log("CROW_PAD mode=" + Describe());
         }
 
@@ -878,7 +879,7 @@ namespace CrowCompat
                 public float Start, End;
                 public int Buttons;
                 public float[] Axes;  // lx, ly, rx, ry
-                public bool Shot;
+                public bool Shot, WasShot;
             }
 
             static readonly List<Press> presses = new List<Press>();
@@ -886,7 +887,9 @@ namespace CrowCompat
             static float origin = -1f;
             static int shotsTaken;
 
-            internal static void Install(string value, string scene, string folder)
+            // each: the presses start again at every load of the scene, not only the first (an area entered
+            // again in a chain of loads, -crow-scene-then).
+            internal static void Install(string value, string scene, string folder, bool each)
             {
                 shots = folder;
                 if (string.IsNullOrEmpty(value)) return;
@@ -917,9 +920,22 @@ namespace CrowCompat
                 else
                     CrowEvents.Loaded("Presses.sceneLoaded", (loaded, how) =>
                     {
-                        if (origin < 0f && loaded.name == from) origin = Time.realtimeSinceStartup;
+                        if (loaded.name != from || origin >= 0f && !each) return;
+                        origin = Time.realtimeSinceStartup;
+                        for (int i = 0; i < presses.Count; i++)
+                        {
+                            Press press = presses[i];
+                            press.Shot = press.Shot || press.WasShot;
+                            presses[i] = press;
+                        }
                     });
-                Debug.Log("CROW_PAD presses=" + presses.Count + (from != null ? " from " + from : ""));
+                for (int i = 0; i < presses.Count; i++)
+                {
+                    Press press = presses[i];
+                    press.WasShot = press.Shot;
+                    presses[i] = press;
+                }
+                Debug.Log("CROW_PAD presses=" + presses.Count + (from != null ? " from " + from + (each ? " (each load)" : "") : ""));
             }
 
             // The buttons held now; the sticks' Unity values set in place.
@@ -935,7 +951,7 @@ namespace CrowCompat
                     {
                         press.Shot = false;
                         presses[i] = press;
-                        ScreenCapture.CaptureScreenshot(System.IO.Path.Combine(shots, "pad-" + (shotsTaken++).ToString("00") + "-" +
+                        Diag.Shot(System.IO.Path.Combine(shots, "pad-" + (shotsTaken++).ToString("00") + "-" +
                                                                                press.Start.ToString("0.0", CultureInfo.InvariantCulture) + ".png"));
                         Debug.Log("CROW_PAD shot at " + now.ToString("0.00", CultureInfo.InvariantCulture));
                     }
