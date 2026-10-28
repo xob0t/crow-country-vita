@@ -385,19 +385,25 @@ def sync(build: Path, build_wait=BUILD_WAIT_SECONDS):
     """Uploads the build's app files whose content changed since the last sync."""
     with reading(build, build_wait):
         # Files replaced under a running game crash it (27 Oct: a sync while the game ran, started by
-        # hand to keep the console awake), so the game is quit first.
-        if game_running():
-            print('sync: the game is running; quitting it first')
+        # hand to keep the console awake), so the game is quit first, also when perf can't tell.
+        running = game_running()
+        if running is not False:
+            state = 'the game is running' if running else "perf can't tell whether the game runs"
+            print(f'sync: {state}; quitting it first')
             print(quit_game())
         sync_files(build)
 
 
 def game_running():
-    """Whether the game is the running app (perf's "app:" line); False when perf can't tell."""
+    """Whether the game is the running app (perf's "app:" line), asked after wake: a game the display's
+    timeout paused shows as "app: none". None when the answer has no "app:" line (the released
+    vitacompanion has no perf); False when the command server doesn't answer (VitaShell's FTP alone)."""
+    wake()
     try:
-        return pipeline.VITA_TITLE_ID in command('perf', timeout=5)
+        out = command('perf', timeout=5)
     except OSError:
         return False
+    return pipeline.VITA_TITLE_ID in out if 'app:' in out else None
 
 
 def sync_files(build: Path):
