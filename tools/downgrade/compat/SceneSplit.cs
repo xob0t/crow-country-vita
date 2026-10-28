@@ -178,17 +178,23 @@ namespace CrowCompat
                     place.Last = now;
                     moves++;
                     place.Moves++;
-                    // Each part where it would be below the old parent: its old local position through the
-                    // parent's matrix, its rotation after the parent's (Unity's world rotation, also below a
-                    // mirroring parent). Its scale stays: the rooms move and turn, they don't scale.
-                    Quaternion rotation = place.Old.rotation;
+                    // Each part where it would be below the old parent: its old local pose through the
+                    // parent's matrix, read back as the root pose it has. Its scale stays (the rooms move
+                    // and turn, they don't scale), so its rotation is that matrix's axes over its scale.
+                    // Below a mirroring parent the parent's rotation times the part's old local rotation
+                    // is not it: the split left such a part a negative scale and the rotation that goes
+                    // with it (Underground NW's and SE's offset has x scale -1, and its decor/pipes, turned
+                    // 90 degrees, followed the elevator room turned 180 degrees about their pivot: a pipe
+                    // loop's collider stood in the elevator and Mara couldn't leave it, 28 Oct).
                     int count = 0;
                     foreach (SplitPart part in place.Parts)
                     {
                         if (part == null) continue;
                         Transform t = part.transform;
                         if (t.parent == part.parent) continue;  // put back (-crow-scene-split off)
-                        t.SetPositionAndRotation(now.MultiplyPoint3x4(part.position), rotation * part.rotation);
+                        Matrix4x4 there = now * Matrix4x4.TRS(part.position, part.rotation, part.scale);
+                        Vector3 scale = t.localScale;
+                        t.SetPositionAndRotation(there.GetColumn(3), Quaternion.LookRotation(there.GetColumn(2) * Mathf.Sign(scale.z), there.GetColumn(1) * Mathf.Sign(scale.y)));
                         count++;
                     }
                     followed += count;

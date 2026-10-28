@@ -143,6 +143,7 @@ namespace CrowCompat
         // From Diag.Install.
         internal static void Install(string[] args)
         {
+            sceneGlobals = CrowFlags.Value(args, "-crow-globals");
             mode = CrowFlags.Value(args, "-crow-fight");
             if (mode == null) return;
             if (mode != "real" && mode != "stress" && mode != "idle" && mode != "stand" && mode != "discover" && mode != "walk")
@@ -225,7 +226,18 @@ namespace CrowCompat
         // From Diag, just before it loads the area: the globals the area's FSMs read as they start.
         internal static void BeforeLoad()
         {
-            if (mode == null || mode == "stand" || mode == "walk" || beforeLoadDone) return;
+            if (beforeLoadDone) return;
+            if (mode == null || mode == "stand" || mode == "walk")
+            {
+                // -crow-globals without a fight: those globals only (PlayerExit=42 starts Underground NW
+                // in its elevator, as the ride down from Corridor A does).
+                if (sceneGlobals == null || !Reflect()) return;
+                beforeLoadDone = true;
+                var only = new StringBuilder();
+                Globals(sceneGlobals, only);
+                Debug.Log("CROW_DIAG globals" + only);
+                return;
+            }
             beforeLoadDone = true;
             if (!Reflect())
             {
@@ -243,20 +255,7 @@ namespace CrowCompat
                 for (int i = 0; i < area.IntNames.Length; i++) Global(area.IntNames[i], area.IntValues[i], set);
                 ClearEnemyArrays();
             }
-            if (extraGlobals != null)
-                foreach (string pair in extraGlobals.Split(';'))
-                {
-                    int equals = pair.LastIndexOf('=');
-                    if (equals <= 0) continue;
-                    string name = pair.Substring(0, equals).Trim();
-                    string text = pair.Substring(equals + 1).Trim();
-                    object current = Variable(name) == null ? null : GlobalValue(name);
-                    object value = text;
-                    if (current is bool) value = text == "1" || text.ToLowerInvariant() == "true";
-                    else if (current is int) value = int.Parse(text, Inv);
-                    else if (current is float) value = float.Parse(text, Inv);
-                    Global(name, value, set);
-                }
+            if (extraGlobals != null) Globals(extraGlobals, set);
             Global("item: handgun", true, set);
             Global("gun equipped", 1, set);
             Global("Handgun Laser", true, set);
@@ -267,6 +266,24 @@ namespace CrowCompat
             object boxMax = GlobalValue("Ammo in Box MAX");
             if (boxMax is int) Global("Ammo in Box", (int)boxMax, set);
             Debug.Log("CROW_FIGHT globals" + set);
+        }
+
+        // "<name>=<value>;...", each value typed as the variable is.
+        static void Globals(string pairs, StringBuilder set)
+        {
+            foreach (string pair in pairs.Split(';'))
+            {
+                int equals = pair.LastIndexOf('=');
+                if (equals <= 0) continue;
+                string name = pair.Substring(0, equals).Trim();
+                string text = pair.Substring(equals + 1).Trim();
+                object current = Variable(name) == null ? null : GlobalValue(name);
+                object value = text;
+                if (current is bool) value = text == "1" || text.ToLowerInvariant() == "true";
+                else if (current is int) value = int.Parse(text, Inv);
+                else if (current is float) value = float.Parse(text, Inv);
+                Global(name, value, set);
+            }
         }
 
         // ------------------------------------------------------------------------------ reflection
@@ -1107,6 +1124,7 @@ namespace CrowCompat
         // grenade), so deaths and their effects come at a steady rate whatever the shots hit.
         static bool explosionKills;
         static string extraGlobals;  // -crow-fight-globals "name=value;...": more globals before the load
+        static string sceneGlobals;  // -crow-globals "name=value;...": the same for -crow-scene without a fight
         static bool noAim;  // -crow-fight-aim off: no aiming and no shots (the pad free for menus)
         static GameObject fakeBullet;
         static float setupFailedAt = -1f;  // the first Setup exception

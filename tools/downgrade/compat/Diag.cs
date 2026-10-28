@@ -21,6 +21,8 @@ namespace CrowCompat
             "-crow-scene-then <name> <s>  s seconds (default 30) after that scene loaded, load this one as the game's\n" +
             "                         area changes do (PlayMaker's LoadScene action), with the player in play;\n" +
             "                         \"A>B>C\" loads them in turn, each s seconds after the one before\n" +
+            "-crow-globals \"<n>=<v>;...\"  PlayMaker globals set just before -crow-scene's load (PlayerExit=42: Underground NW\n" +
+            "                         starts in its elevator, as the ride down from Corridor A does)\n" +
             "-crow-heartbeat <s>      every s seconds, log frame times, GC and memory, visible renderers and lights\n" +
             "-crow-quit-after <s>     quit s seconds after the probe starts\n" +
             "-crow-shot <s> <path>    save a screenshot s seconds after the last scene load\n" +
