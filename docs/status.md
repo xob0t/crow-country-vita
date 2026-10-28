@@ -11,6 +11,7 @@ The pipeline builds the PS Vita VPK and the Windows Mono and IL2CPP players from
 On the console the game boots to the title, starts a new game and plays through the areas tried so far: every one of the 30 areas with the most data ran in chains of 29-38 loads without an exception or a crash (status-log: Every big area in long chains, 23 Oct).
 Saves are written to `ux0:data/CrowCountry`, and a save loads from the title, after Quit to Title and after a relaunch (Black screen after Quit to Title, 21 Oct; Long session on the combined build, 22 Oct).
 Numbers and dates are written in the invariant culture whatever the console's system language is (25 Oct).
+Underground's elevator rides free Mara as the game does, and the areas' pre-combined floors and walls are drawn on every visit, not only the first (28 Oct).
 The pad drives the game through CrowCompat's pad reader, with PlayStation prompts and the console's menus (no Quit on the title, no Screen entry).
 Audio keeps up with real time: the DSP clock ran at 0.99-1.01 of the wall clock in the 22 Oct soak's fights, with short dips after some loads.
 The Windows players boot, load areas and draw as the original does; the test tools run them hidden and muted ([vita.md](vita.md#fight-benchmark)).
@@ -33,6 +34,7 @@ Each recovers to 37 MB or more once loaded.
 ## The PS Vita's defaults
 
 Each default is a build setting or a CrowCompat flag's PS Vita value; [vita.md](vita.md#probe-flags) has the flag that turns it back.
+The shader patcher has 1 MB of USSE memory, twice Unity's fixed 512 KB (`pipeline.patcher_usse`, 512 KB more main memory).
 The CPU runs at 444 MHz and the GPU at 222 MHz (PSVshell's 500 MHz CPU is left alone).
 Frames are capped at 30 fps (vSyncCount 2): an even 30 where a frame fits in 33 ms.
 Graphics jobs are on (`CROW_GFX_JOBS=on` writes them into `boot.config`), with Unity's two job workers at the render thread's priority on CPU 1.
@@ -63,14 +65,15 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 - Dig Site's dark spots have not been checked with the depth layers (22 Oct).
 - The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
 - Underground SE and NW's `elevator 5` cells have the same bounds, so the misplaced-scenery fix can't tell them apart (22 Oct).
-- A render-thread crash with graphics jobs on (17 Oct, Roadside -> Entrance) has not come back in the soaks since.
+- The render-thread crashes of 17 and 26 Oct were the shader patcher's 512 KB of USSE memory running full, not graphics jobs; the eboot gives it 1 MB since 27 Oct.
+  Whether 1 MB lasts a whole playthrough is not known: 223 KB after 15 loads, about 9 KB per new area (`usseKB` in `-crow-memory-watch`; 27 Oct).
+- Something launched the game with no flags while the console sat idle (27 Oct, 04:03 and 06:40); the cause was not found.
 - The main menu once dropped to about 10 fps while idle; it was never reproduced (15 Oct).
 - vitacompanion once failed to allocate memory for a screenshot and the console hung 7 loads later (23 Oct): a tool problem, not the game's.
 
 ## Next steps
 
-1. The console check of the 26 Oct review's changes (the behaviour changes listed in `work/scratch/review/fix-*.md`).
-2. More memory margin for the loads into Haunted Hilltop.
-3. The Station Square fight's frame time.
-4. Load times, last measured as a whole on 15 Oct (boot to title about 21 s); reading PlayMaker's data was then the biggest cost.
-5. Play further: story events, fights across the game, and saves made in play and loaded later.
+1. More memory margin for the loads into Haunted Hilltop.
+2. The Station Square fight's frame time.
+3. Load times, last measured as a whole on 15 Oct (boot to title about 21 s); reading PlayMaker's data was then the biggest cost.
+4. Play further: story events, fights across the game, and saves made in play and loaded later.

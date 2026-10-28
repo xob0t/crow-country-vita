@@ -62,7 +62,7 @@ namespace CrowCompat
             {
                 threshold = (long)(ms / Ms);
                 // LoopProfile's markers (one before every step of the player loop and one at each phase's end),
-                // not a loop of its own: one SetPlayerLoop would drop the other's (Quality.cs, LoopProfile.OnMark).
+                // not a loop of its own: one SetPlayerLoop would drop the other's (LoopProfile.cs, LoopProfile.OnMark).
                 LoopProfile.Install(1e9f);  // no reports of its own
                 labels = LoopProfile.Labels;
                 ticks = new long[labels.Count];
@@ -127,7 +127,7 @@ namespace CrowCompat
         // -crow-load-cpu [ms]: through each area load (from the gap's first step, or any scene load,
         // to 8 s after the area's sceneLoaded), every ms (default 250) a CROW_LOADCPU line from a thread
         // of its own: each CPU's load and each game thread's share of a CPU over the window (the main
-        // thread, UnityPreload, the render worker, FMOD's), from the kernel (Audio.cs's Threads).
+        // thread, UnityPreload, the render worker, FMOD's), from the kernel (Threads.cs).
         // The main thread busy with UnityPreload idle is integration (Awake, OnEnable) or the
         // unused-asset pass; UnityPreload busy is reading and deserializing. A window with no line is a
         // garbage collection (it stops this thread too). Not with -crow-audio (one reader of the shares).

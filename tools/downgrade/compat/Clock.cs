@@ -154,7 +154,7 @@ namespace CrowCompat
             catch (Exception) { return null; }
         }
 
-        // Apart, as Mono looks the plugin up when it compiles a caller (see Audio.cs's Threads.SelfNative).
+        // Apart, as Mono looks the plugin up when it compiles a caller (see Threads.cs' Threads.SelfNative).
         [MethodImpl(MethodImplOptions.NoInlining)]
         static string DescribeNative()
         {

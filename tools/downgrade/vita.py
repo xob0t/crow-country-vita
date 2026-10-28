@@ -8,7 +8,8 @@ needs no console. The other commands need vitacompanion's command server on port
 must have been installed once from the VPK (install, or the VPK in VitaShell); after that:
 
   sync [--build dir]    upload the files that changed since the last sync into
-                        ux0:app/<title> (the first sync uploads everything)
+                        ux0:app/<title> (the first sync uploads everything); quits a
+                        running game first
   seed [--build dir]    record that build as installed (e.g. from its VPK) without
                         uploading, so the next sync sends only differences
   install [--build dir] package the build as a VPK and stream it to the installer (also

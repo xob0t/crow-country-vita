@@ -34,7 +34,7 @@ uv run tools/downgrade/vita.py crashes --pull    # the newest crash dump, symbol
 
 | Command | Effect |
 | --- | --- |
-| `sync [--build dir]` | Upload the files that changed since the last sync into `ux0:app/CROW00001`. |
+| `sync [--build dir]` | Upload the files that changed since the last sync into `ux0:app/CROW00001`. A running game is quit first, as files replaced under it crash it: sync wakes the console and asks perf (a game the display's timeout paused shows as no app), and quits when perf's answer can't tell. |
 | `seed --build dir` | Record a build as installed (from its VPK, say) without uploading, so the next sync sends only differences. |
 | `install [--build dir]` | Package the build as a VPK and stream it to the installer; also applies `param.sfo` changes. |
 | `launch`, `quit`, `run` | Start the game, quit all apps, or quit, sync and launch. |
@@ -166,6 +166,7 @@ A frame that takes seconds or minutes doesn't crash, and the console has no samp
 uv run tools/downgrade/vita.py args -crow-stall-dump 15
 uv run tools/downgrade/vita.py launch
 uv run tools/downgrade/vita.py crashes --pull --thread main
+uv run tools/downgrade/vita.py args              # clears the flags: args.txt stays until then
 ```
 
 ## IL2CPP settings

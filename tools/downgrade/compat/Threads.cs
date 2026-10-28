@@ -95,13 +95,13 @@ namespace CrowCompat
 
         // Unity's loading thread (UnityPreload) runs on CPU 2 by the player's choice, beside FMOD's mixer,
         // stream and file threads, and at the priority of the mixer (0x40) when backgroundLoadingPriority
-        // is High: the title's background load of the player's scene (Loading.cs) took the mixer from the
+        // is High: the title's background load of the player's scene (SceneFlow.cs' MaraScene) took the mixer from the
         // 58% of CPU 2 it needs to 15%, and the DSP clock ran at a quarter of real time for 30 s (the
         // stutter on the title). CPU 1 has the render worker alone (10-40%). A thread that samples which
         // thread each CPU runs, every millisecond, finds UnityPreload by its name when it first runs (the
-        // title's prefetch, Loading.cs) and moves it (-crow-loader-cpus; default 1).
+        // title's prefetch, SceneFlow.cs' ScenePrefetch) and moves it (-crow-loader-cpus; default 1).
         // Whether UnityPreload left CPU 2: background loads can then run at Normal priority (below the
-        // render worker's, on CPU 1) without starving FMOD (Loading.cs).
+        // render worker's, on CPU 1) without starving FMOD (SceneFlow.cs' MaraScene).
         public static volatile bool LoaderMoved;
 
         internal static void MoveLoader(string[] args)

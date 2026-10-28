@@ -16,7 +16,8 @@ using UnityEngine.SceneManagement;
 //   -crow-shadows off|hard|all      no shadows, hard shadows only, or the game's soft and hard
 //   -crow-shadow-distance <m>       how far from the camera shadows are drawn
 //   -crow-shadow-resolution <0-3>   Low, Medium, High, VeryHigh
-// The PS Vita's defaults: hard shadows, Low, 12 m (the game: soft and hard, Medium there, 50 m).
+// The PS Vita's defaults: hard shadows, Low, 12 m (the game: soft and hard, High, 50 m; the PS Vita data has
+// Medium, as High crashed there: asset_rules.PLATFORM_QUALITY_RULES).
 // And measurements:
 //   -crow-loop-profile <s>          every s seconds, the main thread's time per player loop step
 //                                   (CROW_LOOP lines; LoopProfile.cs)
@@ -78,7 +79,7 @@ namespace CrowCompat
                 // The PS Vita's shadows: hard, Low resolution, 12 m, and (Draws.cs) only the player's
                 // parts cast them (none in the scenes without the player prefab: Ladder, the Driving
                 // Intro, the Ending; see Draws.CasterOff). The shadow pass's GPU cost is mostly fixed: in Roadside with one-pass
-                // lighting (VitaLit.cs) the game's soft Medium 50 m shadows take a frame from 33.4 to
+                // lighting (VitaLit.cs) the game's soft 50 m shadows (at the PS Vita data's Medium) take a frame from 33.4 to
                 // 38 ms, these 33.3 (30 fps), with Mara's shadow kept.
                 if (shadows == null) shadows = "hard";
                 if (shadowResolution < 0) shadowResolution = 0;

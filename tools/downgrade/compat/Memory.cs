@@ -778,7 +778,7 @@ namespace CrowCompat
             }
         }
 
-        // Apart, as Mono looks the function up when it compiles a caller (see Audio.cs's Threads.SelfNative).
+        // Apart, as Mono looks the function up when it compiles a caller (see Threads.cs' Threads.SelfNative).
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         static long Native()
         {
