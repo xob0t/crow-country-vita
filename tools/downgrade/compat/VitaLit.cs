@@ -292,13 +292,12 @@ namespace CrowCompat
                 swapPasses++;
                 Swap();
             }
-            if (now >= nextSelect || Woken())
+            // Woken every frame: a sight that comes on when the periodic pass is due is urgent too.
+            bool woken = Woken();
+            if (now >= nextSelect || woken)
             {
-                if (now < nextSelect)
-                {
-                    wokenSelects++;
-                    urgent = true;
-                }
+                if (woken) urgent = true;
+                if (now < nextSelect) wokenSelects++;
                 selects++;
                 nextSelect = now + 0.25f;
                 Select();
@@ -771,12 +770,12 @@ namespace CrowCompat
             {
                 // What the shader is given from now (CROW_LIT keys is Select's choice; with the fades the slots follow it).
                 var line = new System.Text.StringBuilder("CROW_LIT slots");
-                foreach (Light light in keys)
+                for (int i = 0; i < keys.Count; i++)
                 {
+                    Light light = keys[i];
                     if (light == null || light.type == LightType.Directional) continue;
-                    Vector3 at = light.transform.position;
-                    line.Append(" (").Append(at.x.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(';')
-                        .Append(at.z.ToString("F1", System.Globalization.CultureInfo.InvariantCulture)).Append(')');
+                    line.Append(' ').Append(Hierarchy.Path(light.transform, 2)).Append('@')
+                        .Append(weights[i].ToString("F2", System.Globalization.CultureInfo.InvariantCulture));
                 }
                 Debug.Log(line.ToString());
             }
