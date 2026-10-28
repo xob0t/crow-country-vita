@@ -1728,6 +1728,7 @@ DEPTH_LAYERS = {
 # 8 cm in front of its screen lights the cabinet and leaves out the screen's layer, 28; as a key light it washed the screen
 # out to white). From the enabled renderers of every scene and prefab, those switched off at the load as well; a material
 # drawn on several layers keeps Default's (every key lights it). compat/VitaLit.cs gives each key's mask.
+# CrowVita/Particles Lit tests the masks too: the guns' lights leave out Particles, the layer of the Crypt's dust.
 LAYER_DOCUMENT = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n', re.M)
 GAME_OBJECT_LAYER = re.compile(rb'^  m_Layer: (\d+)$', re.M)
 COMPONENT_OWNER = re.compile(rb'^  m_GameObject: \{fileID: (-?\d+)\}', re.M)
@@ -1737,7 +1738,7 @@ MATERIAL_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
 
 
 def material_layers(exported: Path, overlay: dict):
-    """Material GUID -> the layers of the enabled MeshRenderers and SkinnedMeshRenderers that draw it."""
+    """Material GUID -> the layers of the enabled renderers that draw it."""
     layers = {}
     files = sorted((exported / 'Assets').rglob('*.unity')) + sorted((exported / 'Assets').rglob('*.prefab'))
     for path in files:
@@ -1746,7 +1747,8 @@ def material_layers(exported: Path, overlay: dict):
         owners, renderers = {}, []
         for index, head in enumerate(heads):
             kind = head.group(1)
-            if kind not in (b'1', b'23', b'137'):  # GameObject, MeshRenderer, SkinnedMeshRenderer
+            # GameObject, MeshRenderer, SkinnedMeshRenderer, ParticleSystemRenderer, LineRenderer, TrailRenderer
+            if kind not in (b'1', b'23', b'137', b'199', b'120', b'96'):
                 continue
             body = data[head.end() : heads[index + 1].start() if index + 1 < len(heads) else len(data)]
             if kind == b'1':
@@ -1766,11 +1768,21 @@ def material_layers(exported: Path, overlay: dict):
     return layers
 
 
-def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
+def layer_floats(drawn: set):
+    """_CrowLayerLo/Hi for a material drawn on one layer other than Default (material_layers); none otherwise."""
+    if len(drawn) != 1 or 0 in drawn:
+        return {}
+    layer = next(iter(drawn))
+    return {
+        '_CrowLayerLo': repr(2.0**-layer) if layer < 16 else '0',
+        '_CrowLayerHi': repr(2.0 ** (16 - layer)) if layer >= 16 else '0',
+    }
+
+
+def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
     """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
     with their DEPTH_LAYERS and the layer they are drawn on (material_layers)."""
     layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
-    drawn_on = material_layers(exported, overlay)
     on_layer = 0
     layered = {}
     shaders = dict(VITA_LIT_FROM)
@@ -1803,12 +1815,9 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
         if name and name.group(1) in layers:
             floats['_CrowDepthLayer'] = str(layers[name.group(1)])
             layered[name.group(1)] = layered.get(name.group(1), 0) + 1
-        drawn = drawn_on.get(meta_guid(exported / meta_of(relative)), set())
-        if len(drawn) == 1 and 0 not in drawn:
-            layer = next(iter(drawn))
-            floats['_CrowLayerLo'] = repr(2.0**-layer) if layer < 16 else '0'
-            floats['_CrowLayerHi'] = repr(2.0 ** (16 - layer)) if layer >= 16 else '0'
-            on_layer += 1
+        layer = layer_floats(drawn_on.get(meta_guid(exported / meta_of(relative)), set()))
+        floats.update(layer)
+        on_layer += bool(layer)
         text = set_properties(text, 'm_Floats', floats)
         text = set_properties(text, 'm_Colors', colors)
         result[relative] = text.encode('utf-8')
@@ -1855,9 +1864,10 @@ def set_properties(text: str, block: str, values: dict):
 # CrowVita/Particles Lit (vita_shaders/CrowParticles.shader) for Particles/Standard Surface's materials: the editor
 # compiles no PS Vita programs of that surface shader, so they (the Crypt's water rings, bubbles, splashes, leaves
 # and blobs, the crows' feathers, the enemies' death puffs, Scamper's prints) drew with its fallback, VertexLit:
-# opaque quads. The PS Vita project saves them with this one.
-def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str):
+# opaque quads. The PS Vita project saves them with this one, with the layer they are drawn on (material_layers).
+def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str, drawn_on: dict):
     result = {}
+    on_layer = 0
     for path in (exported / 'Assets').rglob('*.mat'):
         relative = path.relative_to(exported)
         text = current_text(exported, overlay, relative)
@@ -1865,9 +1875,12 @@ def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str):
         if not found or found.group(1) != BUILTIN_PARTICLES_SURFACE:
             continue
         shader = f'{{fileID: 4800000, guid: {particles_guid}, type: 3}}'
-        result[relative] = (text[: found.start(1)] + shader + text[found.end(1) :]).encode('utf-8')
+        text = text[: found.start(1)] + shader + text[found.end(1) :]
+        layer = layer_floats(drawn_on.get(meta_guid(exported / meta_of(relative)), set()))
+        on_layer += bool(layer)
+        result[relative] = set_properties(text, 'm_Floats', layer).encode('utf-8')
     expect(len(result), 9, 'Particles/Standard Surface materials saved with CrowVita/Particles Lit')
-    log(f'CrowVita/Particles Lit saved into {len(result)} materials')
+    log(f'CrowVita/Particles Lit saved into {len(result)} materials, {on_layer} on one layer other than Default')
     return result
 
 
@@ -1894,12 +1907,14 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     result[VITA_LIT_FOLDER / post.name] = post.read_bytes()
     post_meta = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter')
     result[meta_of(VITA_LIT_FOLDER / post.name)] = post_meta.encode()
+    drawn_on = material_layers(exported, overlay) if platform == 'vita' else {}
     if platform == 'vita':
         particles = VITA_SHADERS / 'CrowParticles.shader'
         result[VITA_LIT_FOLDER / particles.name] = particles.read_bytes()
         particles_meta = stable_meta('asset', 'CrowVita/CrowParticles.shader', 'ShaderImporter')
         result[meta_of(VITA_LIT_FOLDER / particles.name)] = particles_meta.encode()
-        result.update(vita_particle_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowParticles.shader')))
+        particles_guid = guid_for('asset', 'CrowVita/CrowParticles.shader')
+        result.update(vita_particle_bake(exported, overlay, particles_guid, drawn_on))
     for index, keywords in enumerate(sorted(sets)):
         name = f'CrowLitVariant{index}'
         relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'
@@ -1911,5 +1926,5 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     result.update(folder_meta(VITA_LIT_FOLDER / 'Variants'))
     log(f'CrowVita/Lit: {len(sets)} keyword sets of the Standard materials')
     if platform == 'vita' and build_switches(platform, ('project',))['CROW_LIT_BAKE'] == 'on':
-        result.update(vita_lit_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowLit.shader')))
+        result.update(vita_lit_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowLit.shader'), drawn_on))
     return result

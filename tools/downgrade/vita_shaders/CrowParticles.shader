@@ -19,6 +19,9 @@ Shader "CrowVita/Particles Lit"
         _Cutoff("Alpha Cutoff", Range(0.0, 1.0)) = 0.5
         [Gamma] _Metallic("Metallic", Range(0.0, 1.0)) = 0.0
         _EmissionColor("Color", Color) = (0,0,0)
+        // The layer of the renderers that draw the material, as CrowLit.shader has it (asset_rules.vita_particle_bake).
+        [HideInInspector] _CrowLayerLo ("", Float) = 1
+        [HideInInspector] _CrowLayerHi ("", Float) = 0
 
         [HideInInspector] _Mode ("__mode", Float) = 0.0
         [HideInInspector] _BlendOp ("__blendop", Float) = 0.0
@@ -69,6 +72,8 @@ Shader "CrowVita/Particles Lit"
             half4 _CrowKeyColor[4];
             half4 _CrowFill;
             half4 _CrowFillColor;
+            float4 _CrowKeyMaskLo, _CrowKeyMaskHi;
+            float _CrowLayerLo, _CrowLayerHi;
             // CrowLit.shader's key light falloff.
             #define CROW_KEY_ATTEN 25.0
             #define CROW_KEY_FADE 2.7778
@@ -116,6 +121,9 @@ Shader "CrowVita/Particles Lit"
                 half4 cone = _CrowKeyDW - (tx * _CrowKeyDX + ty * _CrowKeyDY + tz * _CrowKeyDZ) * r;
                 half4 x = d2 * _CrowKeyW;
                 half4 w = saturate((1.0 - x) * CROW_KEY_FADE) / (1.0 + CROW_KEY_ATTEN * x) * saturate(cone) * saturate(ndl);
+                // A key whose culling mask leaves out the material's layer lights nothing (the guns' lights leave
+                // out Particles, the layer of the Crypt's dust, drips and water rings).
+                w *= frac(floor(_CrowKeyMaskLo * _CrowLayerLo + _CrowKeyMaskHi * _CrowLayerHi) * 0.5) * 2.0;
                 light += _CrowKeyColor[0].rgb * w.x + _CrowKeyColor[1].rgb * w.y + _CrowKeyColor[2].rgb * w.z + _CrowKeyColor[3].rgb * w.w;
                 o.light = light * OneMinusReflectivityFromMetallic(_Metallic);
                 UNITY_TRANSFER_FOG(o, o.pos);
