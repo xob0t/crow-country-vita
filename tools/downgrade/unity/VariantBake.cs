@@ -5,19 +5,20 @@ using UnityEditor;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
 
-// Enemies' random looks picked as the PS Vita build writes the scene, a fixed look per build (the user's call: the
-// same puddle at every visit). Their RandomVariant scripts each keep one of their variants in Awake and switch the
-// others off.
-// - Haunted Hilltop's Enemy Puddle is 3,613 transforms, 1,822 behaviours and 1,371 renderers in the export: 68 copies
-//   of a blob part, each made of RandomVariant sets (252 scripts, 2 to 18 variants each), so about 2,700 of those
-//   transforms are loaded at every visit only to stay off. Haunted Hilltop's load after Ocean Kingdom bottomed at 4-7
-//   MB of free main memory.
+// Enemies' random looks picked as the PS Vita build writes the scene, a fixed look per placement and build (the
+// user's call: the same puddle at every visit). Their RandomVariant scripts each keep one of their variants in Awake
+// and switch the others off. Every enemy's, in every scene: below each "Enemy <type>" root with a Rigidbody, as
+// CrowCompat's EnemyNames has it (3,325 scripts below 56 enemies: 11 Puddles, 4 Lumbers, 32 Human Guests, 9 Goblins).
+// - An Enemy Puddle is 3,613 transforms, 1,822 behaviours and 1,371 renderers in the export: 68 copies of a blob
+//   part, each made of RandomVariant sets (252 scripts, 2 to 18 variants each), so about 2,700 of those transforms
+//   are loaded at every visit only to stay off. Haunted Hilltop's load after Ocean Kingdom bottomed at 4-7 MB of
+//   free main memory; Entrance and Underground NE have two puddles.
 // - The Lumber (Ocean Kingdom, Corridor A, Corridor B, Underground NW) has 72 (its teeth, prods and wounds). The
 //   merge takes every variant for a part that switches on its own, so the parts stayed apart below each: 289
 //   renderers drawn where 12 of its transforms move, about 11 ms of the main thread a frame (26 Oct, DIP). With
 //   the picks made, 211 (Underground NW's): most of the rest is its translucent skin, which the merge takes for
 //   enemies too.
-// Here each RandomVariant of those enemies picks once, in hierarchy order (an outer pick first, so the variants it
+// Here each RandomVariant of an enemy picks once, in hierarchy order (an outer pick first, so the variants it
 // drops take their inner scripts with them), as its DoRandom would (UnityEngine.Random.Range) but with its own seed
 // (CrowCompat's Merge.PickSeed: the scene, the script's place in it), so every build picks alike and a change
 // elsewhere in the scene leaves the other picks as they were:
@@ -27,18 +28,9 @@ using UnityEngine;
 // included; a joint's body; an LODGroup's renderer; a particle system's shape), or a string in a behaviour names it;
 // the script then stays too, with its pick made (onAwake and onEnable off, its list the picked variant alone, which
 // the merge then leaves alone), and so does a script anything references. From CROW_VARIANT_BAKE
-// (common.BUILD_SWITCHES): on (the enemies in Enemies' scenes; the default with the PS Vita's scene data), all (in
-// every scene), off.
+// (common.BUILD_SWITCHES): on (the default with the PS Vita's scene data), off.
 class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
 {
-    // The enemies' root names (a prefix: "Enemy Lumber (off)" too) and the scenes where on bakes them (null: every
-    // scene). The puddle only where the memory is short.
-    static readonly Dictionary<string, string[]> Enemies = new Dictionary<string, string[]>
-    {
-        { "Enemy Puddle", new[] { "Haunted Hilltop" } },
-        { "Enemy Lumber", null },
-    };
-
     static Func<Component, int> pickSeed;
 
     public int callbackOrder
@@ -61,13 +53,10 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
         return false;
     }
 
-    // The enemy prefix a root's name starts with, if mode bakes it in this scene; null if none.
-    static string Enemy(string name, string scene, string mode)
+    // An enemy's root: "Enemy <type>" ("Enemy Lumber (off)" too) with a Rigidbody.
+    static bool IsEnemy(Transform t)
     {
-        foreach (KeyValuePair<string, string[]> enemy in Enemies)
-            if (name.StartsWith(enemy.Key, StringComparison.Ordinal) && (mode == "all" || enemy.Value == null || enemy.Value.Contains(scene)))
-                return enemy.Key;
-        return null;
+        return t.name.StartsWith("Enemy ", StringComparison.Ordinal) && t.GetComponent<Rigidbody>() != null;
     }
 
     // Who references what inside the enemies: a target's transform -> the referrers' transforms; and every
@@ -120,11 +109,10 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
     public void OnProcessScene(UnityEngine.SceneManagement.Scene scene, BuildReport report)
     {
         if (report == null || !BuildPipeline.isBuildingPlayer) return;  // entering play mode
-        string mode = BuildUtil.Switch("CROW_VARIANT_BAKE");
-        if (mode == "off") return;
-        var enemies = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren<Transform>(true))
-            .Where(t => Enemy(t.name, scene.name, mode) != null).ToList();
+        if (BuildUtil.Switch("CROW_VARIANT_BAKE") == "off") return;
+        var enemies = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren<Transform>(true)).Where(IsEnemy).ToList();
         enemies.RemoveAll(p => enemies.Any(q => q != p && Inside(p.parent, q)));  // the outermost
+        enemies.RemoveAll(e => !e.GetComponentsInChildren<MonoBehaviour>(true).Any(s => s != null && s.GetType().Name == "RandomVariant"));
         if (enemies.Count == 0) return;
         var clock = System.Diagnostics.Stopwatch.StartNew();
         int scripts = 0, variants = 0, dropped = 0, transforms = 0, keptVariants = 0, keptScripts = 0, failed = 0;
@@ -209,8 +197,9 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
             failed++;
             Debug.LogError("DOWNGRADE_VARIANT_BAKE " + scene.name + " failed: " + exception);
         }
-        // enemies=Puddle:1 or Lumber:1 (the prefix without "Enemy ").
-        string kinds = string.Join(",", enemies.GroupBy(e => Enemy(e.name, scene.name, mode).Substring(6)).Select(g => g.Key + ":" + g.Count()).ToArray());
+        // enemies=Puddle:1,Human_Guest:2 (the type: the name without "Enemy " and a " (2)").
+        string kinds = string.Join(",", enemies.GroupBy(e => e.name.Substring(6).Split('(')[0].Trim().Replace(' ', '_'))
+            .Select(g => g.Key + ":" + g.Count()).ToArray());
         Debug.Log("DOWNGRADE_VARIANT_BAKE " + scene.name + " enemies=" + kinds + " scripts=" + scripts + " variants=" + variants +
                   " dropped=" + dropped + " transforms=" + transforms + " keptVariants=" + keptVariants + " keptScripts=" + keptScripts +
                   " failed=" + failed + " ms=" + clock.ElapsedMilliseconds +
