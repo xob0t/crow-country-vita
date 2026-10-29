@@ -16,12 +16,11 @@ using UnityEngine.SceneManagement;
 //   -crow-shadows off|hard|all      no shadows, hard shadows only, or the game's soft and hard
 //   -crow-shadow-distance <m>       how far from the camera shadows are drawn
 //   -crow-shadow-resolution <0-3>   Low, Medium, High, VeryHigh
-// The PS Vita's defaults: hard shadows, Low, 12 m (the game: soft and hard, Medium there, 50 m).
+// The PS Vita's defaults: hard shadows, Low, 12 m (the game: soft and hard, High, 50 m; the PS Vita data has
+// Medium, as High crashed there: asset_rules.PLATFORM_QUALITY_RULES).
 // And measurements:
 //   -crow-loop-profile <s>          every s seconds, the main thread's time per player loop step
 //                                   (CROW_LOOP lines; LoopProfile.cs)
-//   -crow-physics-sync-probe        with it, each physics step's transform sync done and timed on its
-//                                   own just before the step (FixedUpdate.SyncTransforms(probe))
 //   -crow-loop-cpu                  with it, on the PS Vita, the main thread's run time per frame too
 //                                   (cpu=; the rest of the frame it waits: for jobs, the render thread,
 //                                   the GPU)
@@ -44,12 +43,6 @@ using UnityEngine.SceneManagement;
 //                                   -d.png... after them
 //   -crow-ab-hold <s>               with it, each picture stays s seconds (CROW_AB_SHOW names it as it
 //                                   shows), for a system screenshot (vita.py shot) of each
-//   -crow-census <s>                every s seconds, the enabled behaviours in loaded scenes by type
-//                                   (CROW_CENSUS), the most numerous first
-//   -crow-disable <Type,...>        every second, disable every behaviour of these types (by class
-//                                   name), to measure what their updates cost
-//   -crow-disable-in <scene>        only from 5 s after that scene loads (when the types drive the
-//                                   way there, as PlayMaker's FSMs do from the logos to the title)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -77,9 +70,6 @@ namespace CrowCompat
             string abPath = CrowFlags.Word(args, "-crow-ab", 2), abChanges = CrowFlags.Word(args, "-crow-ab", 3);
             if (abChanges != null)
                 Diag.Guard("AB", () => AB.Install(CrowFlags.Number(args, "-crow-ab", 10f), abPath, abChanges, CrowFlags.Number(args, "-crow-ab-hold", 0f)));
-            float census = CrowFlags.Number(args, "-crow-census", -1);
-            if (census > 0 || CrowFlags.Has(args, "-crow-disable"))
-                Diag.Guard("Census", () => Census.Install(census, CrowFlags.Value(args, "-crow-disable"), CrowFlags.Value(args, "-crow-disable-in")));
             pixelLights = (int)CrowFlags.Number(args, "-crow-pixel-lights", -1);
             shadowResolution = (int)CrowFlags.Number(args, "-crow-shadow-resolution", -1);
             shadowDistance = CrowFlags.Number(args, "-crow-shadow-distance", -1);
@@ -89,7 +79,7 @@ namespace CrowCompat
                 // The PS Vita's shadows: hard, Low resolution, 12 m, and (Draws.cs) only the player's
                 // parts cast them (none in the scenes without the player prefab: Ladder, the Driving
                 // Intro, the Ending; see Draws.CasterOff). The shadow pass's GPU cost is mostly fixed: in Roadside with one-pass
-                // lighting (VitaLit.cs) the game's soft Medium 50 m shadows take a frame from 33.4 to
+                // lighting (VitaLit.cs) the game's soft 50 m shadows (at the PS Vita data's Medium) take a frame from 33.4 to
                 // 38 ms, these 33.3 (30 fps), with Mara's shadow kept.
                 if (shadows == null) shadows = "hard";
                 if (shadowResolution < 0) shadowResolution = 0;
@@ -106,7 +96,7 @@ namespace CrowCompat
         static readonly Func<string, string, bool>[] modules =
         {
             VitaLit.Change, GfxThreads.Change, Perf.Change, Cameras.Change, UiPark.Change, RigPark.Change,
-            EnemyRebuild.Change, PhysCost.Change, Merge.ChangePlayer, FixedStep.Change, FastPaths.Change, Decor.Change,
+            EnemyRebuild.Change, Merge.ChangePlayer, FixedStep.Change, FastPaths.Change, Decor.Change,
             SharedClosures.Change, FilterGate.Change, Cuts.Change, CamEffect.Change, FsmTrim.Change, FsmCompile.Change,
             Pad.Change, Clock.Change, TweenProbe.Change, GcHandles.Change, AudioCensus.Change
         };
@@ -138,100 +128,6 @@ namespace CrowCompat
             if (shadows == "off") QualitySettings.shadows = ShadowQuality.Disable;
             else if (shadows == "hard") QualitySettings.shadows = ShadowQuality.HardOnly;
             else if (shadows == "all") QualitySettings.shadows = ShadowQuality.All;
-        }
-    }
-
-    // -crow-census and -crow-disable: which scripts run every frame, and what turning a kind of
-    // them off saves (with -crow-loop-profile's Update.ScriptRunBehaviourUpdate).
-    static class Census
-    {
-        static float every, lastCensus, lastDisable, loaded;
-        static string[] disabled;
-        static string disableIn;
-
-        public static void Install(float seconds, string types, string scene)
-        {
-            every = seconds;
-            disabled = types == null ? null : types.Split(',');
-            disableIn = scene;
-            CrowEvents.Loaded("Census.sceneLoaded", (s, mode) => loaded = Time.realtimeSinceStartup);
-            CrowEvents.BeforeRender("Census.Tick", Tick);
-            if (disabled != null) Debug.Log("CROW_CENSUS disabling " + types + (scene == null ? "" : " in " + scene));
-        }
-
-        static void Tick()
-        {
-            float now = Time.realtimeSinceStartup;
-            bool here = disableIn == null || (SceneManager.GetActiveScene().name == disableIn && now - loaded >= 5f);
-            if (disabled != null && here && now - lastDisable >= 1f)
-            {
-                lastDisable = now;
-                foreach (Behaviour behaviour in UnityEngine.Object.FindObjectsOfType<Behaviour>())
-                    if (behaviour.enabled && Array.IndexOf(disabled, behaviour.GetType().Name) >= 0) behaviour.enabled = false;
-            }
-            if (every <= 0f || now - lastCensus < every) return;
-            lastCensus = now;
-            var counts = new Dictionary<Type, int>();
-            foreach (Behaviour behaviour in UnityEngine.Object.FindObjectsOfType<Behaviour>())
-            {
-                if (!behaviour.isActiveAndEnabled) continue;
-                int count;
-                counts.TryGetValue(behaviour.GetType(), out count);
-                counts[behaviour.GetType()] = count + 1;
-            }
-            var line = new StringBuilder("CROW_CENSUS scene=").Append(SceneManager.GetActiveScene().name.Replace(' ', '_'));
-            line.Append(" total=").Append(counts.Values.Sum());
-            foreach (KeyValuePair<Type, int> pair in counts.OrderByDescending(p => p.Value).Take(40))
-            {
-                Type type = pair.Key;
-                const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-                bool update = type.GetMethods(all).Any(m => m.Name == "Update" || m.Name == "LateUpdate" || m.Name == "FixedUpdate");
-                line.Append(' ').Append(type.Name).Append(update ? "*" : "").Append('=').Append(pair.Value);
-            }
-            Debug.Log(line.ToString());
-            Actions();
-        }
-
-        // The actions of every enabled PlayMaker FSM's active state that are still running (not
-        // Finished): what PlayMaker updates every frame (CROW_FSM). By reflection: CrowCompat
-        // doesn't reference PlayMaker.
-        static void Actions()
-        {
-            Type fsmType = GameTypes.PlayMakerFsm;
-            if (fsmType == null) return;
-            const System.Reflection.BindingFlags all = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
-            int fsms = 0, running = 0;
-            var counts = new Dictionary<string, int>();
-            foreach (UnityEngine.Object component in UnityEngine.Object.FindObjectsOfType(fsmType))
-            {
-                var behaviour = component as Behaviour;
-                if (behaviour == null || !behaviour.isActiveAndEnabled) continue;
-                fsms++;
-                try
-                {
-                    object fsm = fsmType.GetProperty("Fsm", all).GetValue(component, null);
-                    object state = fsm == null ? null : fsm.GetType().GetProperty("ActiveState", all).GetValue(fsm, null);
-                    var actions = state == null ? null : state.GetType().GetProperty("Actions", all).GetValue(state, null) as Array;
-                    if (actions == null) continue;
-                    foreach (object action in actions)
-                    {
-                        if (action == null) continue;
-                        System.Reflection.PropertyInfo finished = action.GetType().GetProperty("Finished", all);
-                        if (finished != null && (bool)finished.GetValue(action, null)) continue;
-                        running++;
-                        string name = action.GetType().Name;
-                        int count;
-                        counts.TryGetValue(name, out count);
-                        counts[name] = count + 1;
-                    }
-                }
-                catch (Exception)
-                {
-                }
-            }
-            var line = new StringBuilder("CROW_FSM fsms=").Append(fsms).Append(" running=").Append(running);
-            foreach (KeyValuePair<string, int> pair in counts.OrderByDescending(p => p.Value).Take(40)) line.Append(' ').Append(pair.Key).Append('=').Append(pair.Value);
-            Debug.Log(line.ToString());
         }
     }
 

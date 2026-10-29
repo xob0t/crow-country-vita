@@ -30,7 +30,6 @@ using System.Runtime.CompilerServices;
 // Flags:
 //   -crow-script-cost game   keep the game's per-frame work (all but the FastStack, a type change),
 //                            for A/B measurements on one build
-//   -crow-script-cost-log    log each fade action's OnEnter and OnExit (CROW_SCRIPT_COST)
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -64,21 +63,17 @@ namespace CrowCompat
         static readonly Dictionary<object, UnityEngine.Object> guiActions = new Dictionary<object, UnityEngine.Object>(new SameObject());
         static readonly List<object> gone = new List<object>();
 
-        static readonly bool log = CrowFlags.Has(ProbeFiles.Args, "-crow-script-cost-log");
-
         public static void GuiEnter(object action, UnityEngine.Object owner)
         {
             guiActions[action] = owner;
             foreach (UnityEngine.Behaviour gui in sleeping)
                 if (gui != null && !gui.enabled) gui.enabled = true;
             sleeping.Clear();
-            if (log) UnityEngine.Debug.Log("CROW_SCRIPT_COST gui enter " + action.GetType().Name + " on " + (owner == null ? "?" : owner.name) + ": " + guiActions.Count + " active");
         }
 
         public static void GuiExit(object action)
         {
-            bool removed = guiActions.Remove(action);
-            if (log && removed) UnityEngine.Debug.Log("CROW_SCRIPT_COST gui exit " + action.GetType().Name + ": " + guiActions.Count + " active");
+            guiActions.Remove(action);
         }
 
         // Whether FullScreenColour.OnGUI can return at once: no fade action is between its OnEnter and

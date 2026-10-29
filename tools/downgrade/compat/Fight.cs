@@ -289,26 +289,22 @@ namespace CrowCompat
         // ------------------------------------------------------------------------------ reflection
 
         static Type fsmComponent;
-        static object globals;
-        static MethodInfo findVariable;
         static PropertyInfo rawValue;
 
         static bool Reflect()
         {
             if (fsmComponent != null) return true;
             fsmComponent = GameTypes.PlayMakerFsm;
-            Type variables = Type.GetType("HutongGames.PlayMaker.FsmVariables, PlayMaker");
             Type named = Type.GetType("HutongGames.PlayMaker.NamedVariable, PlayMaker");
-            if (fsmComponent == null || variables == null || named == null) return false;
-            globals = variables.GetProperty("GlobalVariables", BindingFlags.Static | BindingFlags.Public).GetValue(null, null);
-            findVariable = variables.GetMethod("FindVariable", new[] { typeof(string) });
+            if (fsmComponent == null || named == null) return false;
             rawValue = named.GetProperty("RawValue");
-            return globals != null && findVariable != null && rawValue != null;
+            return rawValue != null;
         }
 
+        // A PlayMaker global (Helpers.cs' ByName.Variable).
         static object Variable(string name)
         {
-            return findVariable.Invoke(globals, new object[] { name });
+            return ByName.Variable(null, name);
         }
 
         static object GlobalValue(string name)
@@ -696,7 +692,7 @@ namespace CrowCompat
                 if (!EnemyNames.IsDamage(name)) continue;
                 damage = fsm;
                 object variables = fsmComponent.GetProperty("FsmVariables").GetValue(fsm, null);
-                health = variables.GetType().GetMethod("FindVariable", new[] { typeof(string) }).Invoke(variables, new object[] { "my health" });
+                health = ByName.Variable(variables, "my health");
                 break;
             }
             return new Enemy
@@ -1138,7 +1134,7 @@ namespace CrowCompat
             if (fakeBullet == null) fakeBullet = new GameObject("CrowFightBullet");
             fakeBullet.transform.position = TargetPoint(enemy);
             object variables = fsmComponent.GetProperty("FsmVariables").GetValue(enemy.Damage, null);
-            object bullet = variables.GetType().GetMethod("FindVariable", new[] { typeof(string) }).Invoke(variables, new object[] { "the bullet" });
+            object bullet = ByName.Variable(variables, "the bullet");
             if (bullet != null) rawValue.SetValue(bullet, fakeBullet, null);
             if (enemy.HealthVariable != null) rawValue.SetValue(enemy.HealthVariable, 0.012f, null);
             Func<string> state = StateOf(enemy.Damage);

@@ -39,7 +39,7 @@ using Debug = UnityEngine.Debug;
 //   -crow-dsp-buffer <n>, -crow-real-voices <n>, -crow-sample-rate <hz>
 //                             AudioSettings.Reset with these before the first scene.
 //   -crow-load-priority <p>   the loading thread's priority (High, Normal, BelowNormal, Low) for the
-//                             player's scene read in the background on the title (Loading.cs; default Normal
+//                             player's scene read in the background on the title (SceneFlow.cs' MaraScene; default Normal
 //                             with the loading thread moved, else High).
 //   -crow-shared-reverb on|off  sources whose reverbs are alike share one (SharedReverb; the PS Vita's default: on).
 //   -crow-thread <name>:<priority>:<cpus>  with -crow-audio, set the priority (0 keeps it; 64 highest ..
@@ -67,7 +67,7 @@ namespace CrowCompat
 
         public static bool WantsTap { get { return CrowFlags.Has(Args, "-crow-audio-tap"); } }
 
-        // The background loading priority for the player's scene (Loading.cs's MaraScene).
+        // The background loading priority for the player's scene (SceneFlow.cs' MaraScene).
         public static UnityEngine.ThreadPriority LoadPriority(UnityEngine.ThreadPriority fallback)
         {
             string text = CrowFlags.Optional(Args, "-crow-load-priority");
@@ -530,7 +530,7 @@ namespace CrowCompat
             Share(now);
         }
 
-        // Unity's job workers on CPU 2 as well as CPU 1 (Quality.cs GfxThreads, 64:12) while the mixer has CPU 2 to
+        // Unity's job workers on CPU 2 as well as CPU 1 (Threads.cs' GfxThreads, 64:12) while the mixer has CPU 2 to
         // spare: no filter on (a shared reverb counts as one; a reverb costs the mixer 18-20% of CPU 2, a shared one
         // 28, the mixer without one 19-40%) for a second, and the DSP clock never behind in this area. Back on CPU 1
         // alone (64:1, the PS Vita's default) in the frame a filter comes on. With one filter allowed (wsharemax=1):
