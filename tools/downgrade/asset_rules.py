@@ -302,20 +302,18 @@ def rewired_vita_overlay(exported: Path, overlay: dict, platform: str):
 
 
 # IL2CPP strips the class libraries down to what code references. PlayMaker finds its actions
-# and the game's scripts by name, so the game's assemblies and plugins are kept whole. Engine types
-# whose members only PlayMaker's Set/Get Property actions reach (by name, through reflection), which
-# the linker would strip: ParticleSystem's emissionRate, startLifetime and loop (47 actions), and the
-# setters of Light's range and spotAngle (the save rooms' fire lights flicker that way: "Set Method not
-# found for 'range'", an exception several times a frame, once code_trim had removed the unused
-# PlayMaker light actions that kept them). And MeshCollider, whose sharedMesh getter only CrowCompat's
-# MeshRelease reads (by reflection; the game only sets it), on by default on the PS Vita.
-LINK_PRESERVE = {
-    'UnityEngine.CoreModule': ['UnityEngine.Light'],
-    'UnityEngine.ParticleSystemModule': ['UnityEngine.ParticleSystem'],
-    'UnityEngine.PhysicsModule': ['UnityEngine.MeshCollider'],
-}
-# Per platform, engine types only reflection reaches: the PS Vita's free memory for the memory probe
-# (compat/Memory.cs).
+# and the game's scripts by name, so the game's assemblies and plugins are kept whole. So are the engine
+# types whose members PlayMaker's Set/Get Property actions reach by name, through reflection (CrowCompat's
+# FastPaths makes delegates of the same accessors): every type an FSM's FsmProperty names, in the scenes
+# and the assets, that one of the platform's engine modules defines (Light, ParticleSystem, AudioSource,
+# Camera, RectTransform: 19 properties; uGUI and TextMeshPro are kept whole anyway). The linker strips a
+# member only reflection reaches: the save rooms' fire lights threw "Set Method not found for 'range'"
+# several times a frame once code_trim had removed the unused PlayMaker light actions that kept it.
+FSM_PROPERTY_TYPE = re.compile(rb'^ +TargetTypeName: (\S+)\r?\n +PropertyName: ', re.M)
+# By hand, engine types only CrowCompat's own reflection reaches: MeshCollider, whose sharedMesh getter
+# only MeshRelease reads (the game only sets it), on by default on the PS Vita; per platform, the PS Vita's
+# free memory for the memory probe (compat/Memory.cs).
+LINK_PRESERVE = {'UnityEngine.PhysicsModule': ['UnityEngine.MeshCollider']}
 PLATFORM_LINK_PRESERVE = {'vita': {'UnityEngine.PSVitaModule': ['UnityEngine.PSVita.Diagnostics']}}
 # Per platform, plugin assemblies left to the linker instead of kept whole: no scripts, no startup
 # hooks, nothing in them found by name there. The editor's linker keeps the script assemblies whole
@@ -336,15 +334,32 @@ PLATFORM_LINKED = {
 }
 
 
-def link_xml(assemblies: list, platform: str):
+def link_xml(exported: Path, engine: Path, assemblies: list, platform: str):
+    """The linker's link.xml; engine: the platform's engine modules (pipeline.EditorPaths.target_engine)."""
+    import dnfile
+
+    found = scan(
+        'fsm-property-types',
+        exported / 'Assets',
+        lambda relative: relative.suffix in YAML_FILES,
+        lambda path: sorted({name.decode() for name in FSM_PROPERTY_TYPE.findall(path.read_bytes())}),
+        version=FSM_PROPERTY_TYPE.pattern.decode(),
+    )
+    named, kept = set().union(*found.values()), {}
+    for dll in sorted(engine.glob('UnityEngine.*.dll')):
+        for row in dnfile.dnPE(str(dll)).net.mdtables.TypeDef or ():
+            if f'{row.TypeNamespace}.{row.TypeName}' in named:
+                kept.setdefault(dll.stem, set()).add(f'{row.TypeNamespace}.{row.TypeName}')
+    for assembly, types in {**LINK_PRESERVE, **PLATFORM_LINK_PRESERVE.get(platform, {})}.items():
+        kept.setdefault(assembly, set()).update(types)
     linked = PLATFORM_LINKED.get(platform, set())
     lines = ['<linker>']
     lines += [
         f'  <assembly fullname="{dll.stem}" preserve="all"/>' for dll in sorted(assemblies) if dll.stem not in linked
     ]
-    for assembly, types in {**LINK_PRESERVE, **PLATFORM_LINK_PRESERVE.get(platform, {})}.items():
+    for assembly, types in sorted(kept.items()):
         lines.append(f'  <assembly fullname="{assembly}">')
-        lines += [f'    <type fullname="{t}" preserve="all"/>' for t in types]
+        lines += [f'    <type fullname="{t}" preserve="all"/>' for t in sorted(types)]
         lines.append('  </assembly>')
     return '\n'.join([*lines, '</linker>', ''])
 
