@@ -49,7 +49,7 @@ Shader "CrowVita/Lit"
         // variant keeper), and a Legacy Diffuse material's own colour; -crow-lit game puts them back.
         [HideInInspector] _CrowLitFrom ("", Float) = 0
         [HideInInspector] _CrowLitColor ("", Color) = (1,1,1,1)
-        // The material's depth layer (asset_rules.DEPTH_LAYERS, PS Vita build): see CrowDepthLayerZ.
+        // The material's depth layer (-1 when it is opaque, asset_rules.vita_lit_bake, PS Vita build): see CrowDepthLayerZ.
         [HideInInspector] _CrowDepthLayer ("", Float) = 0
         // The layer of the renderers that draw the material, when they are all on one (asset_rules.material_layers in
         // the PS Vita build, compat/VitaLit.cs at run time elsewhere) as the scale that brings its bit of a key's mask
@@ -124,13 +124,14 @@ Shader "CrowVita/Lit"
             float4 _CrowKeyMaskLo, _CrowKeyMaskHi;
             float _CrowLayerLo, _CrowLayerHi;
 
-            // Depth layers (21 Oct): surfaces laid a fraction of a millimetre over others (an end cap
-            // 0.3 mm in front of Fairy Forest's pale wall, decals on floors and walls) fight on the PS
-            // Vita, whose depth test can't separate them where Windows does. A material with layer n
+            // Depth layers (21 Oct; every opaque material since 29 Oct, NOTE): surfaces laid a few
+            // millimetres over others (an end cap 0.3 mm in front of Fairy Forest's pale wall, writing
+            // 1 mm over a note's paper, decals on floors and walls) fight on the PS Vita, whose depth
+            // test can't separate them where Windows does. A material with layer n
             // has its depth moved toward the camera by n times CROW_DEPTH_LAYER_M d^2 metres at distance d
             // (5.85 mm at 20 m, one 16-bit depth step of the Main Camera's 1-24 m), worked out from the
-            // camera's own near and far planes so it is the same in metres for every camera: -1 puts a
-            // wall or floor behind what lies on it, +1 lifts a decal. Fog and shadows keep the true
+            // camera's own near and far planes so it is the same in metres for every camera: -1 puts an
+            // opaque surface behind the decals and overlays that lie on it. Fog and shadows keep the true
             // depth. _CrowDebug 1 (-crow-lit-debug 1) switches the layers off, for comparisons.
             #define CROW_DEPTH_LAYER_M 1.4624e-5
             float _CrowDepthLayer;

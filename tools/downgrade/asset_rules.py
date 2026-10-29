@@ -13,7 +13,6 @@ from common import (
     BUILTIN_LEGACY_DIFFUSE,
     BUILTIN_PARTICLES_SURFACE,
     BUILTIN_STANDARD,
-    NAME_LINE,
     NATIVE_ASSETS,
     SHADER_LINE,
     VECTOR,
@@ -1815,29 +1814,16 @@ Material:
 VITA_LIT_FROM = {BUILTIN_STANDARD: 1, BUILTIN_LEGACY_DIFFUSE: 3}  # and SFBStandard 2
 DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectrics, gamma space
 
-# Depth layers (vita_shaders/CrowLit.shader's CrowDepthLayerZ): CrowVita/Lit materials whose depth the PS
-# Vita build moves by a layer, 5.85 mm at 20 m: -1 away from the camera (walls and floors that things lie
-# on), +1 toward it (decals). The PS Vita's depth test can't separate surfaces laid less than about a
-# millimetre over others at the game's camera distances where Windows does, and resolves faces drawn twice
-# with the same vertices differently in blocks of the screen. The list comes from a survey of every scene's
-# near-coplanar overlapping and coincident faces (work/scratch/zfight2): per material the layer that settles
-# the most of the pairs under 1 mm (by area and colour contrast) while turning the fewest within a layer's
-# reach the wrong way; a material is all or nothing, so a few pairs remain. Pairs of Fade or Transparent
-# materials (_ZWrite 0) are left out: they never depth-test each other. Matched by material name (each must
-# match a material saved with CrowVita/Lit); `-crow-lit-debug 1` switches the layers off at run time.
-DEPTH_LAYERS = {
-    -1: [
-        'break room floor', 'cell floor 1', 'concrete floor 2', 'door metal 3', 'handgun ammo card 1',
-        'lab floor 1', 'leaf floor', 'liminal walls', 'main wall', 'mega byte magazine 2', 'metal trash can 2',
-        'parking concrete 1', 'road sign 1', 'shotgun case 2', 'shower 2', 'side wall 1', 'soda cup 2',
-        'soil', 'stone 1', 'toy shop carpet', 'white painted wall',
-    ],
-    1: [
-        'concrete floor 12', 'concrete gradient', 'concrete gradient 1', 'grass 4', 'handgun ammo box',
-        'soil circle', 'text', 'wallpaper gap 1', 'wallpaper gap 2', 'wallpaper gap 3', 'wallpaper gap 4',
-        'wallpaper gap 5', 'wallpaper gap 6', 'wallpaper gap 7', 'wallpaper gap 8', 'window blood',
-    ],
-}
+# Depth layers (vita_shaders/CrowLit.shader's CrowDepthLayerZ): every opaque CrowVita/Lit material (Standard's
+# Opaque mode, SFBStandard and Legacy Diffuse) draws a layer, 5.85 mm at 20 m, away from the camera. The PS
+# Vita's depth test can't separate surfaces laid a few millimetres over others at the game's camera distances
+# (one 16-bit depth step, where Windows separates 0.02 mm), and resolves faces drawn twice with the same
+# vertices differently in blocks of the screen. What lies on a surface is what keeps its depth: Cutout, Fade
+# and Transparent materials (decals, writing, stains, labels) and the game's other shaders (MeshCombineStudio's
+# black end caps, the unlit overlays). A survey of every scene's near-coplanar faces (work/scratch/zfight2,
+# work/scratch/fix/NOTE) puts an opaque lit surface under the other in most of them: this settles 84-88% of
+# their risk (area by colour contrast) at 15-20 m, a list of 37 named materials 57-78%, and turns none the
+# wrong way. Opaque lit surfaces on each other still tie. `-crow-lit-debug 1` switches the layers off.
 
 
 # The layer a CrowVita/Lit material is drawn on (vita_shaders/CrowLit.shader's _CrowLayerLo/Hi), so that a key light
@@ -1898,10 +1884,8 @@ def layer_floats(drawn: set):
 
 def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
     """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
-    with their DEPTH_LAYERS and the layer they are drawn on (material_layers)."""
-    layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
-    on_layer = 0
-    layered = {}
+    with their depth layer (above) and the layer they are drawn on (material_layers)."""
+    on_layer = layered = 0
     shaders = dict(VITA_LIT_FROM)
     sfb = exported / 'Assets' / 'Shader' / 'SFBStandard.shader.meta'
     if sfb.exists():
@@ -1928,10 +1912,10 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
             keywords = require(re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M), relative, 'm_ShaderKeywords')
             words = set(keywords.group(1).split()) | {'_GLOSSYREFLECTIONS_OFF', '_SPECULARHIGHLIGHTS_OFF'}
             text = text[: keywords.start(1)] + ' ' + ' '.join(sorted(words)) + text[keywords.end(1) :]
-        name = NAME_LINE.search(text)
-        if name and name.group(1) in layers:
-            floats['_CrowDepthLayer'] = str(layers[name.group(1)])
-            layered[name.group(1)] = layered.get(name.group(1), 0) + 1
+        mode = re.search(r'^      _Mode: ([-\d.e]+)$', text, re.M)
+        if not mode or float(mode.group(1)) == 0:
+            floats['_CrowDepthLayer'] = '-1'
+            layered += 1
         layer = layer_floats(drawn_on.get(meta_guid(exported / meta_of(relative)), set()))
         floats.update(layer)
         on_layer += bool(layer)
@@ -1939,12 +1923,9 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
         text = set_properties(text, 'm_Colors', colors)
         result[relative] = text.encode('utf-8')
         counts[kind] += 1
-    missing = sorted(set(layers) - set(layered))
-    if missing:
-        sys.exit(f'DEPTH_LAYERS names no CrowVita/Lit material: {missing}')
     log(
         f'CrowVita/Lit saved into {sum(counts)} materials: {counts[1]} Standard, {counts[2]} SFBStandard, '
-        f'{counts[3]} Legacy Diffuse; depth layers in {sum(layered.values())} of them, {on_layer} on one layer other than Default'
+        f'{counts[3]} Legacy Diffuse; {layered} opaque a depth layer back, {on_layer} on one layer other than Default'
     )
     return result
 
