@@ -730,18 +730,22 @@ def with_platform_format(text: str, platform: str, texture_format: int, size: in
     return text.replace('  platformSettings:\n', '  platformSettings:\n' + entry, 1)
 
 
-def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
-    if platform not in PLATFORM_TEXTURE_FORMATS:
-        return {}
-    assets = exported / 'Assets'
-    # Which textures each asset names, read once per file version (scan): the scenes are 1.2 GB.
-    references = scan(
+def texture_reference_scan(assets: Path):
+    """{asset: texture_references(asset)}, read once per file version (scan): the scenes are 1.2 GB."""
+    return scan(
         'texture-references',
         assets,
         lambda relative: relative.suffix in TEXTURE_REFERRERS,
         texture_references,
         version=TEXTURE_REFERENCE.pattern.decode(),
     )
+
+
+def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
+    if platform not in PLATFORM_TEXTURE_FORMATS:
+        return {}
+    assets = exported / 'Assets'
+    references = texture_reference_scan(assets)
     sprites, others = {}, {}
     for found, (lone_sprite, guids) in references.items():
         for guid in guids:
@@ -837,7 +841,11 @@ def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
     target = PLATFORM_TEXTURE_FORMATS[platform][0]
     entry = re.compile(rf'(buildTarget: {target}\n    maxTextureSize: )\d+')
     default = re.compile(r'(^  maxTextureSize: |buildTarget: DefaultTexturePlatform\n    maxTextureSize: )\d+', re.M)
-    result = {}
+    sprites = {}
+    for found, (lone_sprite, guids) in texture_reference_scan(exported / 'Assets').items():
+        for guid in guids if lone_sprite else ():
+            sprites.setdefault(guid, []).append(Path('Assets') / found)
+    result, resized = {}, 0
     for stem, size in caps.items():
         relative = Path('Assets') / 'Texture2D' / f'{stem}.png.meta'
         if not (exported / relative).exists():
@@ -848,7 +856,57 @@ def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
         if not count:
             sys.exit(f'{relative} has no {target} import settings to cap')
         result[relative] = text.encode('utf-8')
-    log(f"{platform}: {len(result)} textures capped in size (CJK font atlases; {len(area)} of the big areas')")
+        guid = require(re.search(r'^guid: (\w+)', text, re.M), relative, 'guid')[1]
+        if guid in sprites:
+            capped = sprite_texture_cap(exported, overlay, relative.with_suffix(''), sprites[guid], size)
+            result.update(capped)
+            resized += bool(capped)
+    log(
+        f"{platform}: {len(caps)} textures capped in size (CJK font atlases; {len(area)} of the big areas'), "
+        f'{resized} of them resized here with their sprites'
+    )
+    return result
+
+
+# The importer's maxTextureSize shrinks a texture but not the sprites drawn from it: their rects stay in the
+# full size's texels, and uGUI and SpriteRenderers divide them by the texture's size. A sprite on a 400x400
+# texture capped at 256 (or padded to 512 by npot_texture_overlay, then capped) reached past the texture and
+# drew its picture shrunk into the lower left of its rect: the map's save and root markers on the PS Vita
+# (29 Oct). So a capped texture that sprites draw from is resized here (bicubic, the alpha premultiplied),
+# and its sprites' sizes in texels (rects, offsets, borders, the pivot's place in the texture) and their
+# pixels per unit are scaled alike: the same size in units and on the canvas, the same pivot.
+SPRITE_TEXELS = re.compile(r'^( +(?:x|y|width|height|m_PixelsToUnits): )(\S+)$', re.M)
+SPRITE_TEXEL_MAPS = re.compile(r'^( +(?:m_Offset|m_Border|textureRectOffset|uvTransform): )\{(.*)\}$', re.M)
+MAP_VALUE = re.compile(r'(\w+: )([^,]+)')
+
+
+def sprite_texture_cap(exported: Path, overlay: dict, image: Path, sprite_assets: list, size: int):
+    """{the image resized to size on its longer side, its sprites scaled to match} (see SPRITE_TEXELS)."""
+    import io
+
+    from PIL import Image
+
+    with Image.open(io.BytesIO(current_bytes(exported, overlay, image))) as picture:
+        picture.load()
+    factor = size / max(picture.size)
+    if factor >= 1:
+        return {}
+    new_size = (round(picture.width * factor), round(picture.height * factor))
+    if picture.mode in ('RGBA', 'LA', 'P') or 'transparency' in picture.info:
+        picture = picture.convert('RGBA').convert('RGBa').resize(new_size, Image.BICUBIC).convert('RGBA')
+    else:
+        picture = picture.convert('RGB').resize(new_size, Image.BICUBIC)
+    buffer = io.BytesIO()
+    picture.save(buffer, 'PNG')
+    result = {image: buffer.getvalue()}
+
+    def scaled(m):
+        return m[1] + f'{float(m[2]) * factor:.7g}'
+
+    for sprite in sprite_assets:
+        text = SPRITE_TEXELS.sub(scaled, current_text(exported, overlay, sprite))
+        text = SPRITE_TEXEL_MAPS.sub(lambda m: m[1] + '{' + MAP_VALUE.sub(scaled, m[2]) + '}', text)
+        result[sprite] = text.encode('utf-8')
     return result
 
 
