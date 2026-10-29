@@ -39,7 +39,7 @@ Graphics jobs are on (`CROW_GFX_JOBS=on` writes them into `boot.config`), with U
 Every light draws in one pass through CrowVita/Lit: up to 4 key lights per pixel chosen by what they give the ground around Mara, one fill light, the rest per vertex.
 Shadows are hard, Low resolution, 12 m, and only the player casts them.
 The camera films at 550x351 and the camera effect runs at half size, in three passes written for the SGX543.
-Materials laid a fraction of a millimetre over others draw a depth layer apart (`asset_rules.DEPTH_LAYERS`), so they don't fight.
+Every opaque lit material draws a depth layer back, so the decals, writing and overlays laid a few millimetres over it don't fight it (`asset_rules.vita_lit_bake`).
 Particle noise is Unity's low-quality 1D noise.
 Physics steps once per 30 fps frame, at most two steps a frame.
 The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
