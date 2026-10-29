@@ -667,13 +667,18 @@ def texture_overlay(exported: Path, game: Path, platform: str):
 # over the build's files (43 MB of them in the player prefab's preloaded assets, loaded all the time),
 # and every power-of-two texture was DXT. On the PS Vita such a texture becomes a power of two, so it
 # compresses to DXT5, or DXT1 when opaque:
-# - a Default texture only materials use is scaled to the nearest power of two by the importer
-#   (nPOTScale), since materials sample it by normalized coordinates; point-filtered ones are kept;
 # - a texture only Sprites use (AssetRipper exports sprites as assets, with rects in texels from the
 #   bottom left) is padded at the top and right to the next power of two, its edge texels repeated so
 #   filtering at the sprite's edge reads what it did. Only clamped textures: a tiled Image samples a
 #   repeating sprite's whole texture.
-# Textures used otherwise (scenes, prefabs, scripts' assets such as TextMeshPro's, Resources) are kept.
+# - any other smoothly filtered texture that no Sprite uses (materials, light cookies, the camera
+#   effect's CRT mask, RawImages: all sample it by normalized coordinates) is scaled to the nearest power
+#   of two by the importer (nPOTScale; a Default texture only, the other types ignore it);
+# - one Sprites use as well, when square, is resized here to the power of two below its side, its sprites
+#   scaled with it (sprite_texture_cap): 400x400 to 256, 0.61 MB of RGBA32 to 64 KB of DXT5.
+# Kept: point-filtered textures (pixel art, the button icons; resampled they would blur), non-square
+# ones that Sprites share (a sprite's pixels per unit is one number for both sides), those scripts'
+# assets name (TextMeshPro's sprite assets keep glyph rects in texels), and Resources.
 TEXTURE_REFERENCE = re.compile(rb'fileID: 2800000, guid: ([0-9a-f]{32})')
 TEXTURE_REFERRERS = NATIVE_ASSETS | {'.unity', '.cubemap', '.flare', '.spriteatlas'}
 SPRITE_DOCUMENT = b'--- !u!213 '
@@ -745,8 +750,11 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
     sprites, others = {}, {}
     for found, (lone_sprite, guids) in references.items():
         for guid in guids:
-            (sprites if lone_sprite else others).setdefault(guid, set()).add(found.suffix)
-    result, scaled, padded, kept_bytes, saved = {}, 0, 0, 0, 0
+            if lone_sprite:
+                sprites.setdefault(guid, []).append(Path('Assets') / found)
+            else:
+                others.setdefault(guid, set()).add(found.suffix)
+    result, scaled, padded, resized, kept_bytes, saved = {}, 0, 0, 0, 0, 0
     for found, stat in listing(assets).items():
         if stat is None or not found.name.endswith('.png.meta') or 'Resources' in found.parts:
             continue
@@ -766,12 +774,17 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
         field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.M))).get  # first of each
         users = others.get(guid, set())
         size = max(int(field('maxTextureSize')), power_of_two(max(width, height)))
+        smooth = field('filterMode') != '0' and '.asset' not in users
         if guid in sprites and not users and field('wrapU') == field('wrapV') == '1':
             result[relative.with_suffix('')] = pad_to_power_of_two(image)
             padded += 1
-        elif guid not in sprites and users == {'.mat'} and field('textureType') == '0' and field('filterMode') != '0':
+        elif smooth and guid not in sprites and field('textureType') == '0':
             text = re.sub(r'^(\s*)nPOTScale: \d+$', r'\g<1>nPOTScale: 1', text, flags=re.M)
             scaled += 1
+        elif smooth and width == height:
+            size = power_of_two(width) // 2
+            result.update(sprite_texture_cap(exported, overlay, relative.with_suffix(''), sprites.get(guid, []), size))
+            resized += 1
         else:
             kept_bytes += width * height * 4
             continue
@@ -780,7 +793,7 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
         text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, count=1, flags=re.M)
         result[relative] = text.encode('utf-8')
     log(
-        f'{platform}: {scaled} textures scaled and {padded} padded to powers of two for DXT '
+        f'{platform}: {scaled} textures scaled, {padded} padded and {resized} resized to powers of two for DXT '
         f'({saved / 1e6:.0f} MB as RGBA32); {kept_bytes / 1e6:.0f} MB of others stay uncompressed'
     )
     return result
@@ -803,9 +816,9 @@ PLATFORM_TEXTURE_SIZE_CAPS = {
 # Per platform: the largest textures of Haunted Hilltop's and Ocean Kingdom's loads, halved or more (the
 # user accepts a softer look there for the memory). Area textures sit in main memory on the PS Vita, and
 # those two areas' loads bottomed at 4-7 MB free (Ocean Kingdom -> Haunted Hilltop). Most are shared with other
-# areas, which get the same cut. The 400x400 sprites are uncompressed on the PS Vita (RGBA32: not powers of
-# two); at 256 they are, so they compress to DXT5 as well (0.61 MB -> 64 KB). Copies a texture has in the
-# export are capped alike, so texture_dedup_overlay still finds them identical. Haunted Hilltop about -3.6 MB,
+# areas, which get the same cut. The 400x400 ones are DXT5 at 512 after npot_texture_overlay (padded or
+# scaled up); at 256 they take a quarter (256 -> 64 KB). Copies a texture has in the export are capped
+# alike, so texture_dedup_overlay still finds them identical. Haunted Hilltop about -3.6 MB,
 # Ocean Kingdom about -4.9 MB. Without a PS Vita entry (textures the game ships compressed), the default
 # platform's size is capped. Empty: as before.
 PLATFORM_TEXTURE_AREA_CAPS = {
@@ -817,10 +830,7 @@ PLATFORM_TEXTURE_AREA_CAPS = {
         'concrete 2_0': 512,
         'rock wall 1': 512,  # 1024 DXT1, Ocean Kingdom
         'grime 2': 512,  # 512x1024 DXT1 with mipmaps
-        'cloud puff': 256,  # 400x400 RGBA32 sprites
-        'gradient4': 256,
-        'blur circle': 256,
-        'blur circle_0': 256,
+        'blur circle_0': 256,  # 400x400 sprites, padded to 512
         'ring4': 256,  # 512 DXT5 particles
         'lightning particle grid 1': 256,
         'trash symbol': 256,
