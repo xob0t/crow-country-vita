@@ -156,6 +156,40 @@ namespace CrowCompat
             Debug.Log("CROW_THREADS UnityPreload not found by the first area's load (" + clock.ElapsedMilliseconds + " ms)");
         }
 
+        // The UID of the first thread whose kernel name has name in it, handed to found from a thread of its own once a
+        // CPU runs it (every millisecond for up to a minute; FilterGate's FMOD mixer, which runs every 10 ms). PS Vita only.
+        internal static void Find(string name, Action<int> found)
+        {
+            new Thread(() =>
+            {
+                try
+                {
+                    var uids = new int[3];
+                    var info = new int[10];
+                    var buffer = new byte[32];
+                    var seen = new HashSet<int>();
+                    var clock = Stopwatch.StartNew();
+                    while (clock.ElapsedMilliseconds < 60000)
+                    {
+                        Thread.Sleep(1);
+                        if (CrowThreadsRunning(uids) < 0) continue;
+                        foreach (int uid in uids)
+                            if (uid != 0 && seen.Add(uid) && CrowThreadQuery(uid, info, buffer) >= 0 &&
+                                CString(buffer).IndexOf(name, StringComparison.Ordinal) >= 0)
+                            {
+                                found(uid);
+                                return;
+                            }
+                    }
+                    Debug.Log("CROW_THREADS " + name + " not found in a minute");
+                }
+                catch (Exception e)
+                {
+                    Debug.Log("CROW_THREADS no CrowClock thread functions (" + e.GetType().Name + ": " + e.Message + ")");
+                }
+            }) { IsBackground = true, Name = "CrowThreadFind" }.Start();
+        }
+
         internal static int Self()
         {
             try { return available ? SelfNative() : 0; }
