@@ -52,8 +52,11 @@ using UnityEngine.SceneManagement;
 // material, whatever their materials, lights and cell (they move); the enemy's MeshCombineStudio combiner,
 // which would otherwise combine them per material when the enemy first switches on, is switched off; and
 // its random materials, rotations and scales are picked once at build time even where the game picks them
-// again at each OnEnable (a fixed look, the same in every build, accepted for the PS Vita). The types in SeeThroughEnemies
-// (the Lumber) merge their see-through parts too. Their own budget is EnemyMaxBytes per scene, their part size EnemyMaxPartVertices. When the build drops the parts' meshes
+// again at each OnEnable (a fixed look, the same in every build, accepted for the PS Vita). Their see-through
+// parts (materials past the opaque queue) merge too: each submesh still draws in its material's queue, and the
+// opaque body drawn before hides the parts behind it, so what changes is only the order in which overlapping
+// parts of one renderer blend (the Lumber's 150-odd skin blobs, the Blob's slime, the Puddle's). Their own
+// budget is EnemyMaxBytes per scene, their part size EnemyMaxPartVertices. When the build drops the parts' meshes
 // (CROW_MERGE=on) it also removes the enemies' merged parts that are bare leaves (Strip below; not with
 // CROW_MERGE_ENEMY_STRIP=off).
 //
@@ -176,12 +179,6 @@ namespace CrowCompat
         public static bool Enemies = Application.isEditor && Environment.GetEnvironmentVariable("CROW_MERGE_ENEMIES") != "off";
         public static long EnemyMaxBytes = 8L << 20;
         public static int EnemyMaxPartVertices = 4000;
-        // The enemy types whose see-through parts (materials past the opaque queue) merge too, as submeshes of their
-        // anchor's renderer. Each submesh still draws in its material's queue, and the opaque body drawn before hides
-        // the parts behind it, so what changes is only the order in which overlapping parts of one renderer blend.
-        // The Lumber's skin is 150-odd translucent blobs (Fade, alpha 0.61, three colours) and 17 glazes (0.21) on its
-        // limbs: about 180 renderers that would stay apart (26 Oct, LUMBER).
-        public static readonly HashSet<string> SeeThroughEnemies = new HashSet<string> { "Lumber" };
         static string mode;
 
         internal static void Install(string[] args)
@@ -1313,16 +1310,14 @@ namespace CrowCompat
                     var filter = renderer.GetComponent<MeshFilter>();
                     Mesh mesh = filter == null ? null : filter.sharedMesh;
                     Material[] materials = renderer.sharedMaterials;
-                    Transform enemyRoot = why == null ? analysis.EnemyOf(renderer.transform) : null;
-                    bool enemy = enemyRoot != null;
-                    bool seeThrough = enemy && SeeThroughEnemies.Contains(EnemyNames.TypeOf(enemyRoot));
+                    bool enemy = why == null && analysis.EnemyOf(renderer.transform) != null;
                     if (why == null)
                     {
                         if (mesh == null || mesh.vertexCount == 0) why = "no mesh";
                         else if (renderer.isPartOfStaticBatch) why = "static batch";
                         else if (renderer.lightmapIndex >= 0 && renderer.lightmapIndex < 65534) why = "lightmap";
                         else if (materials.Length != mesh.subMeshCount) why = "materials != submeshes";
-                        else if (materials.Any(m => m == null || (m.renderQueue > 2500 && !seeThrough) || m.GetTag("DisableBatching", false) == "True")) why = "material";
+                        else if (materials.Any(m => m == null || (m.renderQueue > 2500 && !enemy) || m.GetTag("DisableBatching", false) == "True")) why = "material";
                         else if (Enumerable.Range(0, mesh.subMeshCount).Any(s => mesh.GetTopology(s) != MeshTopology.Triangles)) why = "topology";
                         else if (canRead == null ? !mesh.isReadable : !canRead(mesh)) why = "unreadable";
                         else if (renderer.probeAnchor != null) why = "probe anchor";

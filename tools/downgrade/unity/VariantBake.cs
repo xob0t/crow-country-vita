@@ -15,8 +15,8 @@ using UnityEngine;
 // - The Lumber (Ocean Kingdom, Corridor A, Corridor B, Underground NW) has 72 (its teeth, prods and wounds). The
 //   merge takes every variant for a part that switches on its own, so the parts stayed apart below each: 289
 //   renderers drawn where 12 of its transforms move, about 11 ms of the main thread a frame (26 Oct, DIP). With
-//   the picks made, 211 (Underground NW's): most of the rest is its translucent skin, which Merge.SeeThroughEnemies
-//   lets merge.
+//   the picks made, 211 (Underground NW's): most of the rest is its translucent skin, which the merge takes for
+//   enemies too.
 // Here each RandomVariant of those enemies picks once, in hierarchy order (an outer pick first, so the variants it
 // drops take their inner scripts with them), as its DoRandom would (UnityEngine.Random.Range) but with its own seed
 // (CrowCompat's Merge.PickSeed: the scene, the script's place in it), so every build picks alike and a change
