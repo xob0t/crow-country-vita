@@ -72,10 +72,6 @@ namespace CrowCompat
                 foreach (PlayerLoopSystem step in steps)
                 {
                     string name = step.type == null ? "?" : step.type.Name;
-                    // -crow-physics-sync-probe: the transforms' sync with the physics scene, which each
-                    // physics step does first, done (and timed) on its own just before the step.
-                    if (name == "PhysicsFixedUpdate" && CrowFlags.Has(ProbeFiles.Args, "-crow-physics-sync-probe"))
-                        list.Add(SyncProbe(phase + ".SyncTransforms(probe)"));
                     list.Add(Marker(phase + "." + name));
                     list.Add(step);
                 }
@@ -155,21 +151,6 @@ namespace CrowCompat
             lastCamera = null;
             imageMark = 0;
             FrameProbe.Stage = 0;
-        }
-
-        static PlayerLoopSystem SyncProbe(string label)
-        {
-            int index = labels.Count;
-            labels.Add(label);
-            return new PlayerLoopSystem
-            {
-                type = typeof(LoopProfile),
-                updateDelegate = () =>
-                {
-                    Mark(index);
-                    Physics.SyncTransforms();
-                }
-            };
         }
 
         static PlayerLoopSystem Marker(string label)

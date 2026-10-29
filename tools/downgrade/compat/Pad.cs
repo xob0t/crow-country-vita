@@ -969,6 +969,7 @@ namespace CrowCompat
     // them through Unity's input every frame (each mapped key, the mouse's axes and buttons) for
     // nothing. Roadside: Update 7.7 -> 7.2 ms and the main thread's work per frame 39.2 -> 38.4 ms;
     // Driving Intro: Update 4.8 -> 4.45 ms. The pad is a Rewired joystick and doesn't change.
+    // -crow-rewired game|pad: on (game) or off (pad, the PS Vita's default); -crow-cycle takes rewired=.
     static class RewiredPad
     {
         const System.Reflection.BindingFlags Any = System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;

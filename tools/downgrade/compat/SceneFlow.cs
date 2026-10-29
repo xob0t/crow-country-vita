@@ -114,7 +114,7 @@ namespace CrowCompat
             // The loading thread at high priority: at Normal it got so little of the PS Vita's CPU
             // beside the title's frames that the scene took 133 s (27 s when waited for), and a
             // synchronous load before the end (a Resources.Load in the title's menus) waits for the rest.
-            // With the loading thread on CPU 1 (Audio.cs's Threads.MoveLoader), Normal: below the render
+            // With the loading thread on CPU 1 (Threads.cs' Threads.MoveLoader), Normal: below the render
             // worker there, so the title keeps 30 fps, and the scene took 28.7 s instead of 25.5.
             Application.backgroundLoadingPriority = Audio.LoadPriority(Threads.LoaderMoved ? ThreadPriority.Normal : ThreadPriority.High);  // -crow-load-priority
             SceneManager.LoadSceneAsync(Scene, LoadSceneMode.Additive);
@@ -153,7 +153,7 @@ namespace CrowCompat
     // title) and the scene gap's empty scene (SceneGap); every other scene counts as an area. One list since
     // 21 Oct: twelve sceneLoaded handlers in eight modules kept their own, and two had drifted (ReverbNull's
     // and Cycle's left out CrowGap; the same there, as the gap is made by CreateScene, which raises no
-    // sceneLoaded). PhysCost's census skips only CrowMara (it also runs on the title), as before.
+    // sceneLoaded).
     public static class Scenes
     {
         public const string Logos = "Logos", Title = "Title";
@@ -258,8 +258,10 @@ namespace CrowCompat
     // every object, with nothing left to free after the gap's, at the load's peak of memory (both PS
     // Vita crashes of 15-16 Oct, Entrance -> Station Square and Station Square -> Pool, ran out of
     // main memory in that pass, growing its object tables by 3 MB). The area becomes the active scene
-    // in the first sceneLoaded handler, before the game's; what its Awake and OnEnable made went into
-    // the gap, which was active then, and moves into the area before the gap is unloaded. The areas
+    // in Arrived, before the game's sceneLoaded handlers but after a dozen of CrowCompat's (Quality's,
+    // Memory's, Audio's: CrowEvents.cs), which still see the gap active; what its Awake and OnEnable
+    // made went into the gap, which was active then, and moves into the area before the gap is
+    // unloaded. The areas
     // have no lightmaps or light probes, which an additive load would treat otherwise.
     // Before the old scenes go, the gap drains the renderer: the player's camera draws nothing (culling
     // mask 0) and the old scenes' own cameras and canvases are switched off for two frames, then the
@@ -444,7 +446,8 @@ namespace CrowCompat
             SceneManager.LoadScene(name, LoadSceneMode.Additive);
         }
 
-        // The area in (additive), before the other sceneLoaded handlers (hooked at startup).
+        // The area in (additive), before the game's sceneLoaded handlers (hooked at startup, from Loading.Install,
+        // after Quality's, Memory's and Audio's, which run while the gap is still the active scene).
         static void Arrived(Scene scene, LoadSceneMode mode)
         {
             if (arriving == null || mode != LoadSceneMode.Additive || !Named(scene, arriving)) return;

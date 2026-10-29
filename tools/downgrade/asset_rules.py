@@ -1066,7 +1066,8 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
 # bounds too: a combiner names each cell's mesh after its material, so cells of the same parts (two vents,
 # a pipe, a cabinet) have the same name, count and index buffer at other places (110 meshes in 50 such
 # groups; without the bounds, 55 drew with another's vertices, up to 17 m from their place). Only
-# Underground SE's and NW's `elevator 5` cells (80 of 1,680 vertices 0.44 m apart) also have the same bounds.
+# Underground SE's and NW's `elevator 5` cells (80 of 1,680 vertices 0.44 m apart) also have the same bounds:
+# a key with sources whose vertices differ takes the one in the level file of the scene that uses the mesh.
 STREAMED_MESHES = WORK / 'streamed-meshes.json'
 STREAMED_MESH_CACHE = WORK / 'streamed-meshes'
 NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.M)
@@ -1087,14 +1088,16 @@ def mesh_key(name: str, vertex_count: int, index_buffer: bytes, bounds):
 
 
 def original_streamed_meshes(game: Path):
-    """{mesh_key: [.resS file name, offset, size]} for the game's meshes with streamed vertex data. Reading
+    """{mesh_key: [[.resS file name, offset, size], ...]} for the game's meshes with streamed vertex data. Reading
     the data files takes UnityPy minutes, so the result is kept in work/, keyed by their sizes and times."""
     import json
 
     data = game_data(game)
     files = sorted(p for p in data.iterdir() if re.fullmatch(r'level\d+|.*\.assets', p.name))
     key = hashlib.sha256(
-        json.dumps([MESH_KEY_VERSION, *([p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files)]).encode()
+        json.dumps(
+            [MESH_KEY_VERSION, 'sources', *([p.name, p.stat().st_size, p.stat().st_mtime_ns] for p in files)]
+        ).encode()
     ).hexdigest()
     try:
         cached = json.loads(STREAMED_MESHES.read_text(encoding='utf-8'))
@@ -1117,7 +1120,7 @@ def original_streamed_meshes(game: Path):
             bounds = [aabb[part][axis] for part in ('m_Center', 'm_Extent') for axis in 'xyz']
             count = tree['m_VertexData']['m_VertexCount']
             found = mesh_key(tree['m_Name'], count, bytes(tree['m_IndexBuffer']), bounds)
-            meshes[found] = [Path(stream['path']).name, stream['offset'], stream['size']]
+            meshes.setdefault(found, []).append([Path(stream['path']).name, stream['offset'], stream['size']])
     STREAMED_MESHES.write_text(json.dumps({'key': key, 'meshes': meshes}), encoding='utf-8')
     return meshes
 
@@ -1134,6 +1137,34 @@ def exported_mesh_key(path: Path):
     if not (name and count and indices and bounds) or count[1] == b'0':
         return None
     return mesh_key(name[1].decode('utf-8'), int(count[1]), bytes.fromhex(indices[1].decode()), bounds.groups())
+
+
+def read_source(data: Path, source):
+    name, offset, length = source
+    with (data / name).open('rb') as handle:
+        handle.seek(offset)
+        return handle.read(length)
+
+
+def scene_source(exported: Path, relative: Path, sources):
+    """Of a key's sources whose vertices differ, the one in the level file (level<N>.resS,
+    sharedassets<N>.assets.resS) of the one scene that uses the mesh, N its build index."""
+    assets = exported / 'Assets'
+    guid = mesh_guids(assets).get(relative.with_name(relative.name + '.meta'))
+    scenes = [s for s, users in scene_mesh_scan(assets).items() if any(guid in found for found in users)]
+    settings = (exported / 'ProjectSettings' / 'EditorBuildSettings.asset').read_text(encoding='utf-8')
+    order = re.findall(r'^  - enabled: 1\n    path: Assets/(.*)$', settings, re.M)
+    levels = {order.index(s.as_posix()) for s in scenes if s.as_posix() in order}
+    level = re.compile(r'(?:level|sharedassets)(\d+)(?:\.assets)?\.resS')
+    picked = [s for s in sources if level.fullmatch(s[0]) and int(level.fullmatch(s[0])[1]) in levels]
+    if len(scenes) != 1 or len(picked) != 1:
+        sys.exit(
+            f'Meshes: {relative.as_posix()} matches {len(sources)} game meshes with other vertices '
+            f'({", ".join(s[0] for s in sources)}), and its scenes '
+            f'({", ".join(s.as_posix() for s in scenes) or "none"}) single out none of them'
+        )
+    log(f'Meshes: {relative.as_posix()} takes its vertices from {picked[0][0]}, the level of {scenes[0].stem}')
+    return picked[0]
 
 
 def streamed_mesh_overlay(exported: Path, game: Path):
@@ -1157,18 +1188,18 @@ def streamed_mesh_overlay(exported: Path, game: Path):
     files = listing(assets)
     result, missing = {}, []
     for relative, found in sorted(empty.items()):
-        source = originals.get(found)
-        if source is None:
+        sources = originals.get(found)
+        if sources is None:
             missing.append(relative.as_posix())
             continue
+        source = sources[0]
+        if len({read_source(data, s) for s in sources}) > 1:
+            source = scene_source(exported, relative, sources)
         cached = STREAMED_MESH_CACHE / relative
         size, modified = files[relative]
         stamp = cached.with_name(cached.name + '.source')
         if not (cached.exists() and stamp.exists() and stamp.read_text() == f'{size} {modified} {source}'):
-            name, offset, length = source
-            with (data / name).open('rb') as handle:
-                handle.seek(offset)
-                vertices = handle.read(length)
+            vertices = read_source(data, source)
             text = (exported / 'Assets' / relative).read_bytes()
             lines = f'    m_DataSize: {len(vertices)}\n    _typelessdata: {vertices.hex()}\n'.encode()
             text = NO_VERTEX_DATA.sub(lambda _, lines=lines: lines, text, count=1)
@@ -1786,6 +1817,7 @@ DEPTH_LAYERS = {
 # 8 cm in front of its screen lights the cabinet and leaves out the screen's layer, 28; as a key light it washed the screen
 # out to white). From the enabled renderers of every scene and prefab, those switched off at the load as well; a material
 # drawn on several layers keeps Default's (every key lights it). compat/VitaLit.cs gives each key's mask.
+# CrowVita/Particles Lit tests the masks too: the guns' lights leave out Particles, the layer of the Crypt's dust.
 LAYER_DOCUMENT = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n', re.M)
 GAME_OBJECT_LAYER = re.compile(rb'^  m_Layer: (\d+)$', re.M)
 COMPONENT_OWNER = re.compile(rb'^  m_GameObject: \{fileID: (-?\d+)\}', re.M)
@@ -1795,7 +1827,7 @@ MATERIAL_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
 
 
 def material_layers(exported: Path, overlay: dict):
-    """Material GUID -> the layers of the enabled MeshRenderers and SkinnedMeshRenderers that draw it."""
+    """Material GUID -> the layers of the enabled renderers that draw it."""
     layers = {}
     files = sorted((exported / 'Assets').rglob('*.unity')) + sorted((exported / 'Assets').rglob('*.prefab'))
     for path in files:
@@ -1804,7 +1836,8 @@ def material_layers(exported: Path, overlay: dict):
         owners, renderers = {}, []
         for index, head in enumerate(heads):
             kind = head.group(1)
-            if kind not in (b'1', b'23', b'137'):  # GameObject, MeshRenderer, SkinnedMeshRenderer
+            # GameObject, MeshRenderer, SkinnedMeshRenderer, ParticleSystemRenderer, LineRenderer, TrailRenderer
+            if kind not in (b'1', b'23', b'137', b'199', b'120', b'96'):
                 continue
             body = data[head.end() : heads[index + 1].start() if index + 1 < len(heads) else len(data)]
             if kind == b'1':
@@ -1824,11 +1857,21 @@ def material_layers(exported: Path, overlay: dict):
     return layers
 
 
-def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
+def layer_floats(drawn: set):
+    """_CrowLayerLo/Hi for a material drawn on one layer other than Default (material_layers); none otherwise."""
+    if len(drawn) != 1 or 0 in drawn:
+        return {}
+    layer = next(iter(drawn))
+    return {
+        '_CrowLayerLo': repr(2.0**-layer) if layer < 16 else '0',
+        '_CrowLayerHi': repr(2.0 ** (16 - layer)) if layer >= 16 else '0',
+    }
+
+
+def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
     """The PS Vita project's Standard, SFBStandard and Legacy Diffuse materials saved with CrowVita/Lit,
     with their DEPTH_LAYERS and the layer they are drawn on (material_layers)."""
     layers = {name: layer for layer, names in DEPTH_LAYERS.items() for name in names}
-    drawn_on = material_layers(exported, overlay)
     on_layer = 0
     layered = {}
     shaders = dict(VITA_LIT_FROM)
@@ -1861,12 +1904,9 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str):
         if name and name.group(1) in layers:
             floats['_CrowDepthLayer'] = str(layers[name.group(1)])
             layered[name.group(1)] = layered.get(name.group(1), 0) + 1
-        drawn = drawn_on.get(meta_guid(exported / meta_of(relative)), set())
-        if len(drawn) == 1 and 0 not in drawn:
-            layer = next(iter(drawn))
-            floats['_CrowLayerLo'] = repr(2.0**-layer) if layer < 16 else '0'
-            floats['_CrowLayerHi'] = repr(2.0 ** (16 - layer)) if layer >= 16 else '0'
-            on_layer += 1
+        layer = layer_floats(drawn_on.get(meta_guid(exported / meta_of(relative)), set()))
+        floats.update(layer)
+        on_layer += bool(layer)
         text = set_properties(text, 'm_Floats', floats)
         text = set_properties(text, 'm_Colors', colors)
         result[relative] = text.encode('utf-8')
@@ -1913,9 +1953,10 @@ def set_properties(text: str, block: str, values: dict):
 # CrowVita/Particles Lit (vita_shaders/CrowParticles.shader) for Particles/Standard Surface's materials: the editor
 # compiles no PS Vita programs of that surface shader, so they (the Crypt's water rings, bubbles, splashes, leaves
 # and blobs, the crows' feathers, the enemies' death puffs, Scamper's prints) drew with its fallback, VertexLit:
-# opaque quads. The PS Vita project saves them with this one.
-def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str):
+# opaque quads. The PS Vita project saves them with this one, with the layer they are drawn on (material_layers).
+def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str, drawn_on: dict):
     result = {}
+    on_layer = 0
     for path in (exported / 'Assets').rglob('*.mat'):
         relative = path.relative_to(exported)
         text = current_text(exported, overlay, relative)
@@ -1923,9 +1964,12 @@ def vita_particle_bake(exported: Path, overlay: dict, particles_guid: str):
         if not found or found.group(1) != BUILTIN_PARTICLES_SURFACE:
             continue
         shader = f'{{fileID: 4800000, guid: {particles_guid}, type: 3}}'
-        result[relative] = (text[: found.start(1)] + shader + text[found.end(1) :]).encode('utf-8')
+        text = text[: found.start(1)] + shader + text[found.end(1) :]
+        layer = layer_floats(drawn_on.get(meta_guid(exported / meta_of(relative)), set()))
+        on_layer += bool(layer)
+        result[relative] = set_properties(text, 'm_Floats', layer).encode('utf-8')
     expect(len(result), 9, 'Particles/Standard Surface materials saved with CrowVita/Particles Lit')
-    log(f'CrowVita/Particles Lit saved into {len(result)} materials')
+    log(f'CrowVita/Particles Lit saved into {len(result)} materials, {on_layer} on one layer other than Default')
     return result
 
 
@@ -1952,12 +1996,14 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     result[VITA_LIT_FOLDER / post.name] = post.read_bytes()
     post_meta = stable_meta('asset', 'CrowVita/CrowPost.shader', 'ShaderImporter')
     result[meta_of(VITA_LIT_FOLDER / post.name)] = post_meta.encode()
+    drawn_on = material_layers(exported, overlay) if platform == 'vita' else {}
     if platform == 'vita':
         particles = VITA_SHADERS / 'CrowParticles.shader'
         result[VITA_LIT_FOLDER / particles.name] = particles.read_bytes()
         particles_meta = stable_meta('asset', 'CrowVita/CrowParticles.shader', 'ShaderImporter')
         result[meta_of(VITA_LIT_FOLDER / particles.name)] = particles_meta.encode()
-        result.update(vita_particle_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowParticles.shader')))
+        particles_guid = guid_for('asset', 'CrowVita/CrowParticles.shader')
+        result.update(vita_particle_bake(exported, overlay, particles_guid, drawn_on))
     for index, keywords in enumerate(sorted(sets)):
         name = f'CrowLitVariant{index}'
         relative = VITA_LIT_FOLDER / 'Variants' / f'{name}.mat'
@@ -1969,5 +2015,5 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
     result.update(folder_meta(VITA_LIT_FOLDER / 'Variants'))
     log(f'CrowVita/Lit: {len(sets)} keyword sets of the Standard materials')
     if platform == 'vita' and build_switches(platform, ('project',))['CROW_LIT_BAKE'] == 'on':
-        result.update(vita_lit_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowLit.shader')))
+        result.update(vita_lit_bake(exported, overlay, guid_for('asset', 'CrowVita/CrowLit.shader'), drawn_on))
     return result

@@ -347,7 +347,7 @@ def main():
     parser.add_argument(
         '--modes',
         default='real,stress',
-        help='comma-separated -crow-fight modes: real, stress, idle, stand, walk, physics, discover (Fight.cs)',
+        help='comma-separated -crow-fight modes: real, stress, idle, stand, walk, discover (Fight.cs)',
     )
     parser.add_argument('--runs', type=int, default=2)
     parser.add_argument('--tag', default=time.strftime('%m%d-%H%M'))
