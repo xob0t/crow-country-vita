@@ -64,7 +64,6 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 - The user's report of texture flicker in Corridor D and at Corridor S's pillars was not reproduced (24 Oct); Corridor B's wallpaper gaps got depth layers as a precaution (26 Oct).
 - Dig Site's dark spots have not been checked with the depth layers (22 Oct).
 - The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
-- Underground SE and NW's `elevator 5` cells have the same bounds, so the misplaced-scenery fix can't tell them apart (22 Oct).
 - The render-thread crashes of 17 and 26 Oct were the shader patcher's 512 KB of USSE memory running full, not graphics jobs; the eboot gives it 1 MB since 27 Oct.
   Whether 1 MB lasts a whole playthrough is not known: 223 KB after 15 loads, about 9 KB per new area (`usseKB` in `-crow-memory-watch`; 27 Oct).
 - Something launched the game with no flags while the console sat idle (27 Oct, 04:03 and 06:40); the cause was not found.
