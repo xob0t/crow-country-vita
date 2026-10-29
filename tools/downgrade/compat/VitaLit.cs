@@ -32,9 +32,10 @@ using UnityEngine.SceneManagement;
 // few degrees. So each light is scored by what it gives the ground the camera shows: the player's body (else
 // a point 15 m along the camera's view), lights whose range doesn't reach within -crow-lit-view metres (4)
 // of it out, the others by intensity x range, attenuated as Unity does over their distance past that radius;
-// spots only first when the player is inside their range (the laser sights, daylight pools); the last choice
-// counts 1.5 times, each light is scored on its highest intensity and range since the load (the game's
-// flicker doesn't reorder them), a key the game switches off keeps its slot for up to 2 s (a candle going
+// spots only first when the player is inside their range (the laser sights, daylight pools), the narrowest
+// first (one without a slot is drawn per vertex, without its cone); the last choice counts 1.5 times, each
+// light is scored on its highest intensity and range since the load (the game's flicker doesn't reorder them),
+// a key the game switches off keeps its slot for up to 2 s (a candle going
 // out and back for a moment), and keys change by a fade (a light Select drops for half a second keeps its
 // slot, then its slot fades out over -crow-lit-fade seconds, 0.35, and the new one fades in; a spot light
 // coming on, a laser sight, takes its slot at once).
@@ -630,7 +631,7 @@ namespace CrowCompat
                 // its candles 33.3 ms a frame, 8 slots 41.9, the game 66).
                 // What it gives the ground around the player: out if its range ends short of the
                 // radius, else intensity x range, attenuated as Unity's lights are over the distance
-                // past the radius; a spot first only when the player is inside its range.
+                // past the radius; a spot first only when the player is inside its range (below).
                 // Its peak intensity and range since the load: the game's flicker (candles, fires,
                 // a fireplace's glow, LightFlicker and the "light flicker" FSMs) doesn't reorder them.
                 Vector2 peak;
@@ -641,7 +642,11 @@ namespace CrowCompat
                 if (beyond >= reach) continue;
                 float x = beyond / Mathf.Max(reach, 0.0001f);
                 float score = peak.x * Luminance(light.color) * reach / (1f + 25f * x * x);
-                if (light.type == LightType.Spot && away < reach) score += 1e6f;
+                // The narrowest spot first: one left without a slot is Unity's, per vertex, a point light over all
+                // its range, so the narrower its cone the more it lights that the game's doesn't. With the same lead
+                // for every spot (and the last choice's 1.5 on it), Dig Site's three ceiling spots and Mara's
+                // flashlight kept the 4 slots, and her laser sight (1.5 degrees, 20 m) lit the room red (DIGLASER).
+                if (light.type == LightType.Spot && away < reach) score += 1e8f / Mathf.Max(light.spotAngle, 1f);
                 // The last choice keeps its slot against a near tie (not every keyed light: one fading out
                 // is keyed too, and three equal candles all so marked swapped places at every pass).
                 if (desired.Contains(light)) score *= 1.5f;
