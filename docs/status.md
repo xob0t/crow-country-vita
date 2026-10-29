@@ -59,7 +59,7 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 - Unity's allocator leaves about 2.7 MB more holes after each Ocean Kingdom <-> Haunted Hilltop round trip (22 Oct).
 - The Station Square fight is the slowest place measured, at about 26 fps (38-39 ms a frame).
 - The player's log stopped being written after a console standby while the game ran on (26 Oct, not investigated).
-- The user's report of texture flicker in Corridor D and at Corridor S's pillars was not reproduced (24 Oct); Corridor B's wallpaper gaps got depth layers as a precaution (26 Oct).
+- The text of Fairy Forest's tree fairy note (Hint 3) changes as the camera moves; it is the same with the depth layers on and off, so likely aliasing: 128x128 without mipmaps, about 35 pixels wide in the camera's picture (29 Oct, not fixed).
 - Dig Site's dark spots have not been checked with the depth layers (22 Oct).
 - The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
 - Underground SE and NW's `elevator 5` cells have the same bounds, so the misplaced-scenery fix can't tell them apart (22 Oct).
