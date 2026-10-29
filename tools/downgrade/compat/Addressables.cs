@@ -25,7 +25,7 @@ namespace CrowCompat
 
         public static UnityEngine_ResourceManagement_AsyncOperations_AsyncOperationHandle<T> LoadAssetAsync<T>(object key)
         {
-            // The player prefab, which a build with the CrowMara scene leaves out (Loading.cs MaraScene),
+            // The player prefab, which a build with the CrowMara scene leaves out (SceneFlow.cs' MaraScene),
             // is done at once with no asset: MaraLoader takes the scene's instance.
             if (MaraScene.Serves(key))
             {

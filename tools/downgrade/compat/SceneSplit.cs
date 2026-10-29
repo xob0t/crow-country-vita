@@ -19,11 +19,11 @@ namespace CrowCompat
     // whole hierarchy every frame: the renderers' update (PostLateUpdate.UpdateAllRenderers), physics'
     // transform sync (FixedUpdate.PhysicsFixedUpdate) and the particle systems. The PS Vita build takes
     // the parts nothing acts on out to the scene's root as it writes each scene (Merge.Split, called by
-    // DowngradeBuild's CrowMergeScenes; CROW_SPLIT=on, the default, or off), each with a SplitPart
+    // DowngradeBuild's CrowMergeScenes; CROW_SPLIT=movers, the default, on or off), each with a SplitPart
     // naming its old parent and place; below objects the game switches on and off, a SplitHolder in
     // the part's place switches it. A first run-time test that took out every subtree that didn't move
     // in 60 frames: main thread Station Square 30.6 -> 26.8 ms, Pool 31.0 -> 24.4 ms.
-    //   -crow-scene-split off|on|check|report
+    //   -crow-scene-split off|on|check|report|apply|apply-check|report-movers|apply-movers|apply-movers-check
     //       off: after each area load, every part goes back where it was (its old parent, place,
     //       sibling index and activity), for A/B runs on one build; on: out again (-crow-cycle takes
     //       scenesplit=off|on, now); check: every second and at each switch of a holder, whether each
@@ -543,6 +543,8 @@ namespace CrowCompat
     // Checked on the PS Vita: the pause menu, examining, a dialogue, Roadside -> Station Square.
     // Not split: the camera rig (camera_follow_player, 2,890 transforms). With it a root of its own, a
     // Title FSM's Rewired action (RewiredGetJoystickCount) threw on the way back to the title.
+    // -crow-player-split game|ui|ui+camera: ui (the PS Vita's default) splits the menus, ui+camera the camera rig
+    // too, game neither; -crow-cycle takes split=.
     static class PlayerSplit
     {
         static readonly List<string> parts = new List<string>();

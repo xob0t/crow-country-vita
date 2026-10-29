@@ -379,7 +379,7 @@ COMPAT_SOURCES = [
             'EnemyCost',
             'ActionProfile',
             'FixedStep',
-            'PhysCost',
+            'ScaledColliders',
             'EnemySplit',
             'FastPaths',
             'Cameras',
@@ -561,7 +561,8 @@ def link_check(version: str, platform: str):
     for dll in roots:
         shutil.copy2(dll, managed / dll.name)
     link = staging / 'link.xml'
-    link.write_text(link_xml(roots, platform), encoding='utf-8')
+    exported = WORK / f'rip-{version}' / 'ExportedProject'
+    link.write_text(link_xml(exported, paths.target_engine, roots, platform), encoding='utf-8')
     whitelists = paths.data / 'PlaybackEngines' / 'PSP2Player' / 'Whitelists' if platform == 'vita' else None
     command = [
         linker,
@@ -826,7 +827,8 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(rewired_vita_overlay(exported, overlay, platform))
         overlay.update(material_keyword_overlay(exported, game, overlay))
         overlay.update(vita_lit_overlay(exported, overlay, platform))
-        overlay[Path('Assets') / 'link.xml'] = link_xml(assemblies, platform).encode()
+        engine = editor_paths(version, platform).target_engine
+        overlay[Path('Assets') / 'link.xml'] = link_xml(exported, engine, assemblies, platform).encode()
         overlay[Path('Assets') / 'link.xml.meta'] = stable_meta('asset', 'link.xml', 'TextScriptImporter').encode()
         overlay.update(texture_overlay(exported, game, platform))
         overlay.update(npot_texture_overlay(exported, overlay, platform))
