@@ -27,9 +27,11 @@ using Debug = UnityEngine.Debug;
 //                             highpass, chorus, echo, distortion, all (comma-separated); with idle among
 //                             them, only while their source is idle (the PS Vita's default: reverb,idle);
 //                             -crow-audio-game keeps every filter on, as the game has them.
-//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3), the most audible
-//                             (FilterGate), filters already on at the load included.
-//   -crow-reverb-adapt off    keep that cap in every area (by default it comes down where the mixer falls behind).
+//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3; a shared reverb counts
+//                             as one), the most audible (FilterGate), filters already on at the load included; on the
+//                             PS Vita a filter also comes on only while FMOD's mixer has room for one (FilterGate.Budget).
+//   -crow-reverb-adapt off    keep that cap in every area, without the budget (by default it comes down where the
+//                             mixer falls behind or goes over its budget).
 //   -crow-reverb-silent off   give a filter to sources that can't be heard at the listener too (by default they
 //                             get none: FilterGate.Silent).
 //   -crow-workers-share off   keep Unity's job workers off CPU 2 while few filters are on (FilterGate.Share; the
@@ -46,6 +48,8 @@ using Debug = UnityEngine.Debug;
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
 //                             repeatable.
+//   aplay=<name>              (-crow-cycle, -crow-ab, -crow-fight-cycle) play the AudioSource on an active GameObject
+//                             of that name, as the game does (the item pickup: aplay=new item).
 // The mixer measurements of 19-21 Oct (-crow-doppler, -crow-mix-*, -crow-audio-census, -crow-reverb-null) are
 // done and gone; their results are in docs/status-log.md.
 // Part of CrowCompat; see Compat2018.cs.
@@ -283,6 +287,7 @@ namespace CrowCompat
             public AudioSource Source;
             public SharedReverb.Group Shared;
             public float Tail, OffAt, Score;
+            public bool WasOn;  // on at the ranking
 
             public bool Valid { get { return Shared != null ? Shared.Alive : Filter != null; } }
             public bool On { get { return Shared != null ? Shared.Routed : Filter.enabled; } }
@@ -311,6 +316,21 @@ namespace CrowCompat
         // ran under 97% of the wall clock over a window of 1.5 s or more, the cap goes one below the reverbs
         // on (-crow-reverb-adapt off keeps it).
         static int ceiling, onCount;
+        // The mixer's budget (PS Vita; with the adaptive cap): the cap above came down only once the DSP clock had
+        // fallen behind, so the mixer underran for seconds at most arrivals before it did (Corridor D: 30 times in 34
+        // loads in the console logs of 15-29 Oct, the DSP clock at 67-98% of real time; the crackle at the transition
+        // from Crow's Lounge, #8), and again when a second reverb came on in play (the item pickup's). The FMOD mixer
+        // thread's own share of a CPU, read from the kernel every half second, tells it before: the mixer keeps up to
+        // about 70% (Pool 65%, Corridor D's shared reverb 69-71% at 0.99-1.00) and falls behind from 75 (Corridor D:
+        // 44-47% without its reverb, 74-78 with it, the DSP clock at 0.96-0.98 for 10 s), and a reverb costs it 20-30.
+        // So a filter comes on only while the mixer's last half second left room for one under the budget, one per
+        // half second, none in an area's first second (its sounds starting); over the budget, one goes off, for the
+        // rest of the area's visits as the adaptive cap does. rbudget=off (-crow-ab, -crow-fight-cycle) leaves it out.
+        const float Budget = 70f, ReverbCost = 30f;
+        static volatile int mixerUid;
+        static long mixerRun = -1, mixerTicks;
+        static float mixerShare = -1f;  // percent of a CPU over the last half second; -1 unknown
+        static bool budgetOn = true, room = true;
 
         // Whether FilterGate switches the reverb filters (SharedReverb then leaves its groups' on and off to it).
         internal static bool GatesReverbs { get { return active && (types.Contains("reverb") || types.Contains("all")); } }
@@ -347,6 +367,7 @@ namespace CrowCompat
                         CrowFlags.Value(args, "-crow-workers-share") != "off";
             ceiling = max;
             active = true;
+            if (Application.platform == RuntimePlatform.PSP2 && adapt) Threads.Find("FMOD mixer", uid => mixerUid = uid);
             CrowEvents.Loaded("FilterGate.sceneLoaded", (scene, mode) =>
             {
                 nextFind = 0f;
@@ -354,6 +375,7 @@ namespace CrowCompat
                 resolve = true;
                 watchFrom = Time.realtimeSinceStartup + 1f;
                 windowDsp = -1.0;
+                if (mixerShare >= 0f) room = false;  // the budget's first second
             });
             CrowEvents.Unloaded("FilterGate.sceneUnloaded", scene => Destroyed.Forget(curves));
             CrowEvents.Canvases("FilterGate.Update", Update);
@@ -415,24 +437,32 @@ namespace CrowCompat
             {
                 Entry entry = entries[i];
                 float score = float.MaxValue;
+                entry.WasOn = false;
                 if (entry.Shared != null)
                 {
                     if (entry.Shared.Alive)
                         foreach (SharedReverb.Member member in entry.Shared.Members)
                             if (member.Source != null) score = Mathf.Min(score, Audibility(member.Source, ear));
-                    if (entry.Shared.Routed) score *= 0.7f;
+                    entry.WasOn = entry.Shared.Routed;
                 }
                 else if (entry.Filter != null && entry.Source != null)
                 {
                     score = Audibility(entry.Source, ear);
-                    if (entry.Filter.enabled) score *= 0.7f;
+                    entry.WasOn = entry.Filter.enabled;
                 }
+                if (entry.WasOn) score *= 0.7f;
                 entry.Score = score;
                 entries[i] = entry;
             }
             order.Clear();
             for (int i = 0; i < entries.Count; i++) order.Add(i);
-            order.Sort((a, b) => entries[a].Score.CompareTo(entries[b].Score));
+            // On a tie (2D sources all score 0) the filter that is on keeps its place: an item pickup's reverb, wanted while
+            // a corridor's ambience has the one slot, plays dry rather than cut the ambience's reverb off mid-sound.
+            order.Sort((a, b) =>
+            {
+                int byScore = entries[a].Score.CompareTo(entries[b].Score);
+                return byScore != 0 ? byScore : entries[b].WasOn.CompareTo(entries[a].WasOn);
+            });
         }
 
         // 2D sources first (0), then by distance from the listener over the source's range.
@@ -458,6 +488,7 @@ namespace CrowCompat
             if (now >= nextRank || order.Count != entries.Count)
             {
                 Rank();
+                if (now >= nextRank) Measure(now);
                 nextRank = now + 0.5f;
             }
             // Which filters are wanted: their source plays and can be heard, or did within its tail.
@@ -518,11 +549,12 @@ namespace CrowCompat
                         }
                         else if (enabled) on++;
                     }
-                    else if (keep && !enabled && on < max)
+                    else if (keep && !enabled && on < max && room)
                     {
                         entry.Set(true);
                         switches++;
                         on++;
+                        if (mixerShare >= 0f) room = false;  // one a half second: the next measure counts it
                     }
                 }
             }
@@ -617,6 +649,27 @@ namespace CrowCompat
             return false;
         }
 
+        // The mixer's budget (see Budget above): its share of a CPU since the last call, and whether a filter may come on.
+        static void Measure(float now)
+        {
+            int uid = mixerUid;
+            if (uid == 0 || !budgetOn) return;
+            long run = Threads.RunMicros(uid), ticks = watch.ElapsedTicks;
+            if (run < 0) return;
+            if (mixerRun >= 0 && ticks > mixerTicks)
+                mixerShare = (float)((run - mixerRun) * 100.0 * Stopwatch.Frequency / ((ticks - mixerTicks) * 1e6));
+            mixerRun = run;
+            mixerTicks = ticks;
+            if (mixerShare < 0f) return;
+            room = now >= watchFrom && mixerShare + ReverbCost <= Budget;
+            if (mixerShare <= Budget || onCount == 0 || now < watchFrom || resolve) return;
+            string scene = SceneManager.GetActiveScene().name;
+            max = Math.Max(0, Math.Min(max, onCount) - 1);
+            learned[scene] = max;
+            Debug.Log("CROW_AUDIO mixer at " + mixerShare.ToString("F0", CultureInfo.InvariantCulture) + "% of a CPU in " + scene +
+                      " with " + onCount + " filters on: at most " + max + " now");
+        }
+
         // The adaptive cap (see ceiling above).
         static void Watch(float now)
         {
@@ -704,6 +757,26 @@ namespace CrowCompat
                 case "lowpass":
                     Switch(typeof(AudioLowPassFilter), value == "on");
                     return true;
+                case "rbudget":
+                    budgetOn = value != "off";
+                    room = true;
+                    mixerShare = -1f;
+                    mixerRun = -1;
+                    Debug.Log("CROW_AUDIO rbudget=" + (budgetOn ? "on" : "off"));
+                    return true;
+                case "aplay":
+                    // A test: the first AudioSource on an active GameObject of that name played as the game's code plays
+                    // it (IdleAudio wakes it), for the sounds a run can't reach (the item pickup's: aplay=new item).
+                    foreach (AudioSource source in Resources.FindObjectsOfTypeAll<AudioSource>())
+                        if (source.name == value && source.gameObject.activeInHierarchy && source.gameObject.scene.IsValid())
+                        {
+                            IdleAudio.Play(source);
+                            Debug.Log("CROW_AUDIO aplay " + value + ": " + (source.clip != null ? source.clip.name : "no clip") + " at " +
+                                      Time.realtimeSinceStartup.ToString("F2", CultureInfo.InvariantCulture));
+                            return true;
+                        }
+                    Debug.Log("CROW_AUDIO aplay " + value + ": no active source");
+                    return true;
             }
             return false;
         }
@@ -747,7 +820,8 @@ namespace CrowCompat
                     shared++;
                     if (entry.Shared.Routed) sharedOn++;
                 }
-            return " gated=" + entries.Count + "/" + count + " cap=" + max + " on=" + onCount + " shared=" + sharedOn + "/" + shared;
+            return " gated=" + entries.Count + "/" + count + " cap=" + max + " on=" + onCount + " shared=" + sharedOn + "/" + shared +
+                   " mixer=" + (mixerShare >= 0f ? mixerShare.ToString("F0", CultureInfo.InvariantCulture) : "?");
         }
     }
 

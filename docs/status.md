@@ -52,7 +52,7 @@ Area loads go through an empty scene with the old area's assets freed first.
 The GC heap is capped to leave Unity 16 MB, its table of pinned handles is grown at the start, and the allocator keeps its free blocks sorted.
 A collection runs half a second into a pause once 2 MB have been allocated, so fewer come in play (Boehm otherwise collects after every 5.5-6.6 MB, a 0.75-1 s stop).
 MeshCombineStudio's mesh caches are released once every combiner has combined.
-AudioSources idle for 2 s are disabled, at most 3 reverb filters are on at once, and alike reverbs share one.
+AudioSources idle for 2 s are disabled, at most 3 reverb filters are on at once, alike reverbs share one, and a reverb comes on only while FMOD's mixer has room for it.
 The game runs in its console mode (Control Mode Console 1) with the Switch's platform animations.
 
 ## Open issues
