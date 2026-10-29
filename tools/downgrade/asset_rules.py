@@ -2,6 +2,7 @@
 {path in the project: new content} for pipeline.assemble, except name_overlay and
 addressables_overlay, which also return the exported paths they move."""
 
+import collections
 import hashlib
 import re
 import struct
@@ -382,24 +383,23 @@ def render_texture_overlay(exported: Path):
 PLATFORM_AUDIO = {'vita': {0: (1, 5, None), 1: (1, 3, 0.5), 2: (2, 3, 0.7)}}
 # A clip kept in memory is read whole, on the main thread, when it first plays; long loops stream.
 STREAM_SECONDS = 45
-# Ambience loops of 25-43 s that stream too: every AudioSource that plays them loops, in all
-# 63 scenes, and a clip kept in memory stays loaded until the next area change (Ocean Kingdom starts with
-# seagulls 1 and ocean surface 1, 2.9 MB; Haunted Hilltop plays fireplace, puddle baby talk and the crickets).
-# 16.2 MB in memory in all; a stream costs FMOD's buffers instead (tens of KB) and reads from the memory card
-# while it plays. By file stem (Assets/AudioClip/<stem>.ogg); each must match a clip. Empty: as before.
-STREAM_LOOPS = {
-    '470793-Man_In_Dungeon_Please_Let_Me_Out',
-    'crawler mumble',
-    'puddle baby talk',
-    '57901-Crickets-Night_Urban-Intense',
-    'seagulls 1',
-    'road night ambience',
-    'ocean surface 1',
-    'haunted boom',
-    'control room ambience',
-    '406013-JSB-Florida_EXT_Cicedas_and_Distant_Road',
-    'fireplace',
-}
+# Loops stream from STREAM_LOOP_SECONDS: a clip that only looping AudioSources play (every reference to it,
+# in the scenes and the assets, is a looping source's; none is an FSM's or a script's), and a clip kept in
+# memory stays loaded until the next area change (Ocean Kingdom starts with seagulls 1 and ocean surface 1,
+# 2.9 MB; Haunted Hilltop plays fireplace, puddle baby talk and the crickets; Arcade its three music loops).
+# A stream costs FMOD's buffers instead (tens of KB) and reads from the memory card while it plays. From 20 s
+# underground creepy (27 scenes) and weird radio beep would stream too, many at once.
+STREAM_LOOP_SECONDS = 25
+CLIP_REFERENCE = re.compile(rb'fileID: 8300000, guid: ([0-9a-f]{32})')
+LOOPING_SOURCE = re.compile(
+    rb'^  m_audioClip: \{fileID: 8300000, guid: ([0-9a-f]{32}).*\n(?:  \w+: .*\n)*?  Loop: 1$', re.M
+)
+
+
+def clip_references(path: Path):
+    """[the clip GUIDs a file references, those of its looping AudioSources], each once per reference."""
+    data = path.read_bytes()
+    return [[guid.decode() for guid in pattern.findall(data)] for pattern in (CLIP_REFERENCE, LOOPING_SOURCE)]
 
 
 def audio_seconds(path: Path):
@@ -543,7 +543,13 @@ def audio_overlay(exported: Path, platform: str):
     formats = PLATFORM_AUDIO.get(platform)
     if not formats:
         return shared_reverb_mixers()
-    overlay, streamed, loops = shared_reverb_mixers(), [], set()
+    overlay, streamed, loops = shared_reverb_mixers(), [], []
+    references, looping = collections.Counter(), collections.Counter()
+    for every, looped in scan('clip-references', exported / 'Assets', lambda relative: relative.suffix in YAML_FILES,
+                              clip_references, version=LOOPING_SOURCE.pattern.decode()).values():
+        references.update(every)
+        looping.update(looped)
+    looped = {guid for guid, count in looping.items() if count == references[guid]}
     settings = re.compile(
         r'^(  defaultSettings:\n    loadType: )(\d)(\n(?:    .*\n)*?    compressionFormat: )(\d+)'
         r'(\n    quality: )([\d.]+)',
@@ -557,16 +563,15 @@ def audio_overlay(exported: Path, platform: str):
         if 'AudioImporter:' not in text:
             continue
 
-        def convert(m, meta=meta):
+        def convert(m, meta=meta, original=original):
             load_type, compression, quality = formats[int(m[2])]
             if load_type == 1:
                 stem = meta.with_suffix('').stem
-                seconds = audio_seconds(meta.with_suffix(''))
-                if stem in STREAM_LOOPS:
-                    loops.add(stem)
-                if stem in STREAM_LOOPS or (seconds is not None and seconds >= STREAM_SECONDS):
+                seconds = audio_seconds(meta.with_suffix('')) or 0
+                loop = seconds >= STREAM_LOOP_SECONDS and re.search(r'^guid: (\w+)', original, re.M)[1] in looped
+                if loop or seconds >= STREAM_SECONDS:
                     load_type, compression, quality = formats[2]
-                    streamed.append(stem)
+                    (streamed if seconds >= STREAM_SECONDS else loops).append(stem)
             return m[1] + str(load_type) + m[3] + str(compression) + m[5] + (m[6] if quality is None else str(quality))
 
         text, count = settings.subn(convert, text, count=1)
@@ -576,11 +581,9 @@ def audio_overlay(exported: Path, platform: str):
         if text != original:
             overlay[meta.relative_to(exported)] = text.encode('utf-8')
             clips += 1
-    if STREAM_LOOPS - loops:
-        sys.exit(f'STREAM_LOOPS names no clip kept in memory: {", ".join(sorted(STREAM_LOOPS - loops))}')
     log(
-        f'{platform} audio import changed for {clips} clips; '
-        f'{len(streamed)} long clips stream ({len(loops)} of them the STREAM_LOOPS ambience)'
+        f'{platform} audio import changed for {clips} clips; {len(streamed)} long clips stream, and '
+        f'{len(loops)} loops of {STREAM_LOOP_SECONDS} s or more: {", ".join(sorted(loops))}'
     )
     return overlay
 
