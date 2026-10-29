@@ -2,6 +2,7 @@
 {path in the project: new content} for pipeline.assemble, except name_overlay and
 addressables_overlay, which also return the exported paths they move."""
 
+import collections
 import hashlib
 import re
 import struct
@@ -301,20 +302,18 @@ def rewired_vita_overlay(exported: Path, overlay: dict, platform: str):
 
 
 # IL2CPP strips the class libraries down to what code references. PlayMaker finds its actions
-# and the game's scripts by name, so the game's assemblies and plugins are kept whole. Engine types
-# whose members only PlayMaker's Set/Get Property actions reach (by name, through reflection), which
-# the linker would strip: ParticleSystem's emissionRate, startLifetime and loop (47 actions), and the
-# setters of Light's range and spotAngle (the save rooms' fire lights flicker that way: "Set Method not
-# found for 'range'", an exception several times a frame, once code_trim had removed the unused
-# PlayMaker light actions that kept them). And MeshCollider, whose sharedMesh getter only CrowCompat's
-# MeshRelease reads (by reflection; the game only sets it), on by default on the PS Vita.
-LINK_PRESERVE = {
-    'UnityEngine.CoreModule': ['UnityEngine.Light'],
-    'UnityEngine.ParticleSystemModule': ['UnityEngine.ParticleSystem'],
-    'UnityEngine.PhysicsModule': ['UnityEngine.MeshCollider'],
-}
-# Per platform, engine types only reflection reaches: the PS Vita's free memory for the memory probe
-# (compat/Memory.cs).
+# and the game's scripts by name, so the game's assemblies and plugins are kept whole. So are the engine
+# types whose members PlayMaker's Set/Get Property actions reach by name, through reflection (CrowCompat's
+# FastPaths makes delegates of the same accessors): every type an FSM's FsmProperty names, in the scenes
+# and the assets, that one of the platform's engine modules defines (Light, ParticleSystem, AudioSource,
+# Camera, RectTransform: 19 properties; uGUI and TextMeshPro are kept whole anyway). The linker strips a
+# member only reflection reaches: the save rooms' fire lights threw "Set Method not found for 'range'"
+# several times a frame once code_trim had removed the unused PlayMaker light actions that kept it.
+FSM_PROPERTY_TYPE = re.compile(rb'^ +TargetTypeName: (\S+)\r?\n +PropertyName: ', re.M)
+# By hand, engine types only CrowCompat's own reflection reaches: MeshCollider, whose sharedMesh getter
+# only MeshRelease reads (the game only sets it), on by default on the PS Vita; per platform, the PS Vita's
+# free memory for the memory probe (compat/Memory.cs).
+LINK_PRESERVE = {'UnityEngine.PhysicsModule': ['UnityEngine.MeshCollider']}
 PLATFORM_LINK_PRESERVE = {'vita': {'UnityEngine.PSVitaModule': ['UnityEngine.PSVita.Diagnostics']}}
 # Per platform, plugin assemblies left to the linker instead of kept whole: no scripts, no startup
 # hooks, nothing in them found by name there. The editor's linker keeps the script assemblies whole
@@ -335,15 +334,32 @@ PLATFORM_LINKED = {
 }
 
 
-def link_xml(assemblies: list, platform: str):
+def link_xml(exported: Path, engine: Path, assemblies: list, platform: str):
+    """The linker's link.xml; engine: the platform's engine modules (pipeline.EditorPaths.target_engine)."""
+    import dnfile
+
+    found = scan(
+        'fsm-property-types',
+        exported / 'Assets',
+        lambda relative: relative.suffix in YAML_FILES,
+        lambda path: sorted({name.decode() for name in FSM_PROPERTY_TYPE.findall(path.read_bytes())}),
+        version=FSM_PROPERTY_TYPE.pattern.decode(),
+    )
+    named, kept = set().union(*found.values()), {}
+    for dll in sorted(engine.glob('UnityEngine.*.dll')):
+        for row in dnfile.dnPE(str(dll)).net.mdtables.TypeDef or ():
+            if f'{row.TypeNamespace}.{row.TypeName}' in named:
+                kept.setdefault(dll.stem, set()).add(f'{row.TypeNamespace}.{row.TypeName}')
+    for assembly, types in {**LINK_PRESERVE, **PLATFORM_LINK_PRESERVE.get(platform, {})}.items():
+        kept.setdefault(assembly, set()).update(types)
     linked = PLATFORM_LINKED.get(platform, set())
     lines = ['<linker>']
     lines += [
         f'  <assembly fullname="{dll.stem}" preserve="all"/>' for dll in sorted(assemblies) if dll.stem not in linked
     ]
-    for assembly, types in {**LINK_PRESERVE, **PLATFORM_LINK_PRESERVE.get(platform, {})}.items():
+    for assembly, types in sorted(kept.items()):
         lines.append(f'  <assembly fullname="{assembly}">')
-        lines += [f'    <type fullname="{t}" preserve="all"/>' for t in types]
+        lines += [f'    <type fullname="{t}" preserve="all"/>' for t in sorted(types)]
         lines.append('  </assembly>')
     return '\n'.join([*lines, '</linker>', ''])
 
@@ -382,24 +398,23 @@ def render_texture_overlay(exported: Path):
 PLATFORM_AUDIO = {'vita': {0: (1, 5, None), 1: (1, 3, 0.5), 2: (2, 3, 0.7)}}
 # A clip kept in memory is read whole, on the main thread, when it first plays; long loops stream.
 STREAM_SECONDS = 45
-# Ambience loops of 25-43 s that stream too: every AudioSource that plays them loops, in all
-# 63 scenes, and a clip kept in memory stays loaded until the next area change (Ocean Kingdom starts with
-# seagulls 1 and ocean surface 1, 2.9 MB; Haunted Hilltop plays fireplace, puddle baby talk and the crickets).
-# 16.2 MB in memory in all; a stream costs FMOD's buffers instead (tens of KB) and reads from the memory card
-# while it plays. By file stem (Assets/AudioClip/<stem>.ogg); each must match a clip. Empty: as before.
-STREAM_LOOPS = {
-    '470793-Man_In_Dungeon_Please_Let_Me_Out',
-    'crawler mumble',
-    'puddle baby talk',
-    '57901-Crickets-Night_Urban-Intense',
-    'seagulls 1',
-    'road night ambience',
-    'ocean surface 1',
-    'haunted boom',
-    'control room ambience',
-    '406013-JSB-Florida_EXT_Cicedas_and_Distant_Road',
-    'fireplace',
-}
+# Loops stream from STREAM_LOOP_SECONDS: a clip that only looping AudioSources play (every reference to it,
+# in the scenes and the assets, is a looping source's; none is an FSM's or a script's), and a clip kept in
+# memory stays loaded until the next area change (Ocean Kingdom starts with seagulls 1 and ocean surface 1,
+# 2.9 MB; Haunted Hilltop plays fireplace, puddle baby talk and the crickets; Arcade its three music loops).
+# A stream costs FMOD's buffers instead (tens of KB) and reads from the memory card while it plays. From 20 s
+# underground creepy (27 scenes) and weird radio beep would stream too, many at once.
+STREAM_LOOP_SECONDS = 25
+CLIP_REFERENCE = re.compile(rb'fileID: 8300000, guid: ([0-9a-f]{32})')
+LOOPING_SOURCE = re.compile(
+    rb'^  m_audioClip: \{fileID: 8300000, guid: ([0-9a-f]{32}).*\n(?:  \w+: .*\n)*?  Loop: 1$', re.M
+)
+
+
+def clip_references(path: Path):
+    """[the clip GUIDs a file references, those of its looping AudioSources], each once per reference."""
+    data = path.read_bytes()
+    return [[guid.decode() for guid in pattern.findall(data)] for pattern in (CLIP_REFERENCE, LOOPING_SOURCE)]
 
 
 def audio_seconds(path: Path):
@@ -543,7 +558,13 @@ def audio_overlay(exported: Path, platform: str):
     formats = PLATFORM_AUDIO.get(platform)
     if not formats:
         return shared_reverb_mixers()
-    overlay, streamed, loops = shared_reverb_mixers(), [], set()
+    overlay, streamed, loops = shared_reverb_mixers(), [], []
+    references, looping = collections.Counter(), collections.Counter()
+    for every, looped in scan('clip-references', exported / 'Assets', lambda relative: relative.suffix in YAML_FILES,
+                              clip_references, version=LOOPING_SOURCE.pattern.decode()).values():
+        references.update(every)
+        looping.update(looped)
+    looped = {guid for guid, count in looping.items() if count == references[guid]}
     settings = re.compile(
         r'^(  defaultSettings:\n    loadType: )(\d)(\n(?:    .*\n)*?    compressionFormat: )(\d+)'
         r'(\n    quality: )([\d.]+)',
@@ -557,16 +578,15 @@ def audio_overlay(exported: Path, platform: str):
         if 'AudioImporter:' not in text:
             continue
 
-        def convert(m, meta=meta):
+        def convert(m, meta=meta, original=original):
             load_type, compression, quality = formats[int(m[2])]
             if load_type == 1:
                 stem = meta.with_suffix('').stem
-                seconds = audio_seconds(meta.with_suffix(''))
-                if stem in STREAM_LOOPS:
-                    loops.add(stem)
-                if stem in STREAM_LOOPS or (seconds is not None and seconds >= STREAM_SECONDS):
+                seconds = audio_seconds(meta.with_suffix('')) or 0
+                loop = seconds >= STREAM_LOOP_SECONDS and re.search(r'^guid: (\w+)', original, re.M)[1] in looped
+                if loop or seconds >= STREAM_SECONDS:
                     load_type, compression, quality = formats[2]
-                    streamed.append(stem)
+                    (streamed if seconds >= STREAM_SECONDS else loops).append(stem)
             return m[1] + str(load_type) + m[3] + str(compression) + m[5] + (m[6] if quality is None else str(quality))
 
         text, count = settings.subn(convert, text, count=1)
@@ -576,11 +596,9 @@ def audio_overlay(exported: Path, platform: str):
         if text != original:
             overlay[meta.relative_to(exported)] = text.encode('utf-8')
             clips += 1
-    if STREAM_LOOPS - loops:
-        sys.exit(f'STREAM_LOOPS names no clip kept in memory: {", ".join(sorted(STREAM_LOOPS - loops))}')
     log(
-        f'{platform} audio import changed for {clips} clips; '
-        f'{len(streamed)} long clips stream ({len(loops)} of them the STREAM_LOOPS ambience)'
+        f'{platform} audio import changed for {clips} clips; {len(streamed)} long clips stream, and '
+        f'{len(loops)} loops of {STREAM_LOOP_SECONDS} s or more: {", ".join(sorted(loops))}'
     )
     return overlay
 
@@ -667,13 +685,18 @@ def texture_overlay(exported: Path, game: Path, platform: str):
 # over the build's files (43 MB of them in the player prefab's preloaded assets, loaded all the time),
 # and every power-of-two texture was DXT. On the PS Vita such a texture becomes a power of two, so it
 # compresses to DXT5, or DXT1 when opaque:
-# - a Default texture only materials use is scaled to the nearest power of two by the importer
-#   (nPOTScale), since materials sample it by normalized coordinates; point-filtered ones are kept;
 # - a texture only Sprites use (AssetRipper exports sprites as assets, with rects in texels from the
 #   bottom left) is padded at the top and right to the next power of two, its edge texels repeated so
 #   filtering at the sprite's edge reads what it did. Only clamped textures: a tiled Image samples a
 #   repeating sprite's whole texture.
-# Textures used otherwise (scenes, prefabs, scripts' assets such as TextMeshPro's, Resources) are kept.
+# - any other smoothly filtered texture that no Sprite uses (materials, light cookies, the camera
+#   effect's CRT mask, RawImages: all sample it by normalized coordinates) is scaled to the nearest power
+#   of two by the importer (nPOTScale; a Default texture only, the other types ignore it);
+# - one Sprites use as well, when square, is resized here to the power of two below its side, its sprites
+#   scaled with it (sprite_texture_cap): 400x400 to 256, 0.61 MB of RGBA32 to 64 KB of DXT5.
+# Kept: point-filtered textures (pixel art, the button icons; resampled they would blur), non-square
+# ones that Sprites share (a sprite's pixels per unit is one number for both sides), those scripts'
+# assets name (TextMeshPro's sprite assets keep glyph rects in texels), and Resources.
 TEXTURE_REFERENCE = re.compile(rb'fileID: 2800000, guid: ([0-9a-f]{32})')
 TEXTURE_REFERRERS = NATIVE_ASSETS | {'.unity', '.cubemap', '.flare', '.spriteatlas'}
 SPRITE_DOCUMENT = b'--- !u!213 '
@@ -749,8 +772,11 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
     sprites, others = {}, {}
     for found, (lone_sprite, guids) in references.items():
         for guid in guids:
-            (sprites if lone_sprite else others).setdefault(guid, set()).add(found.suffix)
-    result, scaled, padded, kept_bytes, saved = {}, 0, 0, 0, 0
+            if lone_sprite:
+                sprites.setdefault(guid, []).append(Path('Assets') / found)
+            else:
+                others.setdefault(guid, set()).add(found.suffix)
+    result, scaled, padded, resized, kept_bytes, saved = {}, 0, 0, 0, 0, 0
     for found, stat in listing(assets).items():
         if stat is None or not found.name.endswith('.png.meta') or 'Resources' in found.parts:
             continue
@@ -770,12 +796,17 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
         field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.M))).get  # first of each
         users = others.get(guid, set())
         size = max(int(field('maxTextureSize')), power_of_two(max(width, height)))
+        smooth = field('filterMode') != '0' and '.asset' not in users
         if guid in sprites and not users and field('wrapU') == field('wrapV') == '1':
             result[relative.with_suffix('')] = pad_to_power_of_two(image)
             padded += 1
-        elif guid not in sprites and users == {'.mat'} and field('textureType') == '0' and field('filterMode') != '0':
+        elif smooth and guid not in sprites and field('textureType') == '0':
             text = re.sub(r'^(\s*)nPOTScale: \d+$', r'\g<1>nPOTScale: 1', text, flags=re.M)
             scaled += 1
+        elif smooth and width == height:
+            size = power_of_two(width) // 2
+            result.update(sprite_texture_cap(exported, overlay, relative.with_suffix(''), sprites.get(guid, []), size))
+            resized += 1
         else:
             kept_bytes += width * height * 4
             continue
@@ -784,7 +815,7 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
         text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, count=1, flags=re.M)
         result[relative] = text.encode('utf-8')
     log(
-        f'{platform}: {scaled} textures scaled and {padded} padded to powers of two for DXT '
+        f'{platform}: {scaled} textures scaled, {padded} padded and {resized} resized to powers of two for DXT '
         f'({saved / 1e6:.0f} MB as RGBA32); {kept_bytes / 1e6:.0f} MB of others stay uncompressed'
     )
     return result
@@ -807,9 +838,9 @@ PLATFORM_TEXTURE_SIZE_CAPS = {
 # Per platform: the largest textures of Haunted Hilltop's and Ocean Kingdom's loads, halved or more (the
 # user accepts a softer look there for the memory). Area textures sit in main memory on the PS Vita, and
 # those two areas' loads bottomed at 4-7 MB free (Ocean Kingdom -> Haunted Hilltop). Most are shared with other
-# areas, which get the same cut. The 400x400 sprites are uncompressed on the PS Vita (RGBA32: not powers of
-# two); at 256 they are, so they compress to DXT5 as well (0.61 MB -> 64 KB). Copies a texture has in the
-# export are capped alike, so texture_dedup_overlay still finds them identical. Haunted Hilltop about -3.6 MB,
+# areas, which get the same cut. The 400x400 ones are DXT5 at 512 after npot_texture_overlay (padded or
+# scaled up); at 256 they take a quarter (256 -> 64 KB). Copies a texture has in the export are capped
+# alike, so texture_dedup_overlay still finds them identical. Haunted Hilltop about -3.6 MB,
 # Ocean Kingdom about -4.9 MB. Without a PS Vita entry (textures the game ships compressed), the default
 # platform's size is capped. Empty: as before.
 PLATFORM_TEXTURE_AREA_CAPS = {
@@ -821,10 +852,7 @@ PLATFORM_TEXTURE_AREA_CAPS = {
         'concrete 2_0': 512,
         'rock wall 1': 512,  # 1024 DXT1, Ocean Kingdom
         'grime 2': 512,  # 512x1024 DXT1 with mipmaps
-        'cloud puff': 256,  # 400x400 RGBA32 sprites
-        'gradient4': 256,
-        'blur circle': 256,
-        'blur circle_0': 256,
+        'blur circle_0': 256,  # 400x400 sprites, padded to 512
         'ring4': 256,  # 512 DXT5 particles
         'lightning particle grid 1': 256,
         'trash symbol': 256,

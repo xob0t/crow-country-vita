@@ -637,9 +637,8 @@ class Switch(NamedTuple):
 BUILD_SWITCHES = {
     # 1: a Windows player with the PS Vita's scene data (the defaults below as on the PS Vita), for measurements.
     'CROW_VITA_DATA': Switch('build', '0 1', '0', '0'),
-    # Enemies' random looks (RandomVariant) picked at build time (unity/VariantBake.cs): on, Haunted Hilltop's Enemy
-    # Puddle and every Lumber; all, also the puddle in every scene.
-    'CROW_VARIANT_BAKE': Switch('build', 'on all off', 'on', 'off'),
+    # Enemies' random looks (RandomVariant) picked at build time, every enemy's in every scene (unity/VariantBake.cs).
+    'CROW_VARIANT_BAKE': Switch('build', 'on off', 'on', 'off'),
     # The player's ProBuilder meshes built at build time (unity/ProBuilderMeshes.cs); bake keeps the components.
     'CROW_PROBUILDER': Switch('build', 'on bake off', 'on', 'off'),
     # The static merge (unity/MergeScenes.cs, compat/Merge.cs); ab keeps the parts' meshes for -crow-merge off.

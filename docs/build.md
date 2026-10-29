@@ -148,7 +148,7 @@ These environment variables change what a stage writes, for experiments and meas
 | Variable | Stage | Values (default with PS Vita data, without) | What |
 | --- | --- | --- | --- |
 | `CROW_VITA_DATA` | build | `0`, `1` (`0`) | A Windows player with the PS Vita's scene data, the defaults below as on the PS Vita, for measurements. |
-| `CROW_VARIANT_BAKE` | build | `on`, `all`, `off` (`on`, `off`) | Enemies' random looks (RandomVariant) picked at build time, each from its own seed, so every build has the same look (`unity/VariantBake.cs`): Haunted Hilltop's Enemy Puddle and every Lumber (whose 72 variants kept its parts from merging: 289 renderers), or the puddle in every scene too. |
+| `CROW_VARIANT_BAKE` | build | `on`, `off` (`on`, `off`) | Enemies' random looks (RandomVariant) picked at build time, each from its own seed, so every build has the same look (`unity/VariantBake.cs`): every enemy's in every scene, one look per placement (the Puddles' 2,700 switched-off transforms each; the Lumber's 72 variants kept its parts from merging: 289 renderers). |
 | `CROW_PROBUILDER` | build | `on`, `bake`, `off` (`on`, `off`) | The player's ProBuilder meshes built at build time (`unity/ProBuilderMeshes.cs`); `bake` keeps the components. |
 | `CROW_MERGE` | build | `on`, `ab`, `off` (`on`, `off`) | The static merge (`unity/MergeScenes.cs`); `ab` keeps the parts' meshes, for `-crow-merge off`. |
 | `CROW_MERGE_MAX_VERTICES`, `CROW_MERGE_MAX_KB` | build | a whole number (unset: the merge's own) | The merge's largest part, and its budget per scene. |
