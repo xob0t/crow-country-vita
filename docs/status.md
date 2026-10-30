@@ -27,6 +27,7 @@ Frame time on the console (30 fps is 33.4 ms; the latest measurement of each):
 | Haunted Hilltop fight | 35.7 ms | 22 Oct |
 | Fairy Forest fight | 37.2 ms | 20 Oct |
 | Station Square fight (the benchmark) | 38.0-38.9 ms (about 26 fps) | 22-26 Oct |
+| Pool, the final boss (its benchmark; GPU-bound) | about 40 ms (25 fps; 58.3 before) | 30 Oct |
 
 Free main memory during an area load is 33 MB or more everywhere but three areas: Haunted Hilltop 12-54 MB (once 8), Ocean Kingdom 11-36, Arcade 14-31 (23 Oct).
 Each recovers to 37 MB or more once loaded.
@@ -39,6 +40,7 @@ The CPU runs at 444 MHz and the GPU at 222 MHz (PSVshell's 500 MHz CPU is left a
 Frames are capped at 30 fps (vSyncCount 2): an even 30 where a frame fits in 33 ms.
 Graphics jobs are on (`CROW_GFX_JOBS=on` writes them into `boot.config`), with Unity's two job workers at the render thread's priority on CPU 1.
 Every light draws in one pass through CrowVita/Lit: up to 4 key lights per pixel chosen by what they give the ground around Mara, one fill light, the rest per vertex.
+Where the GPU can't keep up the key lights' cap comes down one at a time, for the rest of the area's visits (Pool: none).
 Shadows are hard, Low resolution, 12 m, and only the player casts them.
 The camera films at 550x351 and the camera effect runs at half size, in three passes written for the SGX543.
 Every opaque lit material draws a depth layer back, so the decals, writing and overlays laid a few millimetres over it don't fight it (`asset_rules.vita_lit_bake`).
