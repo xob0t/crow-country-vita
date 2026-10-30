@@ -74,6 +74,9 @@ namespace CrowCompat
                 case "particles":
                     ParticleRule.Set(value);
                     return true;
+                case "hide":
+                    Draws.Hide(value);
+                    return true;
                 case "pnoise":
                     ParticleNoise.Set(value);
                     return true;
