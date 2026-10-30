@@ -284,6 +284,7 @@ namespace CrowCompat
             if (installed) return;
             on = Enabled(args);
             installed = true;
+            Sweep.Install(args);
             CrowEvents.Loaded("SceneGap.Arrived", Arrived);
         }
 
@@ -321,6 +322,7 @@ namespace CrowCompat
             target = name;
             clock.Reset();
             clock.Start();
+            Sweep.Settle();
             Loading.LoadCpu.Begin();  // -crow-load-cpu
             StartDrain();
             return true;
@@ -426,18 +428,22 @@ namespace CrowCompat
         {
             if (operation != null && --pending > 0) return;
             Debug.Log("CROW_GAP scenes unloaded after " + clock.ElapsedMilliseconds + " ms");
-            Resources.UnloadUnusedAssets().completed += AssetsUnloaded;
+            if (Sweep.Needed(target)) Resources.UnloadUnusedAssets().completed += AssetsUnloaded;
+            else AssetsUnloaded(null);
         }
 
+        // operation: the unused-asset pass's, null when Sweep left it out.
         static void AssetsUnloaded(AsyncOperation operation)
         {
             long assets = clock.ElapsedMilliseconds;
             RestoreMasks();
             GC.Collect();
+            if (operation != null) Sweep.Swept();
             string name = target;
             target = null;
-            Debug.Log("CROW_GAP assets unloaded after " + assets + " ms, collected after " + clock.ElapsedMilliseconds + " ms; loading " + name +
-                      " additively");
+            Debug.Log("CROW_GAP assets " + (operation != null ? "unloaded" : "kept") + " after " + assets + " ms, collected after " +
+                      clock.ElapsedMilliseconds + " ms; loading " + name + " additively");
+            Sweep.Watch();
             before.Clear();
             Scene gap = SceneManager.GetSceneByName(Scene);
             if (gap.IsValid())
@@ -452,6 +458,7 @@ namespace CrowCompat
         {
             if (arriving == null || mode != LoadSceneMode.Additive || !Named(scene, arriving)) return;
             arriving = null;
+            Sweep.Arrived(scene.name);
             SceneManager.SetActiveScene(scene);
             Scene gap = SceneManager.GetSceneByName(Scene);
             int moved = 0;
@@ -477,6 +484,117 @@ namespace CrowCompat
             if (scene.name == name) return true;
             string path = scene.path;
             return path == name || path == "Assets/" + name + ".unity";
+        }
+    }
+
+    // The gap's unused-asset pass, only where memory needs it (-crow-gap-sweep auto|on|off: auto on the PS Vita,
+    // on elsewhere, off for tests). The pass walks every object and the managed heap, 1.7-2.1 s of every PS Vita
+    // load, and by then the old scenes' unload has freed their objects: what it frees is the old area's assets.
+    // Kept, the ones the new area shares load no more (Underground SE -> Machine Centre: 2.5 s instead of 6), and
+    // the others take free memory beside the new area's load. Unity keeps the memory a load took beyond what it
+    // already held: after two passes left out and a load down to 39 MB free, the next loads started 7-14 MB lower
+    // than with every pass (30 Oct). So the gap leaves the pass out only where the load stays far from that: the
+    // free main memory now, less the most this area's loads took before (from the additive load's start to 10 s
+    // after it, Start's allocations included; a first visit always passes), less what Unity holds beyond the last
+    // pass's state (the assets a pass would free now, those of passes left out before them too), must stay at
+    // ReserveMB or more. The big areas' loads, which take 40-90 MB, always pass. CROW_GAP lines give the numbers.
+    static class Sweep
+    {
+        const float ReserveMB = 48f;
+        const int WatchMs = 10000;
+        static string mode;
+        static readonly Dictionary<string, float> took = new Dictionary<string, float>();
+        static readonly Stopwatch clock = Stopwatch.StartNew();
+        static float cleanMB = -1f, startMB;
+        static volatile float lowestMB;
+        static volatile int endMs;
+        static volatile bool watching;
+        static string area;
+        static bool sampling;
+
+        internal static void Install(string[] args)
+        {
+            mode = CrowFlags.Value(args, "-crow-gap-sweep", "auto", "on");
+            if (mode == "auto" && VitaMemory.FreeLPDDR == null) mode = "on";
+        }
+
+        static float AllocatedMB()
+        {
+            return UnityEngine.Profiling.Profiler.GetTotalAllocatedMemoryLong() / 1048576f;
+        }
+
+        // Whether the gap runs the pass before loading the area (its name, or its path as the saves give it).
+        internal static bool Needed(string name)
+        {
+            if (mode != "auto") return mode != "off";
+            string key = name.Substring(name.LastIndexOf('/') + 1);
+            float needMB, freeMB = VitaMemory.FreeMainMB();
+            if (cleanMB < 0f || freeMB < 0f || !took.TryGetValue(key, out needMB))
+            {
+                Debug.Log("CROW_GAP sweeping: " + key + " not loaded before");
+                return true;
+            }
+            float heldMB = Math.Max(0f, AllocatedMB() - cleanMB), lowMB = freeMB - needMB - heldMB;
+            bool needed = lowMB < ReserveMB;
+            Debug.Log("CROW_GAP " + (needed ? "sweeping" : "not sweeping") + ": " + freeMB.ToString("F0") + " MB free, " + key + " took " +
+                      needMB.ToString("F0") + " MB, " + heldMB.ToString("F1") + " MB held since the last sweep: " + lowMB.ToString("F0") +
+                      " MB at the lowest");
+            return needed;
+        }
+
+        // After the pass and the collection: Unity's allocations as the pass leaves them.
+        internal static void Swept()
+        {
+            cleanMB = AllocatedMB();
+        }
+
+        // The area's additive load starts: its lowest free memory is watched until 10 s after it arrived.
+        internal static void Watch()
+        {
+            if (mode != "auto") return;
+            startMB = VitaMemory.FreeMainMB();
+            lowestMB = startMB;
+            area = null;
+            endMs = int.MaxValue;
+            watching = true;
+            if (sampling) return;
+            sampling = true;
+            new System.Threading.Thread(Sample) { IsBackground = true, Name = "CrowGapWatch" }.Start();
+        }
+
+        internal static void Arrived(string name)
+        {
+            if (!watching) return;
+            area = name;
+            endMs = (int)clock.ElapsedMilliseconds + WatchMs;
+        }
+
+        // The next load starts: what the last one took, the most of its visits kept.
+        internal static void Settle()
+        {
+            watching = false;
+            if (area == null) return;
+            float needMB = startMB - lowestMB, before;
+            if (!took.TryGetValue(area, out before) || needMB > before) took[area] = needMB;
+            Debug.Log("CROW_GAP " + area + " took " + needMB.ToString("F0") + " MB (" + startMB.ToString("F0") + " MB free at its load, " +
+                      lowestMB.ToString("F0") + " at the lowest)");
+            area = null;
+        }
+
+        static void Sample()
+        {
+            while (true)
+            {
+                System.Threading.Thread.Sleep(100);
+                if (!watching) continue;
+                if (clock.ElapsedMilliseconds > endMs)
+                {
+                    watching = false;
+                    continue;
+                }
+                float freeMB = VitaMemory.FreeMainMB();
+                if (freeMB >= 0f && freeMB < lowestMB) lowestMB = freeMB;
+            }
         }
     }
 }
