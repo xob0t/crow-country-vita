@@ -1088,6 +1088,9 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
 # gets one of each, its index buffer and submeshes' vertex ranges rewritten; the triangles are the same vertices byte
 # for byte, so nothing on screen changes (the meshes Pool's scene names: 889,000 vertices by their uses -> 598,000).
 # Left alone: compressed, skinned and blend-shape meshes, vertex data in several streams or streamed from a .resS.
+# Then each submesh's triangles go in an order for the GPU's post-transform vertex cache (cache_order) and the vertices
+# in the order the triangles first use them (30 Oct, MESHDATA): a sample of 300 meshes, cache misses per triangle (a
+# 16-entry FIFO) 1.62 as exported, 1.28 welded, 1.08 also reordered.
 MESH_WELD_CACHE = WORK / 'welded-meshes'
 WELD_SUBMESH = re.compile(
     rb'  - serializedVersion: 2\n    firstByte: (\d+)\n    indexCount: (\d+)\n    topology: (\d+)\n'
@@ -1097,9 +1100,62 @@ WELD_CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: \d+\n      forma
 WELD_VERTEX_COUNT = re.compile(rb'\n    m_VertexCount: (\d+)\n')
 
 
+def cache_order(triangles: list, size: int = 32):
+    """Triangles (a flat index list) in an order for the GPU's post-transform vertex cache: Tom Forsyth's linear-speed
+    vertex cache optimisation (a cache of size entries, a vertex's score from its place in it and its triangles left)."""
+    count = len(triangles) // 3
+    if count < 3:
+        return triangles
+    by_vertex = {}
+    for t in range(count):
+        for v in triangles[3 * t : 3 * t + 3]:
+            by_vertex.setdefault(v, []).append(t)
+    left = {v: len(ts) for v, ts in by_vertex.items()}
+    position = {}
+
+    def score(v):
+        if not left[v]:
+            return -1.0
+        place = position.get(v, -1)
+        cached = 0.0 if place < 0 else 0.75 if place < 3 else (1 - (place - 3) / (size - 3)) ** 1.5
+        return cached + 2.0 * left[v] ** -0.5
+
+    vertex_score = {v: score(v) for v in by_vertex}
+    triangle_score = [sum(vertex_score[v] for v in triangles[3 * t : 3 * t + 3]) for t in range(count)]
+    done = [False] * count
+    cache, out, scan_from = [], [], 0
+    for _ in range(count):
+        best, best_score = -1, -1.0
+        for v in cache:
+            for t in by_vertex[v]:
+                if not done[t] and triangle_score[t] > best_score:
+                    best, best_score = t, triangle_score[t]
+        if best < 0:
+            while done[scan_from]:
+                scan_from += 1
+            best = scan_from
+        done[best] = True
+        triangle = triangles[3 * best : 3 * best + 3]
+        out += triangle
+        for v in triangle:
+            left[v] -= 1
+        touched = set(cache) | set(triangle)
+        cache = triangle + [v for v in cache if v not in triangle]
+        del cache[size:]
+        position = {v: i for i, v in enumerate(cache)}
+        for v in touched:
+            vertex_score[v] = score(v)
+        for v in touched:
+            for t in by_vertex[v]:
+                if not done[t]:
+                    triangle_score[t] = sum(vertex_score[u] for u in triangles[3 * t : 3 * t + 3])
+    return out
+
+
 def weld_mesh(data: bytes):
-    """The mesh asset with its exactly equal vertices (every channel, byte for byte) made one, or None when it has
-    none or is a kind left alone."""
+    """The mesh asset with its exactly equal vertices (every channel, byte for byte) made one, each submesh's triangles
+    in cache_order and the vertices in the order the triangles first use them; None when that changes nothing or the
+    mesh is a kind left alone."""
     if (
         b'\n  m_MeshCompression: 0\n' not in data
         or b'\n  m_BindPose: []\n' not in data
@@ -1127,8 +1183,6 @@ def weld_mesh(data: bytes):
             j = seen[vertex] = len(unique)
             unique.append(vertex)
         remap.append(j)
-    if len(unique) == n:
-        return None
     wide = index_format.group(1) == b'1'
     size, code = (4, 'I') if wide else (2, 'H')
     indices_raw = bytes.fromhex(index_buffer.group(1).decode())
@@ -1136,7 +1190,7 @@ def weld_mesh(data: bytes):
     submeshes = list(WELD_SUBMESH.finditer(data))
     if not submeshes:
         return None
-    new_submeshes = []
+    spans = []
     for submesh in submeshes:
         first, index_count, topology, base = (int(x) for x in submesh.groups()[:4])
         if first % size or first // size + index_count > len(indices):
@@ -1146,14 +1200,32 @@ def weld_mesh(data: bytes):
             if indices[k] + base >= n:
                 return None
             indices[k] = remap[indices[k] + base]
+        if topology == 0 and index_count % 3 == 0:
+            indices[start : start + index_count] = cache_order(indices[start : start + index_count])
+        spans.append((first, index_count, topology, start))
+    # The vertices in the order the triangles first use them, the order they are fetched in.
+    order, renumber = [], {}
+    for v in indices:
+        if v not in renumber:
+            renumber[v] = len(order)
+            order.append(v)
+    for v in range(len(unique)):
+        if v not in renumber:
+            renumber[v] = len(order)
+            order.append(v)
+    indices = [renumber[v] for v in indices]
+    new_raw = b''.join(unique[v] for v in order)
+    packed = struct.pack(f'<{len(indices)}{code}', *indices)
+    if new_raw == raw and packed == indices_raw:
+        return None
+    new_submeshes = []
+    for first, index_count, topology, start in spans:
         used = indices[start : start + index_count]
         low, high = (min(used), max(used)) if used else (0, -1)
         new_submeshes.append(
             b'  - serializedVersion: 2\n    firstByte: %d\n    indexCount: %d\n    topology: %d\n'
             b'    baseVertex: 0\n    firstVertex: %d\n    vertexCount: %d\n' % (first, index_count, topology, low, high - low + 1)
         )
-    packed = struct.pack(f'<{len(indices)}{code}', *indices)
-    new_raw = b''.join(unique)
     out = data
     for submesh, new in reversed(list(zip(submeshes, new_submeshes))):
         out = out[: submesh.start()] + new + out[submesh.end() :]
