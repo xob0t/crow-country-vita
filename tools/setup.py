@@ -18,8 +18,9 @@ to C:\\vitasdk and patches it to 3.570.071; --vita-sdk takes your own copy inste
 .7z, ...) or a folder. Either way setup checks the SDK's tools and version and sets SCE_PSP2_SDK_DIR
 for your user. The editor's PS Vita build also runs the SDK's Target Manager Server and Publishing
 Tools, which setup installs from the SDK's installers (Publishing Tools need .NET Framework 3.5, which
-setup turns on) and points SCE_ROOT_DIR at. At the end setup starts the editor once in batch mode to
-check its license. --dry-run reports what would be done and changes nothing.
+setup turns on) and points SCE_ROOT_DIR at. Setup removes the editor's license checks with unigate
+(--no-unigate keeps them), then starts the editor once in batch mode to check that it runs. --dry-run
+reports what would be done and changes nothing.
 """
 
 import argparse
@@ -56,6 +57,11 @@ from common import (
 from rich.text import Text
 
 DOWNLOADS = WORK / 'installers'
+# unigate removes the license checks of 2017.x to 2018.2.x editors (https://github.com/xob0t/unigate).
+UNIGATE = (
+    'https://raw.githubusercontent.com/xob0t/unigate/e16b3b08915d33efbe946033765cd62b37b8c660/unigate.py',
+    '38beb74c472fb47a28e471790f306151e6031c6a59db4fb9477a0b51c6f81c2e',
+)
 # How deep below the SDK's folder its Target Manager and Publishing Tools installers are looked for.
 INSTALLER_DEPTH = 4
 
@@ -171,6 +177,27 @@ class Setup:
         if not self.args.keep_downloads:
             installer.unlink()
         self.say(module, f'{name} installed')
+
+    def unigate(self):
+        """Remove the editor's license checks with unigate; --no-unigate leaves a licensed editor as it is."""
+        unity = EDITORS / TARGET / doctor.EDITOR_FILES['editor']
+        if self.args.no_unigate or not unity.exists():
+            return
+        url, sha256 = UNIGATE
+        if self.args.dry_run:
+            self.say('unigate', f'would remove the license checks of {unity} with unigate')
+            return
+        script = download(url, EXTERNAL / 'unigate' / 'unigate.py', sha256)
+        result = subprocess.run(
+            ['uv', 'run', '--script', str(script), '--editor', str(unity.parent)], capture_output=True, text=True
+        )
+        if result.returncode:
+            print(result.stdout + result.stderr)
+            self.notes.append(f'unigate could not patch {unity} (above); close Unity and run setup again')
+        elif 'applied' in result.stdout:
+            self.say('unigate', f'license checks removed (the original is kept beside {unity.name})')
+        else:
+            self.say('unigate', 'already patched')
 
     def license(self, platform):
         """Start the editor once in batch mode; a pass is remembered until the editor changes."""
@@ -580,6 +607,9 @@ def main():
     parser.add_argument(
         '--keep-downloads', action='store_true', help=f'keep the installers and the SDK archive in {DOWNLOADS}'
     )
+    parser.add_argument(
+        '--no-unigate', action='store_true', help="keep the editor's license checks (your editor has a license)"
+    )
     parser.add_argument('--skip-license-check', action='store_true', help='do not start the editor at the end')
     parser.add_argument('--then-build', action='store_true', help=argparse.SUPPRESS)  # build.py builds next
     args = parser.parse_args()
@@ -603,6 +633,7 @@ def main():
         setup.vita_sdk()
     if args.vita_host:
         setup.vita_host()
+    setup.unigate()
     setup.license('vita' if args.vita else 'windows')
     print()
     if args.dry_run:

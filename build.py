@@ -115,6 +115,9 @@ def main():
     parser.add_argument('--vita-sdk', metavar='PATH', help='your own PS Vita SDK, an archive or a folder')
     parser.add_argument('--skip-setup', action='store_true', help='go straight to the pipeline')
     parser.add_argument(
+        '--no-unigate', action='store_true', help="keep the editor's license checks (your editor has a license)"
+    )
+    parser.add_argument(
         '--from',
         dest='start',
         choices=STAGES,
@@ -141,6 +144,7 @@ def main():
     setup = [sys.executable, ROOT / 'tools' / 'setup.py', *flags, '--then-build']
     setup += ['--game', args.game] if args.game else []
     setup += ['--vita-sdk', args.vita_sdk] if args.vita_sdk else []
+    setup += ['--no-unigate'] if args.no_unigate else []
     name = 'vita-build' if args.vita else 'pc-build'
     if args.dry_run:
         if not args.skip_setup:

@@ -678,11 +678,7 @@ def check_license(version, platform):
     """Start the editor in batch mode with a new empty project and read its log (about a minute)."""
     unity = EDITORS / version / EDITOR_FILES['editor']
     name = LICENSE_CHECK
-    fix = (
-        'activate a license in the editor, or remove its license check with unigate '
-        f'(git clone https://github.com/xob0t/unigate, then in its folder: uv run unigate.py --editor '
-        f'"{unity.parent}")'
-    )
+    fix = f'{SETUP} removes its license checks with unigate (or activate a license in the editor)'
     if not unity.exists():
         return Check(name, False, 'no editor', SETUP)
     with tempfile.TemporaryDirectory(prefix='crow-license-') as temp:
