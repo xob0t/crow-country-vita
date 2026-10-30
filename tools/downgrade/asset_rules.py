@@ -1837,7 +1837,9 @@ SETTING_RULES = {
 # Per platform. The PS Vita player starts in power mode A, with the GPU at 111 MHz; mode C (2)
 # raises the GPU clock and gives up the camera and full screen brightness (The Drifter's port).
 PLATFORM_SETTING_RULES = {
-    'vita': {'psp2PowerMode': '2'},
+    # StripUnusedMeshComponents (Optimize Mesh Data): the build leaves out the vertex channels no material drawing a
+    # mesh reads (30 Oct, MESHDATA).
+    'vita': {'psp2PowerMode': '2', 'StripUnusedMeshComponents': '1'},
     # Unity keeps PlayerPrefs (the game's display, sound and control settings) under the company and
     # product name, in the registry on Windows: test players get their own, apart from the game's.
     'windows': {'productName': 'Crow Country 2018 port'},
