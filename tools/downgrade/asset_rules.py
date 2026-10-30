@@ -820,6 +820,38 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
     return result
 
 
+# Mipmaps for the materials' textures that have none (30 Oct, MESHDATA), PS Vita: 793 smoothly filtered Default
+# textures were imported without them, so a surface seen small or at a grazing angle samples a few texels of a
+# texture far bigger than its pixels: the writing of Fairy Forest's tree fairy note (128x128, about 35 pixels wide)
+# changed as the camera moved. A texture only materials name (no Sprite, scene, prefab or other asset: those are UI,
+# sprites and scripts' textures, drawn at their size) and not point-filtered (pixel art keeps its texels) gets
+# mipmaps: about a third more memory each, and the GPU reads fewer texels from those far away.
+def mipmap_overlay(exported: Path, overlay: dict, platform: str):
+    if platform != 'vita':
+        return {}
+    assets = exported / 'Assets'
+    users = {}
+    for found, (lone_sprite, guids) in texture_reference_scan(assets).items():
+        for guid in guids:
+            users.setdefault(guid, set()).add('sprite' if lone_sprite else found.suffix)
+    result, added = {}, 0
+    for found, stat in listing(assets).items():
+        if stat is None or not found.name.endswith('.png.meta') or 'Resources' in found.parts:
+            continue
+        relative = Path('Assets') / found
+        text = current_text(exported, overlay, relative)
+        if 'TextureImporter:' not in text:
+            continue
+        guid = require(re.search(r'^guid: (\w+)', text, re.M), relative, 'guid')[1]
+        field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.M))).get  # first of each
+        if field('enableMipMap') != '0' or field('filterMode') == '0' or field('textureType') != '0' or users.get(guid) != {'.mat'}:
+            continue
+        result[relative] = re.sub(r'^(\s*)enableMipMap: 0$', r'\g<1>enableMipMap: 1', text, count=1, flags=re.M).encode('utf-8')
+        added += 1
+    log(f'{platform}: mipmaps for {added} textures only materials use')
+    return result
+
+
 # Per platform: exported textures (by file stem) imported at most this size. The player prefab keeps
 # its own copies of the four CJK fonts ("_0", see i2_font_overlay) only to write the language names in
 # the options menu, so their 2048x2048 atlases (16.8 MB, preloaded: loaded all the time) were the
