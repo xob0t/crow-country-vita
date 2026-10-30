@@ -49,6 +49,7 @@ Physics steps once per 30 fps frame, at most two steps a frame.
 The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
 The small wobbling parts of the bosses' bodies (non-enemy rigidbodies) are held still and merged like an enemy's: Pool's boss, Crypt's Wader, Control Room's Shambler, Corridor A's Scamper.
 Every mesh's exactly equal vertices are made one at build time (51,443 meshes, 7.86 -> 5.28 million vertices; the areas' scenes 15-37% fewer), with nothing on screen changed.
+The meshes' triangles are in vertex cache order, the build leaves out the vertex channels no material reads (Optimize Mesh Data), and the textures only materials use have mipmaps (760; Fairy Forest's tree fairy note no longer shimmers).
 The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
 PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
 The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.
@@ -65,7 +66,6 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 - Unity's allocator leaves about 2.7 MB more holes after each Ocean Kingdom <-> Haunted Hilltop round trip (22 Oct).
 - The Station Square fight is the slowest place measured, at about 26 fps (38-39 ms a frame).
 - The player's log stopped being written after a console standby while the game ran on (26 Oct, not investigated).
-- The text of Fairy Forest's tree fairy note (Hint 3) changes as the camera moves; it is the same with the depth layers on and off, so likely aliasing: 128x128 without mipmaps, about 35 pixels wide in the camera's picture (29 Oct, not fixed).
 - Dig Site's dark spots have not been checked with the depth layers (22 Oct).
 - The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
 - The render-thread crashes of 17 and 26 Oct were the shader patcher's 512 KB of USSE memory running full, not graphics jobs; the eboot gives it 1 MB since 27 Oct.
