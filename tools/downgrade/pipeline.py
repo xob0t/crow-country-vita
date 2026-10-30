@@ -57,6 +57,7 @@ from asset_rules import (
     link_xml,
     mesh_duplicates,
     mesh_readable_overlay,
+    mesh_weld_overlay,
     name_overlay,
     native_plugin_overlay,
     npot_texture_overlay,
@@ -836,6 +837,7 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(streamed_mesh_overlay(exported, game))
         duplicates = mesh_duplicates(exported, overlay)
         overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
+        overlay.update(mesh_weld_overlay(exported, overlay, platform))
         texture_copies, renamed_references = texture_dedup_overlay(exported, overlay)
         overlay.update(renamed_references)
         moved, renamed = addressables_overlay(exported, overlay)

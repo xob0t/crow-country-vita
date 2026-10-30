@@ -27,7 +27,7 @@ Frame time on the console (30 fps is 33.4 ms; the latest measurement of each):
 | Haunted Hilltop fight | 35.7 ms | 22 Oct |
 | Fairy Forest fight | 37.2 ms | 20 Oct |
 | Station Square fight (the benchmark) | 38.0-38.9 ms (about 26 fps) | 22-26 Oct |
-| Pool, the final boss (its benchmark; GPU-bound) | about 40 ms (25 fps; 58.3 before) | 30 Oct |
+| Pool, the final boss (its benchmark) | 33.8-33.9 ms (29.5 fps; median 33.4; 58.3 before) | 30 Oct |
 
 Free main memory during an area load is 33 MB or more everywhere but three areas: Haunted Hilltop 12-54 MB (once 8), Ocean Kingdom 11-36, Arcade 14-31 (23 Oct).
 Each recovers to 37 MB or more once loaded.
@@ -48,6 +48,7 @@ Particle noise is Unity's low-quality 1D noise.
 Physics steps once per 30 fps frame, at most two steps a frame.
 The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
 The small wobbling parts of the bosses' bodies (non-enemy rigidbodies) are held still and merged like an enemy's: Pool's boss, Crypt's Wader, Control Room's Shambler, Corridor A's Scamper.
+Every mesh's exactly equal vertices are made one at build time (51,443 meshes, 7.86 -> 5.28 million vertices; the areas' scenes 15-37% fewer), with nothing on screen changed.
 The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
 PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
 The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.
