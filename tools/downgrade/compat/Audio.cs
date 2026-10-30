@@ -326,11 +326,16 @@ namespace CrowCompat
         // So a filter comes on only while the mixer's last half second left room for one under the budget, one per
         // half second, none in an area's first second (its sounds starting); over the budget, one goes off, for the
         // rest of the area's visits as the adaptive cap does. rbudget=off (-crow-ab, -crow-fight-cycle) leaves it out.
+        // Nor while an area's clips are still loading (clipsLoading): a clip loads when it first plays (asset_rules sets
+        // preloadAudioData 0), so the mixer's share is low until the area's loops have all started. Corridor D from the
+        // title still loaded 6-7 clips 9 s after its arrival; the budget let its reverb on at 25-43%, and when the
+        // loops started the mixer went to 77-78% (the DSP clock at 0.85-0.87 for 2 s, 249 ms short). The check runs
+        // at each measure from a second after a scene load until no clip is loading, then not until the next load.
         const float Budget = 70f, ReverbCost = 30f;
         static volatile int mixerUid;
         static long mixerRun = -1, mixerTicks;
         static float mixerShare = -1f;  // percent of a CPU over the last half second; -1 unknown
-        static bool budgetOn = true, room = true;
+        static bool budgetOn = true, room = true, clipsLoading;
 
         // Whether FilterGate switches the reverb filters (SharedReverb then leaves its groups' on and off to it).
         internal static bool GatesReverbs { get { return active && (types.Contains("reverb") || types.Contains("all")); } }
@@ -376,6 +381,7 @@ namespace CrowCompat
                 watchFrom = Time.realtimeSinceStartup + 1f;
                 windowDsp = -1.0;
                 if (mixerShare >= 0f) room = false;  // the budget's first second
+                clipsLoading = true;
             });
             CrowEvents.Unloaded("FilterGate.sceneUnloaded", scene => Destroyed.Forget(curves));
             CrowEvents.Canvases("FilterGate.Update", Update);
@@ -661,13 +667,23 @@ namespace CrowCompat
             mixerRun = run;
             mixerTicks = ticks;
             if (mixerShare < 0f) return;
-            room = now >= watchFrom && mixerShare + ReverbCost <= Budget;
+            // The measure that finds the clips loaded still adds none: the next one has every loop playing.
+            bool settling = clipsLoading;
+            if (clipsLoading && now >= watchFrom) clipsLoading = ClipsLoading();
+            room = now >= watchFrom && !settling && mixerShare + ReverbCost <= Budget;
             if (mixerShare <= Budget || onCount == 0 || now < watchFrom || resolve) return;
             string scene = SceneManager.GetActiveScene().name;
             max = Math.Max(0, Math.Min(max, onCount) - 1);
             learned[scene] = max;
             Debug.Log("CROW_AUDIO mixer at " + mixerShare.ToString("F0", CultureInfo.InvariantCulture) + "% of a CPU in " + scene +
                       " with " + onCount + " filters on: at most " + max + " now");
+        }
+
+        static bool ClipsLoading()
+        {
+            foreach (AudioClip clip in Resources.FindObjectsOfTypeAll<AudioClip>())
+                if (clip.loadState == AudioDataLoadState.Loading) return true;
+            return false;
         }
 
         // The adaptive cap (see ceiling above).
