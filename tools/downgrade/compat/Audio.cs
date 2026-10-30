@@ -27,7 +27,7 @@ using Debug = UnityEngine.Debug;
 //                             highpass, chorus, echo, distortion, all (comma-separated); with idle among
 //                             them, only while their source is idle (the PS Vita's default: reverb,idle);
 //                             -crow-audio-game keeps every filter on, as the game has them.
-//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 3; a shared reverb counts
+//   -crow-reverb-max <n>      with idle, at most n of those filters on at once (default 0; a shared reverb counts
 //                             as one), the most audible (FilterGate), filters already on at the load included; on the
 //                             PS Vita a filter also comes on only while FMOD's mixer has room for one (FilterGate.Budget).
 //   -crow-reverb-adapt off    keep that cap in every area, without the budget (by default it comes down where the
@@ -302,8 +302,11 @@ namespace CrowCompat
         static readonly HashSet<string> types = new HashSet<string>();
         static bool idleOnly, active;
         // At most this many filters on at once (-crow-reverb-max): each reverb costs about 20% of CPU 2
-        // at 444 MHz, the mixer without them 15-20%; the title's New Game sounds start five at once.
-        static int max = 3;
+        // at 444 MHz, the mixer without them 15-20%; the title's New Game sounds start five at once. None by
+        // default (30 Oct): one reverb took the mixer over its budget in Corridor S, Corridor B, Corridor D, Dig Site
+        // and the title as soon as other sounds started (a pickup, a screen: 74-79% of a CPU, the DSP clock at 95%),
+        // so the budget below let each area crackle once before it took the reverb off for good.
+        static int max;
         static readonly List<Entry> entries = new List<Entry>();
         static readonly List<int> order = new List<int>();  // entries, the most audible first
         static readonly List<bool> wants = new List<bool>();
@@ -364,7 +367,7 @@ namespace CrowCompat
                 if (type == "idle") idleOnly = true;
                 else if (type.Length > 0) types.Add(type);
             if (types.Count == 0) return;
-            max = CrowFlags.Int(args, "-crow-reverb-max", 3);
+            max = CrowFlags.Int(args, "-crow-reverb-max", 0);
             if (!idleOnly) max = 0;
             adapt = CrowFlags.Value(args, "-crow-reverb-adapt") != "off";
             silentOn = CrowFlags.Value(args, "-crow-reverb-silent") != "off";
