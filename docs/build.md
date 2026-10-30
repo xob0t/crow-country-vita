@@ -29,9 +29,7 @@ uv run build.py --windows       # a Windows player: builds/crow-2018.2.19f1/Crow
    uv run tools/setup.py --vita --il2cpp # both, and Windows IL2CPP players
    ```
 
-3. Give the editor a license, or patch it with unigate (see [The Unity license](#the-unity-license)). Every build here runs the editor.
-
-4. Check that everything is in place:
+3. Check that everything is in place:
 
    ```powershell
    uv run tools/setup.py doctor --target vita    # or windows, il2cpp; all three without --target
@@ -44,7 +42,7 @@ The setup script installs what is missing and skips what is already there, so yo
 - downloads AssetRipper 2.0.0 into `tools/external/assetripper-2.0.0`, the .NET 8 SDK (8.0.425) into `tools/external/dotnet`, and Mono.Cecil 0.10.0-beta6 from NuGet;
 - finds the game in your Steam libraries, or else a GOG install, and offers to set `CROW_GAME` if it is not in Steam's default folder;
 - with `--vita`, installs Sony's PS Vita SDK (downloaded from archive.org, or your copy with `--vita-sdk`), checks it and sets `SCE_PSP2_SDK_DIR` for your user, then installs the SDK's Target Manager Server and Publishing Tools, which the editor's PS Vita build runs, and sets `SCE_ROOT_DIR`;
-- starts the editor once in batch mode to check that it runs (see [The Unity license](#the-unity-license));
+- removes the editor's license checks with unigate, then starts it once in batch mode to check that it runs (see [The Unity license](#the-unity-license));
 - ends with the doctor's checklist (see [Checking the setup](#checking-the-setup)).
 
 It checks every download against a pinned hash: SHA-256, SHA-512 for the .NET SDK (the hash Microsoft publishes), and SHA-1 for the PS Vita SDK's files, the only hash archive.org lists for them. It runs a Unity installer only if the installer's Authenticode signature is Unity Technologies'. Installers that need administrator rights ask for them.
@@ -60,6 +58,7 @@ It checks every download against a pinned hash: SHA-256, SHA-512 for the .NET SD
 | `--yes` | Accept the offers: set a variable for a game or SDK the script found, run the SDK's tool installers. |
 | `--dry-run` | Report what the script would do, and change nothing. |
 | `--keep-downloads` | Keep the installers and archives in `work/installers`. |
+| `--no-unigate` | Keep the editor's license checks, for an editor with a license of its own. `build.py` takes it too. |
 | `--skip-license-check` | Don't start the editor at the end. |
 
 `uv run tools/setup.py download editor il2cpp vita assetripper dotnet cecil --to <dir>` only downloads and checks the installers, for example to install them on another machine.
@@ -76,12 +75,10 @@ It sets `SCE_PSP2_SDK_DIR` and `SCE_ROOT_DIR` for your user and tells Windows, s
 
 ### The Unity license
 
-Every build here is the editor's, so it has to start in batch mode with the build targets you need, and the script can't activate a license for you. Either activate one in the editor, or remove the license checks of 2017.x to 2018.2.x editors with [unigate](https://github.com/xob0t/unigate), with Unity closed (`--restore` undoes it):
+Every build here is the editor's, so it has to start in batch mode with the build targets you need, and Unity hides the PS Vita target unless the license includes console access. So the setup script patches the editor with [unigate](https://github.com/xob0t/unigate), which removes the license checks of 2017.x to 2018.2.x editors: it downloads `unigate.py` at a pinned commit (SHA-256 checked) into `tools/external/unigate` and runs it on `Unity.exe`, which keeps the original beside it (`Unity.exe<date>.orig.bak`). An editor already patched is left alone. Close Unity first: a running editor's `Unity.exe` can't be written, and setup stops with a note to run it again. With a license of your own, pass `--no-unigate` and activate it in the editor. To undo the patch, with Unity closed:
 
 ```powershell
-git clone https://github.com/xob0t/unigate
-cd unigate
-uv run unigate.py --editor "$env:LOCALAPPDATA\Unity\Editors\2018.2.19f1\Editor"
+uv run tools/external/unigate/unigate.py --editor "$env:LOCALAPPDATA\Unity\Editors\2018.2.19f1\Editor" --restore
 ```
 
 The setup script starts the editor once with an empty project in a temporary folder and reads its log; with `--vita` it also checks that the editor loads its PS Vita module. It remembers a pass in `work/license-check.ok` until the editor changes. To check again, run `uv run tools/setup.py doctor --license` (with `--target vita` for the PS Vita module).
