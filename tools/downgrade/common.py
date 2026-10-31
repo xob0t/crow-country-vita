@@ -658,6 +658,8 @@ BUILD_SWITCHES = {
     'CROW_MCS_STRIP': Switch('build', 'on off', 'CROW_MCS_BAKE', 'CROW_MCS_BAKE'),
     # The inert scripts left out of the scenes (unity/StripScenes.cs).
     'CROW_STRIP': Switch('build', 'on off', 'on', 'off'),
+    # See-through layers stacked at one place drawn once, with the stack's alpha (unity/StackedLayers.cs).
+    'CROW_STACK_FOLD': Switch('build', 'on off', 'on', 'off'),
     # The materials saved with CrowVita/Lit (asset_rules.vita_lit_overlay); off leaves the swap to run time.
     'CROW_LIT_BAKE': Switch('project', 'on off', 'on', 'on', ('vita',)),
     # on: the FSMs' compiled bodies only (rewriter/FsmCompile.cs); off keeps the originals beside them.
