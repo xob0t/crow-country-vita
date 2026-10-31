@@ -1320,8 +1320,9 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
 # HULL_KEEP share of its positions that shape it most (the others dropped one at a time, the one whose loss takes
 # least of the hull's volume first), one vertex per position: its normal kept, the UVs projected along the normal's
 # largest axis (the rock's texture is a seamless grunge). Pool's rock: 48 vertices, 48 triangles -> 18, 32. A mesh
-# that isn't nearly convex (a position more than 10% of its size inside the hull), or isn't one stream of float
-# positions, normals and UVs, is left alone. unity/MeshCombineBake.cs culls the hulls' buried triangles.
+# that isn't convex (a position inside the hull, or four on one of its faces: hull_faces wants every position a
+# corner of triangular faces, as all the rock's are), or isn't one stream of float positions, normals and UVs, is
+# left alone. unity/MeshCombineBake.cs culls the hulls' buried triangles.
 HULL_AREAS = ('Pool',)
 HULL_MIN_USES = 1000
 HULL_KEEP = 0.7
@@ -1388,18 +1389,8 @@ def hull_mesh(data: bytes):
         row = struct.unpack_from('<8f', raw, i * 32)
         normal_at.setdefault(row[:3], row[3:6])
     positions = list(normal_at)
-    faces = hull_faces(positions)
-    if faces is None:
+    if hull_faces(positions) is None:  # convex: every position a corner of the hull
         return None
-    size = max(max(p[k] for p in positions) - min(p[k] for p in positions) for k in range(3))
-    for p in positions:  # nearly convex: every position on or near the hull
-        depth = min(
-            -sum(normal[m] * (p[m] - positions[a][m]) for m in range(3)) / (sum(x * x for x in normal) ** 0.5)
-            for a, b, c in faces
-            for normal in [hull_normal(positions, a, b, c)]
-        )
-        if depth > 0.1 * size:
-            return None
     keep = list(range(len(positions)))
     while len(keep) > max(4, round(HULL_KEEP * len(positions))):
         best = None
