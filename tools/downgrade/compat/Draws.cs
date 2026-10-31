@@ -70,7 +70,8 @@ namespace CrowCompat
 
         // Cycle key hide=<what> (a probe for A/B windows: what the GPU's frame is spent on): the enabled renderers
         // that match switched off until hide=none. what: transparent (a material past the opaque queue; particle
-        // systems not), dense:<n> (a mesh of n vertices or more), else a regex on the hierarchy path.
+        // systems not), dense:<n> (a mesh of n vertices or more), mat:<regex> (a material's name: the merge's
+        // CrowMerged objects say nothing of what they hold), else a regex on the hierarchy path.
         static readonly List<Renderer> hidden = new List<Renderer>();
 
         internal static void Hide(string what)
@@ -78,7 +79,9 @@ namespace CrowCompat
             foreach (Renderer renderer in hidden) if (renderer != null) renderer.enabled = true;
             hidden.Clear();
             if (what == "none") return;
-            System.Text.RegularExpressions.Regex pattern = what == "transparent" || what.StartsWith("dense:", StringComparison.Ordinal) ? null : new System.Text.RegularExpressions.Regex(what);
+            bool byMaterial = what.StartsWith("mat:", StringComparison.Ordinal);
+            System.Text.RegularExpressions.Regex pattern = what == "transparent" || what.StartsWith("dense:", StringComparison.Ordinal) ? null
+                : new System.Text.RegularExpressions.Regex(byMaterial ? what.Substring(4) : what);
             int dense = what.StartsWith("dense:", StringComparison.Ordinal) ? int.Parse(what.Substring(6), CultureInfo.InvariantCulture) : 0;
             long vertices = 0;
             foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
@@ -88,6 +91,7 @@ namespace CrowCompat
                 Mesh mesh = filter == null ? null : filter.sharedMesh;
                 bool match = what == "transparent" ? renderer.sharedMaterials.Any(m => m != null && m.renderQueue > 2500)
                     : dense > 0 ? mesh != null && mesh.vertexCount >= dense
+                    : byMaterial ? renderer.sharedMaterials.Any(m => m != null && pattern.IsMatch(m.name))
                     : pattern.IsMatch(Hierarchy.Full(renderer.transform));
                 if (!match) continue;
                 renderer.enabled = false;
