@@ -196,7 +196,7 @@ namespace CrowCompat
             catch (Exception) { return 0; }
         }
 
-        // For Quality's -crow-loop-cpu: the calling thread's UID (0 without the plugin), and a
+        // For LoopProfile's -crow-loop-cpu: the calling thread's UID (0 without the plugin), and a
         // thread's run time in microseconds (-1 on failure). Works without -crow-audio.
         internal static int SelfAnyway()
         {
@@ -215,7 +215,7 @@ namespace CrowCompat
             return (uint)runInfo[4] | ((long)runInfo[5] << 32);
         }
 
-        // For Quality's frame probe (any thread, its own buffers): a thread's status, wait type, the UID it
+        // For LoopProfile's frame probe (any thread, its own buffers): a thread's status, wait type, the UID it
         // waits on and the CPU it last ran on into info[4]; which of our threads each CPU runs now into
         // uids[3]; a thread's name; a wait object's name. Below 0 on failure.
         internal static int Wait(int uid, int[] info)
@@ -228,7 +228,7 @@ namespace CrowCompat
             return CrowThreadsRunning(uids);
         }
 
-        // Quality's workers= and gfxthread= keys: a thread's priority and CPUs now (0 keeps either); the old
+        // For GfxThreads (-crow-gfx-workers, workers=): a thread's priority and CPUs now (0 keeps either); the old
         // ones into was[0] (priority) and was[1] (CPU mask). Below 0 on failure.
         internal static int SetNow(int uid, int priority, int mask, int[] was)
         {
@@ -423,7 +423,7 @@ namespace CrowCompat
     // status-log.md, Render step). The player starts them at priority 0x9f on CPUs 0-2, below the render
     // thread (0x40, CPU 1) and FMOD's mixer (0x40, CPU 2), and on CPU 0 below the main thread, so the job
     // ran late and the main thread waited about 4 ms a frame for it. -crow-gfx-workers <priority>:<cpus>
-    // sets them once they first run (a thread polls which threads run, as Audio.cs finds UnityPreload);
+    // sets them once they first run (a thread polls which threads run, as MoveLoader finds UnityPreload);
     // the PS Vita's default is 64:1, the render thread's priority on its CPU (not the mixer's, which
     // keeps CPU 2 to itself: audio as before); game leaves them. -crow-cycle / -crow-fight-cycle / -crow-ab
     // take workers=<priority>:<cpus>|game. CROW_GFX_THREADS logs each change with what the thread had.

@@ -296,7 +296,7 @@ namespace CrowCompat
             return flags[slot][kind >= 0 && kind < 5 ? kind : 5];
         }
 
-        // The reader's active actions, for -crow-input while it serves (Diag.cs), or null.
+        // The reader's active actions, for -crow-input while it serves (InputProbe.cs), or null.
         internal static string Active()
         {
             if (!Serving) return null;
@@ -759,7 +759,7 @@ namespace CrowCompat
         }
 
         // The most derived public property of that name (Rewired's types redeclare some), or a field; a missing
-        // one throws (ByName, ProbeFiles.cs).
+        // one throws (ByName, Helpers.cs).
         static object Get(object target, string name)
         {
             return ByName.Get(target, name);

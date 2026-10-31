@@ -89,7 +89,7 @@ PRX_EXPORT int CrowCpuIdle(int *out)
 	return 0;
 }
 
-/* For Quality's frame probe: a thread's status, wait type, the UID of what it waits on and the CPU it
+/* For LoopProfile's frame probe: a thread's status, wait type, the UID of what it waits on and the CPU it
    last ran on, into out[4]. 0 or the system's error. */
 PRX_EXPORT int CrowThreadWait(int uid, int *out)
 {

@@ -9,7 +9,7 @@ using UnityEngine.SceneManagement;
 // -crow-input (Diag.cs reads the flag): what the pad gives, from Unity's input to Rewired's maps and player 0's
 // actions, as it changes, and every 5 s the joysticks Unity and Rewired see and player 0's maps. By reflection
 // (CrowCompat doesn't reference Rewired), with its own Get, which also reads non-public members and puts the error
-// in the log line in place of a value (ProbeFiles.cs' ByName throws or gives null).
+// in the log line in place of a value (Helpers.cs' ByName throws or gives null).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {

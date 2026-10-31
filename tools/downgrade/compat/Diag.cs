@@ -83,7 +83,7 @@ namespace CrowCompat
             Guard("FixedStep", FixedStep.Install);  // -crow-fixed-dt: the physics step
             Guard("EnemySplit", EnemySplit.Install);  // the enemies' death debris out (EnemySplit.cs, EnemyRebuild.cs)
             Guard("FastPaths", FastPaths.Install);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
-            Guard("Decor", Decor.Install);  // decoration off screen, -crow-motion-report (Decor.cs)
+            Guard("Decor", Decor.Install);  // decoration off screen (Decor.cs)
             Guard("Cuts", Cuts.Install);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
             Guard("Tweens", TweenProbe.Install);  // -crow-tween-log: DOTween's update timed (Tweens.cs)
             Guard("Pad", Pad.Install);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
