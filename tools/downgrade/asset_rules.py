@@ -1064,6 +1064,16 @@ def mesh_guids(assets: Path):
     )
 
 
+def asset_guids(assets: Path):
+    """{<path>.meta: the GUID of the asset or folder} for everything outside Mesh/ (mesh_guids has those)."""
+    return scan(
+        'asset-guids',
+        assets,
+        lambda relative: relative.suffix == '.meta' and relative.parts[0] != 'Mesh',
+        meta_guid,
+    )
+
+
 def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict | None = None):
     """duplicates: mesh_duplicates' {copy's GUID: the GUID the scenes name instead}."""
     if platform != 'vita':
@@ -1488,12 +1498,7 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
         guids.update({guid: area for guid, n in uses.items() if n >= HULL_MIN_USES})
     for guid in meshes_named_elsewhere(assets, duplicates):
         guids.pop(guid, None)
-    meshes = {}
-    for relative, stat in listing(assets / 'Mesh').items():
-        if stat is not None and relative.suffix == '.meta':
-            found = re.search(r'guid: ([0-9a-f]{32})', (assets / 'Mesh' / relative).read_text(encoding='utf-8'))
-            if found and found[1] in guids:
-                meshes[found[1]] = Path('Assets') / 'Mesh' / relative.with_suffix('')
+    meshes = {guid: Path('Assets') / meta.with_suffix('') for meta, guid in mesh_guids(assets).items() if guid in guids}
     result = {}
     for guid, path in sorted(meshes.items()):
         data = current_bytes(exported, overlay, path)
@@ -1558,13 +1563,8 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
     if platform != 'vita':
         return {}
     assets = exported / 'Assets'
-    guid_path = {}
-    for folder in ('Mesh', 'Material', 'Texture2D'):
-        for relative, stat in listing(assets / folder).items():
-            if stat is not None and relative.suffix == '.meta':
-                found = re.search(r'guid: ([0-9a-f]{32})', (assets / folder / relative).read_text(encoding='utf-8'))
-                if found:
-                    guid_path[found[1]] = Path('Assets') / folder / relative.with_suffix('')
+    metas = asset_guids(assets) | mesh_guids(assets)
+    guid_path = {guid: Path('Assets') / meta.with_suffix('') for meta, guid in metas.items() if guid}
     seamless = {}
 
     def plain(material: str):
@@ -1845,13 +1845,7 @@ def resident_guids(assets: Path):
         lambda path: sorted({g.decode() for g in ANY_GUID.findall(path.read_bytes())}),
         version=ANY_GUID.pattern.decode(),
     )
-    paths = scan(
-        'asset-guids',
-        assets,
-        lambda relative: relative.suffix == '.meta' and relative.parts[0] != 'Mesh',
-        meta_guid,
-    )
-    by_guid = {guid: meta.with_suffix('') for meta, guid in paths.items() if guid}
+    by_guid = {guid: meta.with_suffix('') for meta, guid in asset_guids(assets).items() if guid}
     seen, todo = set(), [root.relative_to('Assets') for root in ADDRESSABLE_ASSETS.values()]
     while todo:
         for guid in references.get(todo.pop(), []):
