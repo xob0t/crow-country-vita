@@ -19,6 +19,7 @@ from common import (
     WORK,
     YAML_FILES,
     build_switches,
+    code_digest,
     expect,
     folder_meta,
     game_data,
@@ -1276,6 +1277,22 @@ def weld_count(path: Path):
     return [int(WELD_VERTEX_COUNT.search(data).group(1)), int(WELD_VERTEX_COUNT.search(welded).group(1))]
 
 
+def cached_output(cache: Path, path: Path, data: bytes, make):
+    """cache / path holding make(data), or None when make gives None. The mark beside it has data's SHA-1 and
+    code_digest(make) (make, the tools' functions it calls and the constants they read), so a change to the code
+    makes it again too (1 Nov: keyed by the input alone, meshes welded before cache_order were kept without it)."""
+    cached, mark = cache / path, cache / path.with_suffix('.sha1')
+    key = f'{hashlib.sha1(data).hexdigest()} {code_digest(make)}'
+    if not (cached.exists() and mark.exists() and mark.read_text() == key):
+        made = make(data)
+        if made is None:
+            return None
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(made)
+        mark.write_text(key)
+    return cached
+
+
 def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
     """weld_mesh on every mesh asset with duplicate vertices, as the rules before left it (cached in MESH_WELD_CACHE)."""
     if platform != 'vita':
@@ -1287,16 +1304,9 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
         if not count:
             continue
         path = Path('Assets') / relative
-        data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = MESH_WELD_CACHE / path, MESH_WELD_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            welded = weld_mesh(data)
-            if welded is None:
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(welded)
-            mark.write_text(digest)
+        cached = cached_output(MESH_WELD_CACHE, path, current_bytes(exported, overlay, path), weld_mesh)
+        if cached is None:
+            continue
         result[path] = cached
         before, after = before + count[0], after + count[1]
     log(f'{platform}: {len(result)} meshes welded, their vertices {before} -> {after}')
@@ -1455,16 +1465,10 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
     result = {}
     for guid, path in sorted(meshes.items()):
         data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = HULL_CACHE / path, HULL_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            hulled = hull_mesh(data)
-            if hulled is None:
-                log(f'{platform}: {guids[guid]}: {path.name} left as it is (not a simple hull)')
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(hulled)
-            mark.write_text(digest)
+        cached = cached_output(HULL_CACHE, path, data, hull_mesh)
+        if cached is None:
+            log(f'{platform}: {guids[guid]}: {path.name} left as it is (not a simple hull)')
+            continue
         result[path] = cached
         before, after = (WELD_VERTEX_COUNT.search(d)[1].decode() for d in (data, cached.read_bytes()))
         log(f'{platform}: {guids[guid]}: {path.name} as a hull, {before} -> {after} vertices')
@@ -1509,6 +1513,12 @@ def project_uvs(data: bytes):
         axis = max(range(3), key=lambda m: abs(normal[m]))
         struct.pack_into('<' + uv_code, raw, base + uv[1], *(position[m] + 0.5 for m in range(3) if m != axis))
     return data.replace(vertices[2], bytes(raw).hex().encode(), 1)
+
+
+def uv_weld_mesh(data: bytes):
+    """project_uvs, then weld_mesh; None when project_uvs can't read the layout or welding changes nothing."""
+    projected = project_uvs(data)
+    return weld_mesh(projected) if projected else None
 
 
 def scene_mesh_materials(text: bytes):
@@ -1575,16 +1585,9 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
         if path is None or path.suffix != '.asset':
             continue
         data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = UV_WELD_CACHE / path, UV_WELD_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            projected = project_uvs(data)
-            welded = weld_mesh(projected) if projected else None
-            if welded is None:
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(welded)
-            mark.write_text(digest)
+        cached = cached_output(UV_WELD_CACHE, path, data, uv_weld_mesh)
+        if cached is None:
+            continue
         result[path] = cached
         before += int(WELD_VERTEX_COUNT.search(data)[1])
         after += int(WELD_VERTEX_COUNT.search(cached.read_bytes())[1])
