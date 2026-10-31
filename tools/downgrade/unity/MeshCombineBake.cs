@@ -51,6 +51,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         }
         var combiners = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren(combinerType, true)).Cast<Behaviour>().ToList();
         if (combiners.Count == 0) return;
+        CullHidden(scene);
         var clock = System.Diagnostics.Stopwatch.StartNew();
         MethodInfo combineAll = combinerType.GetMethod("CombineAll", new[] { typeof(bool) });
         int baked = 0, later = 0, empty = 0, failed = 0, meshes = 0, unreadable = 0;
@@ -115,6 +116,137 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         if (baked + later + empty + failed == 0) return;
         Debug.Log("DOWNGRADE_MCS " + scene.name + " baked=" + baked + " later=" + later + " empty=" + empty + " failed=" + failed +
                   " meshes=" + meshes + " unreadable=" + unreadable + " vertices=" + before + "->" + after + " ms=" + clock.ElapsedMilliseconds);
+    }
+
+    // Pool's rock floor (31 Oct, POOLROCKS): asset_rules.mesh_hull_overlay makes the rock, placed 1,056 times, a
+    // convex hull, and the rocks overlap. Here, before the scene's combine, each placing loses the triangles with
+    // every corner more than 1 cm inside one other placing of a hull: closed, convex and opaque, so its inside is
+    // never seen. Each placing that loses any gets a copy of the mesh, which the combine then reads. In HiddenAreas,
+    // for meshes placed HiddenMinUses times or more (asset_rules.HULL_AREAS, HULL_MIN_USES).
+    static readonly string[] HiddenAreas = { "Pool" };
+    const int HiddenMinUses = 1000;
+    const float Cell = 2f, Inside = 0.01f;
+
+    static void CullHidden(UnityEngine.SceneManagement.Scene scene)
+    {
+        if (Array.IndexOf(HiddenAreas, scene.name) < 0) return;
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+        List<MeshFilter> filters = scene.GetRootGameObjects().SelectMany(r => r.GetComponentsInChildren<MeshFilter>(true)).ToList();
+        var uses = new Dictionary<Mesh, int>();
+        foreach (MeshFilter filter in filters)
+        {
+            int n;
+            if (filter.sharedMesh != null) uses[filter.sharedMesh] = (uses.TryGetValue(filter.sharedMesh, out n) ? n : 0) + 1;
+        }
+        List<MeshFilter> placings = filters.Where(f => f.sharedMesh != null && uses[f.sharedMesh] >= HiddenMinUses &&
+                                                       f.GetComponent<MeshRenderer>() != null && f.GetComponent<MeshRenderer>().enabled &&
+                                                       f.gameObject.activeInHierarchy).ToList();
+        if (placings.Count == 0) return;
+        // Each repeated mesh's faces as planes (a point, an outward normal), when it is convex.
+        var planes = new Dictionary<Mesh, KeyValuePair<Vector3, Vector3>[]>();
+        foreach (Mesh mesh in placings.Select(f => f.sharedMesh).Distinct())
+        {
+            Vector3[] vertices = mesh.vertices;
+            int[] triangles = mesh.triangles;
+            var faces = new List<KeyValuePair<Vector3, Vector3>>();
+            for (int t = 0; t + 2 < triangles.Length; t += 3)
+            {
+                Vector3 a = vertices[triangles[t]];
+                Vector3 normal = Vector3.Cross(vertices[triangles[t + 1]] - a, vertices[triangles[t + 2]] - a);
+                if (normal.sqrMagnitude > 1e-12f) faces.Add(new KeyValuePair<Vector3, Vector3>(a, normal.normalized));
+            }
+            bool convex = vertices.All(v => faces.All(f => Vector3.Dot(f.Value, v - f.Key) <= 1e-4f));
+            if (convex) planes[mesh] = faces.ToArray();
+        }
+        // The placings by 2 m cells of x, z.
+        var near = new Dictionary<long, List<MeshFilter>>();
+        foreach (MeshFilter filter in placings.Where(f => planes.ContainsKey(f.sharedMesh)))
+        {
+            Bounds bounds = filter.GetComponent<MeshRenderer>().bounds;
+            foreach (long key in Cells(bounds.min.x, bounds.max.x, bounds.min.z, bounds.max.z))
+            {
+                List<MeshFilter> list;
+                if (!near.TryGetValue(key, out list)) near[key] = list = new List<MeshFilter>();
+                list.Add(filter);
+            }
+        }
+        int cut = 0, before = 0, after = 0, verticesBefore = 0, verticesAfter = 0;
+        foreach (MeshFilter filter in placings)
+        {
+            Mesh mesh = filter.sharedMesh;
+            Vector3[] vertices = mesh.vertices;
+            int[] triangles = mesh.triangles;
+            Matrix4x4 world = filter.transform.localToWorldMatrix;
+            Bounds bounds = filter.GetComponent<MeshRenderer>().bounds;
+            // The other placings whose bounds meet this one's.
+            var others = new HashSet<MeshFilter>();
+            foreach (long key in Cells(bounds.min.x, bounds.max.x, bounds.min.z, bounds.max.z))
+            {
+                List<MeshFilter> list;
+                if (near.TryGetValue(key, out list))
+                    foreach (MeshFilter other in list)
+                        if (other != filter && other.GetComponent<MeshRenderer>().bounds.Intersects(bounds)) others.Add(other);
+            }
+            var points = vertices.Select(v => world.MultiplyPoint3x4(v)).ToArray();
+            // Per vertex, the others it is inside of.
+            var within = new List<MeshFilter>[points.Length];
+            for (int i = 0; i < points.Length; i++)
+            {
+                within[i] = new List<MeshFilter>();
+                foreach (MeshFilter other in others)
+                {
+                    Vector3 local = other.transform.worldToLocalMatrix.MultiplyPoint3x4(points[i]);
+                    // In the other's own space its planes are unscaled; the margin is taken along each normal.
+                    if (planes[other.sharedMesh].All(f => Vector3.Dot(f.Value, local - f.Key) < -Inside)) within[i].Add(other);
+                }
+            }
+            var keep = new List<int>(triangles.Length);
+            var used = new bool[vertices.Length];
+            for (int t = 0; t + 2 < triangles.Length; t += 3)
+            {
+                int a = triangles[t], b = triangles[t + 1], c = triangles[t + 2];
+                if (within[a].Any(o => within[b].Contains(o) && within[c].Contains(o))) continue;
+                keep.Add(a);
+                keep.Add(b);
+                keep.Add(c);
+                used[a] = used[b] = used[c] = true;
+            }
+            before += triangles.Length / 3;
+            after += keep.Count / 3;
+            int count = used.Count(u => u);
+            verticesBefore += vertices.Length;
+            verticesAfter += count;
+            if (keep.Count == triangles.Length) continue;
+            cut++;
+            var remap = new int[vertices.Length];
+            for (int i = 0, next = 0; i < vertices.Length; i++) remap[i] = used[i] ? next++ : -1;
+            var copy = new Mesh { name = mesh.name };
+            copy.vertices = vertices.Where((v, i) => used[i]).ToArray();
+            Vector3[] normals = mesh.normals;
+            if (normals.Length == vertices.Length) copy.normals = normals.Where((v, i) => used[i]).ToArray();
+            Vector4[] tangents = mesh.tangents;
+            if (tangents.Length == vertices.Length) copy.tangents = tangents.Where((v, i) => used[i]).ToArray();
+            Color32[] colors = mesh.colors32;
+            if (colors.Length == vertices.Length) copy.colors32 = colors.Where((v, i) => used[i]).ToArray();
+            for (int channel = 0; channel < 4; channel++)
+            {
+                var uv = new List<Vector4>();
+                mesh.GetUVs(channel, uv);
+                if (uv.Count == vertices.Length) copy.SetUVs(channel, uv.Where((v, i) => used[i]).ToList());
+            }
+            copy.triangles = keep.Select(i => remap[i]).ToArray();
+            copy.RecalculateBounds();
+            filter.sharedMesh = copy;
+        }
+        Debug.Log("DOWNGRADE_MCS " + scene.name + " hidden: placings=" + placings.Count + " convex=" + planes.Count + " cut=" + cut +
+                  " triangles=" + before + "->" + after + " vertices=" + verticesBefore + "->" + verticesAfter + " ms=" + clock.ElapsedMilliseconds);
+    }
+
+    static IEnumerable<long> Cells(float x0, float x1, float z0, float z1)
+    {
+        for (int x = Mathf.FloorToInt(x0 / Cell); x <= Mathf.FloorToInt(x1 / Cell); x++)
+            for (int z = Mathf.FloorToInt(z0 / Cell); z <= Mathf.FloorToInt(z1 / Cell); z++)
+                yield return ((long)x << 32) ^ (uint)z;
     }
 }
 
