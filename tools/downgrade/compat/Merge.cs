@@ -340,6 +340,36 @@ namespace CrowCompat
                 return EnemyOf(t) != null;
             }
 
+            // Whether an anchor's reason moves, turns or scales it (switching it, destroying it or a rigidbody's physics don't).
+            static bool Motion(string reason)
+            {
+                if (reason.StartsWith("DOTweenTransform", StringComparison.Ordinal) || reason.StartsWith("DOTweenRigidbody", StringComparison.Ordinal))
+                    return true;
+                if (reason.StartsWith("SetProperty:", StringComparison.Ordinal))
+                {
+                    string property = reason.ToLowerInvariant();
+                    return property.Contains("position") || property.Contains("rotation") || property.Contains("scale") || property.Contains("euler");
+                }
+                return MotionReasons.Contains(reason);
+            }
+
+            static readonly HashSet<string> MotionReasons = new HashSet<string>
+            {
+                "SetPosition", "SetRotation", "SetScale", "Rotate", "LookAt", "SmoothLookAt", "SmoothLookAt2d", "SmoothLookAtDirection",
+                "SmoothLookAtWithLimit", "MoveTowards", "SetRandomRotation", "SpinGameObject", "SetRotationEveryFrame", "RotateAroundAxis",
+                "TransformLock", "RotationAnimationScript", "ScaleAnimationScript", "PositionAnimationScript",
+            };
+
+            // An enemy's or a body's (Secondary): merged the enemies' way.
+            public bool EnemyLike(Transform t)
+            {
+                if (EnemyOf(t) != null) return true;
+                if (bodies.Count == 0) return false;
+                for (; t != null; t = t.parent)
+                    if (bodies.Contains(t)) return true;
+                return false;
+            }
+
             // The enemy root t is in, or null.
             public Transform EnemyOf(Transform t)
             {
@@ -350,10 +380,18 @@ namespace CrowCompat
             }
             // Animation scripts PlatformSpecificAnimation switches off for good on the PS Vita.
             public readonly HashSet<Component> stillAnimations = new HashSet<Component>();
+            // The animation scripts (Rotation, Scale, Position) and their targets, judged once the analysis knows what
+            // moves (Secondary); the scripts other scripts switch on; what moves for any other reason; those switched off.
+            public readonly List<KeyValuePair<Component, Transform>> animations = new List<KeyValuePair<Component, Transform>>();
+            public readonly HashSet<object> stateDriven = new HashSet<object>();
+            public readonly HashSet<Transform> movers = new HashSet<Transform>();
+            public readonly HashSet<Transform> bodies = new HashSet<Transform>();
+            public int secondary;
 
             public void Add(Transform transform, Mark mark, string reason)
             {
                 if (transform == null) return;
+                if ((mark & Mark.Anchor) != 0 && Motion(reason)) movers.Add(transform);
                 Mark known;
                 marks.TryGetValue(transform, out known);
                 if ((known & mark) == mark) return;
@@ -462,7 +500,7 @@ namespace CrowCompat
             // (onNS), so the animation scripts it lists stay off, unless an AnimationState lists them.
             if (bake || Application.platform == RuntimePlatform.PSP2)
             {
-                var stateDriven = new HashSet<object>();
+                HashSet<object> stateDriven = analysis.stateDriven;
                 foreach (GameObject root in roots)
                     foreach (MonoBehaviour behaviour in root.GetComponentsInChildren<MonoBehaviour>(true))
                     {
@@ -523,6 +561,7 @@ namespace CrowCompat
                     scripts[name] = count + 1;
                 }
             analysis.ResolveGlobals();
+            Secondary(analysis, bake);
             return analysis;
         }
 
@@ -580,6 +619,50 @@ namespace CrowCompat
             {
                 UnityEngine.Random.state = state;
             }
+        }
+
+        // Secondary motion (30 Oct, BOSS): with bake (the PS Vita build), an animation script (Rotation, Scale, Position)
+        // whose target is in a rigidbody that isn't an enemy's root (their merge has rules of its own), below something
+        // that moves, turns or scales it there (a DOTween move, SetPosition, LookAt...; not a switch or a destroy), and that
+        // holds only small parts (meshes of at most MaxPartVertices), is switched off for good, as PlatformSpecificAnimation
+        // does for the crows' skin blobs on the Switch, so its parts merge (the PS Vita draws each renderer for 35-45 us of
+        // the main thread). Pool's boss: its hair, pustules, splat balls and fingers wobble on hundreds of scripts, each its
+        // own renderer. The rigidbody then merges as an enemy does: per anchor across materials, its see-through parts too,
+        // in the enemies' budget (the boss's parts, about 2 MB, lost to Pool's level in the level's). The player's are left
+        // (PlayerMerge's rules). The other animation scripts are anchors.
+        static void Secondary(Analysis analysis, bool bake)
+        {
+            var still = new List<KeyValuePair<Component, Transform>>();
+            foreach (KeyValuePair<Component, Transform> animation in analysis.animations)
+            {
+                if (!bake || playerRules || analysis.stateDriven.Contains(animation.Key) || !Small(animation.Value)) continue;
+                Transform body = animation.Value;
+                while (body != null && body.GetComponent<Rigidbody>() == null) body = body.parent;
+                if (body == null || EnemyNames.Named(body.name) || !Moved(animation.Value.parent, body, analysis)) continue;
+                still.Add(animation);
+                analysis.bodies.Add(body);
+            }
+            foreach (KeyValuePair<Component, Transform> animation in still) ((Behaviour)animation.Key).enabled = false;
+            foreach (KeyValuePair<Component, Transform> animation in analysis.animations.Except(still))
+                analysis.Add(animation.Value, Mark.Anchor, animation.Key.GetType().Name);
+            analysis.secondary = still.Count;
+        }
+
+        // Whether something moves, turns or scales t or one of its parents up to the body.
+        static bool Moved(Transform t, Transform body, Analysis analysis)
+        {
+            for (; t != null; t = t.parent)
+            {
+                if (analysis.movers.Contains(t)) return true;
+                if (t == body) return false;
+            }
+            return false;
+        }
+
+        static bool Small(Transform target)
+        {
+            MeshFilter[] filters = target.GetComponentsInChildren<MeshFilter>(true);
+            return filters.Length > 0 && filters.All(f => f.sharedMesh == null || f.sharedMesh.vertexCount <= MaxPartVertices);
         }
 
         // A random pick made at Awake made now, at build time, and the script's Awake pick off: false when the script
@@ -796,7 +879,8 @@ namespace CrowCompat
                     if (analysis.stillAnimations.Contains(component)) return true;
                     bool self = (bool)(Field(component, "targetSelf") ?? true);
                     object target = self ? null : Field(component, "target");
-                    analysis.Add(target ?? transform, Mark.Anchor, name);
+                    Transform targetTransform = target is GameObject ? ((GameObject)target).transform : target as Transform;
+                    analysis.animations.Add(new KeyValuePair<Component, Transform>(component, targetTransform ?? transform));
                     return true;
                 }
                 case "SetPMGlobalGameObject":
@@ -1310,7 +1394,7 @@ namespace CrowCompat
                     var filter = renderer.GetComponent<MeshFilter>();
                     Mesh mesh = filter == null ? null : filter.sharedMesh;
                     Material[] materials = renderer.sharedMaterials;
-                    bool enemy = why == null && analysis.EnemyOf(renderer.transform) != null;
+                    bool enemy = why == null && analysis.EnemyLike(renderer.transform);
                     if (why == null)
                     {
                         if (mesh == null || mesh.vertexCount == 0) why = "no mesh";
@@ -1404,7 +1488,7 @@ namespace CrowCompat
             foreach (List<Slot> group in merging.OrderByDescending(g => (g.Count - 1) / (double)Math.Max(1L, Estimate(g))))
             {
                 long estimate = Estimate(group);
-                bool enemyGroup = analysis.InEnemy(group[0].renderer.transform);
+                bool enemyGroup = analysis.EnemyLike(group[0].renderer.transform);
                 if ((enemyGroup ? enemyBudget : budget) + estimate > (enemyGroup ? EnemyMaxBytes : MaxBytes))
                 {
                     overBudget += group.Count;
@@ -1455,7 +1539,7 @@ namespace CrowCompat
                 .Append(" candidates=").Append(candidates).Append(" parts=").Append(partCount).Append(" groups=").Append(merging.Count)
                 .Append(" meshes=").Append(meshes).Append(" vertices=").Append(vertices).Append(" bytes=").Append(bytes).Append(" dropped=").Append(dropped).Append(" droppedBytes=").Append(droppedBytes)
                 .Append(" lights=").Append(lights.Count).Append(" cell=").Append(Cell.ToString(CultureInfo.InvariantCulture))
-                .Append(" baked=").Append(analysis.baked).Append(" enemies=").Append(analysis.enemies.Count)
+                .Append(" baked=").Append(analysis.baked).Append(" secondary=").Append(analysis.secondary).Append(" bodies=").Append(analysis.bodies.Count).Append(" enemies=").Append(analysis.enemies.Count)
                 .Append(" enemyCombiners=").Append(analysis.enemyCombiners.Count).Append(" enemyParts=").Append(merged.Count(r => analysis.InEnemy(r.transform)))
                 .Append(" enemyGroups=").Append(merging.Count(g => analysis.InEnemy(g[0].renderer.transform))).Append(" enemyBytes=").Append(enemyBytes)
                 .Append(" enemySubmeshes=").Append(merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).Sum(g => g.Select(x => x.material).Distinct().Count()))
@@ -1469,6 +1553,18 @@ namespace CrowCompat
                         .Append(" texture=").Append(m.mainTexture == null ? "-" : m.mainTexture.name + "(" + m.mainTexture.width + "x" + m.mainTexture.height + ")")
                         .Append(" color=").Append(m.HasProperty("_Color") ? m.color.ToString() : "-").Append(" keywords=").Append(string.Join(",", m.shaderKeywords))
                         .Append(" slots=").Append(merging.Where(g => analysis.InEnemy(g[0].renderer.transform)).Sum(g => g.Count(x => x.material == m))).Append('\n');
+            if (analysis.bodies.Count > 0)
+            {
+                Func<Transform, bool> inBody = t =>
+                {
+                    for (; t != null; t = t.parent) if (analysis.bodies.Contains(t)) return true;
+                    return false;
+                };
+                List<List<Slot>> bodyGroups = merging.Where(g => inBody(g[0].renderer.transform)).ToList();
+                report.Append("CROW_MERGE ").Append(sceneName).Append(" bodies: parts=").Append(bodyGroups.Sum(g => g.Select(x => x.renderer).Distinct().Count()))
+                    .Append(" groups=").Append(bodyGroups.Count).Append(' ')
+                    .Append(string.Join(" ", analysis.bodies.Select(b => Hierarchy.Full(b).Replace(' ', '_')).ToArray())).Append('\n');
+            }
             report.Append("CROW_MERGE ").Append(sceneName).Append(" left out: ")
                 .Append(string.Join(" ", blockers.OrderByDescending(p => p.Value).Take(30).Select(p => p.Key.Replace(' ', '_') + "=" + p.Value).ToArray())).Append('\n');
             if (seen > 0)

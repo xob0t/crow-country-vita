@@ -27,6 +27,8 @@ Frame time on the console (30 fps is 33.4 ms; the latest measurement of each):
 | Haunted Hilltop fight | 35.7 ms | 22 Oct |
 | Fairy Forest fight | 37.2 ms | 20 Oct |
 | Station Square fight (the benchmark) | 38.0-38.9 ms (about 26 fps) | 22-26 Oct |
+| Pool, the final boss (its benchmark) | 33.4 ms (30 fps; 29.3-31.0 with vsync off; 58.3 before) | 31 Oct |
+| Pool before the boss, at the pool's rim facing it | 33.4 ms (30 fps; the user saw 15) | 31 Oct |
 
 Free main memory during an area load is 33 MB or more everywhere but three areas: Haunted Hilltop 12-54 MB (once 8), Ocean Kingdom 11-36, Arcade 14-31 (23 Oct).
 Each recovers to 37 MB or more once loaded.
@@ -45,6 +47,9 @@ Every opaque lit material draws a depth layer back, so the decals, writing and o
 Particle noise is Unity's low-quality 1D noise.
 Physics steps once per 30 fps frame, at most two steps a frame.
 The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
+The small wobbling parts of the bosses' bodies (non-enemy rigidbodies) are held still and merged like an enemy's: Pool's boss, Crypt's Wader, Control Room's Shambler, Corridor A's Scamper.
+Every mesh's exactly equal vertices are made one at build time (51,443 meshes, 7.86 -> 5.28 million vertices; the areas' scenes 15-37% fewer), with nothing on screen changed.
+The meshes' triangles are in vertex cache order and the textures only materials use have mipmaps (760; Fairy Forest's tree fairy note no longer shimmers). Optimize Mesh Data was tried and dropped: Pool's ground rocks flickered with it, and it took the build's scenes from 13 to 59 minutes. In Pool, the rock placed 1,056 times is a convex hull (48 vertices -> 18), its faces inside a neighbour left out, and the meshes drawn only with seamless textures have one vertex per position (the roots, 14,310 -> 4,726 each); see-through layers stacked at one place are drawn once with the stack's alpha (Pool's three edge rings), and Pool has at most 2 key lights.
 The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
 PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
 The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.
@@ -61,7 +66,6 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 - Unity's allocator leaves about 2.7 MB more holes after each Ocean Kingdom <-> Haunted Hilltop round trip (22 Oct).
 - The Station Square fight is the slowest place measured, at about 26 fps (38-39 ms a frame).
 - The player's log stopped being written after a console standby while the game ran on (26 Oct, not investigated).
-- The text of Fairy Forest's tree fairy note (Hint 3) changes as the camera moves; it is the same with the depth layers on and off, so likely aliasing: 128x128 without mipmaps, about 35 pixels wide in the camera's picture (29 Oct, not fixed).
 - Dig Site's dark spots have not been checked with the depth layers (22 Oct).
 - The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
 - The render-thread crashes of 17 and 26 Oct were the shader patcher's 512 KB of USSE memory running full, not graphics jobs; the eboot gives it 1 MB since 27 Oct.
