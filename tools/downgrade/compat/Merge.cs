@@ -622,8 +622,9 @@ namespace CrowCompat
         }
 
         // Secondary motion (30 Oct, BOSS): with bake (the PS Vita build), an animation script (Rotation, Scale, Position)
-        // whose target is in a rigidbody that isn't an enemy's root (their merge has rules of its own), below something
-        // that moves, turns or scales it there (a DOTween move, SetPosition, LookAt...; not a switch or a destroy), and that
+        // whose target is below a rigidbody (not the rigidbody itself) that isn't an enemy's or in one (their merge has
+        // rules of its own), below something in the rigidbody (or the rigidbody) that moves, turns or scales it there (a
+        // DOTween move, SetPosition, LookAt...; not a switch or a destroy; not a mover outside the rigidbody), and that
         // holds only small parts (meshes of at most MaxPartVertices), is switched off for good, as PlatformSpecificAnimation
         // does for the crows' skin blobs on the Switch, so its parts merge (the PS Vita draws each renderer for 35-45 us of
         // the main thread). Pool's boss: its hair, pustules, splat balls and fingers wobble on hundreds of scripts, each its
@@ -638,7 +639,7 @@ namespace CrowCompat
                 if (!bake || playerRules || analysis.stateDriven.Contains(animation.Key) || !Small(animation.Value)) continue;
                 Transform body = animation.Value;
                 while (body != null && body.GetComponent<Rigidbody>() == null) body = body.parent;
-                if (body == null || EnemyNames.Named(body.name) || !Moved(animation.Value.parent, body, analysis)) continue;
+                if (body == null || body == animation.Value || EnemyNames.RootOf(body) != null || !Moved(animation.Value.parent, body, analysis)) continue;
                 still.Add(animation);
                 analysis.bodies.Add(body);
             }
@@ -648,7 +649,7 @@ namespace CrowCompat
             analysis.secondary = still.Count;
         }
 
-        // Whether something moves, turns or scales t or one of its parents up to the body.
+        // Whether something moves, turns or scales t or one of its parents up to the body (t is in the body).
         static bool Moved(Transform t, Transform body, Analysis analysis)
         {
             for (; t != null; t = t.parent)
