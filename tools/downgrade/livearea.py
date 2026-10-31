@@ -1,4 +1,4 @@
-"""PS Vita LiveArea and splash artwork, composed from Crow Country's Steam store art.
+"""PS Vita LiveArea artwork, composed from Crow Country's Steam store art.
 
     uv run tools/downgrade/livearea.py [--force]
 
@@ -9,7 +9,6 @@ work/livearea/store/ and read from there afterwards. Writes to work/livearea/:
   bg0.png       840x500   LiveArea background: the ticket booth scene (library hero art)
   gate.png      280x158   LiveArea start gate: the wide key art with its logo
   pic0.png      960x544   shown while the app starts: the wide key art with its logo
-  splash.png    960x544   Unity's PS Vita splash image: pic0 in full colour
 
 The LiveArea images and pic0 are 8-bit indexed: the installer rejects a truecolor pic0 (promote
 error 0x8010113D), and icon0 must not have an alpha channel (The Drifter's port found both). The
@@ -27,7 +26,7 @@ from PIL import Image
 
 OUT = WORK / 'livearea'
 STORE = OUT / 'store'
-FILES = ['icon0.png', 'bg0.png', 'gate.png', 'pic0.png', 'splash.png']
+FILES = ['icon0.png', 'bg0.png', 'gate.png', 'pic0.png']
 PALETTE_COLORS = 256  # 8-bit indexed
 
 CDN = f'https://cdn.akamai.steamstatic.com/steam/apps/{STEAM_APP_ID}/'
@@ -87,13 +86,11 @@ def compose(sources):
     capsule = Image.open(sources['capsule.jpg']).convert('RGB')
     library = Image.open(sources['library.jpg']).convert('RGB')
     hero = Image.open(sources['hero.jpg']).convert('RGB')
-    pic0 = cover(capsule, (960, 544))
     return {
         'icon0.png': indexed(cover(library, (128, 128), ICON_CROP)),
         'bg0.png': indexed(cover(hero, (840, 500))),
         'gate.png': indexed(cover(capsule, (280, 158))),
-        'pic0.png': indexed(pic0),
-        'splash.png': pic0,
+        'pic0.png': indexed(cover(capsule, (960, 544))),
     }
 
 
