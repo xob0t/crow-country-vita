@@ -24,7 +24,8 @@ using Debug = UnityEngine.Debug;
 //                           area load): OnAfterDeserialize, InitData, LoadActions, CreateAction, ...
 // Loading.Install also installs SceneFlow.cs' PS Vita defaults: the player's scene beside the title (MaraScene), the
 // title read while the logos play (ScenePrefetch; -crow-no-prefetch leaves it to the logos) and the empty scene
-// between areas (SceneGap; -crow-no-gap leaves it out on the PS Vita, -crow-gap puts it in elsewhere).
+// between areas (SceneGap; -crow-no-gap leaves it out on the PS Vita, -crow-gap puts it in elsewhere;
+// -crow-gap-sweep auto|on|off, its unused-asset pass: Sweep).
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {

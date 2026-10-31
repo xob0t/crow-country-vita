@@ -223,7 +223,7 @@ partial class DowngradeAssemblies
 
     // MaraLoader.InstantiateMara clones the player prefab (Object.Instantiate(original, parent)); the
     // call goes to CrowCompat MaraScene.Instantiate, which hands over the CrowMara scene's instance
-    // where the build has that scene (compat/Loading.cs), and clones as before where it hasn't.
+    // where the build has that scene (compat/SceneFlow.cs), and clones as before where it hasn't.
     static int PatchMaraLoader(ModuleDefinition module)
     {
         TypeDefinition type = GameType(module, "Code.com.sfbgames.crowcountry.MaraLoader");
@@ -244,7 +244,7 @@ partial class DowngradeAssemblies
     // PlayMaker's LoadScene action loads with SceneManager.LoadScene(name, mode); the call goes to
     // CrowCompat ScenePrefetch.LoadScene, which activates the title where it was read ahead
     // during the logos, and on the PS Vita loads areas by way of an empty scene (SceneGap,
-    // compat/Loading.cs). The game's RestartLevel action (an area loaded again: retry after death)
+    // compat/SceneFlow.cs). The game's RestartLevel action (an area loaded again: retry after death)
     // goes there too. Each method is its own rule: LoadScene's site would hide a miss in RestartLevel's
     // (a retry then loads the area straight over the one in memory, the peak SceneGap is there to avoid).
     static int PatchLoadSceneAction(ModuleDefinition module)

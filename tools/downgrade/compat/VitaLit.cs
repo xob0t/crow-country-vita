@@ -46,10 +46,11 @@ using UnityEngine.SceneManagement;
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
 //   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
 //   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
+//   -crow-lit-area on|off  off lifts the areas' own caps (AreaKeys: Pool 2) for A/B windows; on, the default
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
 //   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off);
 //                          2 lets the key lights light every layer, as before 27 Oct (their culling masks off)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litfade=<s> and litview=<m>.
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litfade=<s>, litview=<m> and litarea=on|off.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
@@ -80,14 +81,15 @@ namespace CrowCompat
         // A fixed cap from the area's load, never 0: the adaptive cap that went to 0 hung the GPU (30-31 Oct).
         static readonly Dictionary<string, int> AreaKeys = new Dictionary<string, int> { { "Pool", 2 } };
         static int areaKeys = Keys;
+        static bool areaCap = true;  // -crow-lit-area, litarea=
 
         static int KeyCap
         {
-            get { return Mathf.Min(maxKeys, areaKeys); }
+            get { return areaCap ? Mathf.Min(maxKeys, areaKeys) : maxKeys; }
         }
         static float fadeTime = 0.35f, viewRadius = 4f;
 
-        // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litfade=, litview=;
+        // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litfade=, litview=, litarea=;
         // false for other keys (Quality.Change asks the next module).
         internal static bool Change(string key, string value)
         {
@@ -103,6 +105,7 @@ namespace CrowCompat
                 case "litkeys": maxKeys = Mathf.Clamp((int)number, 0, Keys); break;
                 case "litfade": fadeTime = Mathf.Max(0f, number); break;
                 case "litview": viewRadius = Mathf.Max(0f, number); break;
+                case "litarea": areaCap = value != "off"; break;
                 default: return false;
             }
             nextSelect = 0f;
@@ -117,6 +120,7 @@ namespace CrowCompat
             maxKeys = Mathf.Clamp((int)CrowFlags.Number(args, "-crow-lit-keys", maxKeys), 0, Keys);
             fadeTime = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-fade", fadeTime));
             viewRadius = Mathf.Max(0f, CrowFlags.Number(args, "-crow-lit-view", viewRadius));
+            areaCap = CrowFlags.Value(args, "-crow-lit-area") != "off";
             Shader.SetGlobalFloat("_CrowDebug", CrowFlags.Number(args, "-crow-lit-debug", 0f));
             allLayers = CrowFlags.Number(args, "-crow-lit-debug", 0f) == 2f;
             string value = CrowFlags.Value(args, "-crow-lit", "vita");
@@ -159,11 +163,13 @@ namespace CrowCompat
                 hooked = true;
                 CrowEvents.Loaded("VitaLit.sceneLoaded", (scene, mode) =>
                 {
-                    if (Scenes.IsArea(scene))
+                    // The area's cap from its load, and none again with the title: a scene that isn't an area while
+                    // no area is loaded (not CrowMara loading beside one; the scene gap loads the title additively).
+                    if (Scenes.IsArea(scene) || !AreaLoaded())
                     {
                         int cap;
                         areaKeys = AreaKeys.TryGetValue(scene.name, out cap) ? cap : Keys;
-                        if (areaKeys < Keys) Debug.Log("CROW_LIT " + scene.name + ": at most " + areaKeys + " key lights");
+                        if (areaKeys < Keys) Debug.Log("CROW_LIT " + scene.name + ": at most " + KeyCap + " key lights" + (areaCap ? "" : " (its cap of " + areaKeys + " off)"));
                     }
                     sceneTime = Time.realtimeSinceStartup;
                     peaks.Clear();
@@ -212,6 +218,17 @@ namespace CrowCompat
                 keyword = null;
             }
             Debug.Log("CROW_LIT " + (on ? "vita: one pass, key lights per pixel" : "game"));
+        }
+
+        // Whether any area is loaded.
+        static bool AreaLoaded()
+        {
+            for (int i = 0; i < SceneManager.sceneCount; i++)
+            {
+                Scene scene = SceneManager.GetSceneAt(i);
+                if (scene.isLoaded && scene.name != Scenes.Kept && Scenes.IsArea(scene)) return true;
+            }
+            return false;
         }
 
         static bool restoreBaked;
