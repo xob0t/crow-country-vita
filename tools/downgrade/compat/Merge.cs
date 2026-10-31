@@ -67,7 +67,9 @@ using UnityEngine.SceneManagement;
 //                               renderers out); on: merge at run time as the build does; off: the
 //                               build's merged renderers off and their parts on (a build made with
 //                               CROW_MERGE=ab, which keeps the parts' meshes), with the enemies'
-//                               MeshCombineStudio combiners back on; merged: back (not the combiners).
+//                               MeshCombineStudio combiners back on (not the animation scripts the build
+//                               switched off for secondary motion: no record of them is kept); merged:
+//                               back (not the combiners).
 //                               -crow-cycle takes merge=<value> (now, in the loaded scenes).
 //   -crow-merge-cell <m>, -crow-merge-max-vertices <n>, -crow-merge-max-kb <n>, -crow-merge-drop
 //                               the run-time merge's cell, part size, memory budget, and Drop
@@ -228,7 +230,7 @@ namespace CrowCompat
             }
         }
 
-        // The build's merged renderers off and their parts on (or back).
+        // The build's merged renderers off and their parts on (or back). Secondary's animation scripts stay off.
         static void Switch(Scene scene, bool merged)
         {
             int groups = 0, parts = 0;
