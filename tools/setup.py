@@ -187,9 +187,13 @@ class Setup:
         if self.args.dry_run:
             self.say('unigate', f'would remove the license checks of {unity} with unigate')
             return
+        uv = shutil.which('uv')
+        if not uv:
+            self.say('unigate', 'uv is not on PATH; install it (https://docs.astral.sh/uv/), then run setup again')
+            return
         script = download(url, EXTERNAL / 'unigate' / 'unigate.py', sha256)
         result = subprocess.run(
-            ['uv', 'run', '--script', str(script), '--editor', str(unity.parent)], capture_output=True, text=True
+            [uv, 'run', '--script', str(script), '--editor', str(unity.parent)], capture_output=True, text=True
         )
         if result.returncode:
             print(result.stdout + result.stderr)
