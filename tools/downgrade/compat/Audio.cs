@@ -452,7 +452,7 @@ namespace CrowCompat
                 }
             if (enabled != 1) listener = null;
             nextFind = Time.realtimeSinceStartup + 3f;
-            nextRank = 0f;
+            order.Clear();  // the new entries ranked in this frame, the mixer measured on its own half second (Update)
         }
 
         // The entries by how audible their source is, the most first (see the class comment).
@@ -511,12 +511,13 @@ namespace CrowCompat
             if (now >= nextFind && CrowEvents.Turn(nextFind <= 0f)) Find();  // the 3 s finds in a frame of their own
             silentRule = silentOn && idleOnly;
             if (adapt) Watch(now);
-            if (now >= nextRank || order.Count != entries.Count)
+            if (now >= nextRank)
             {
                 Rank();
-                if (now >= nextRank) Measure(now);
+                Measure(now);
                 nextRank = now + 0.5f;
             }
+            else if (order.Count != entries.Count) Rank();  // after a find: a shorter window would misread the mixer
             // Which filters are wanted: their source plays and can be heard, or did within its tail.
             wants.Clear();
             Vector3 ear = listener != null ? listener.position : Vector3.zero;
