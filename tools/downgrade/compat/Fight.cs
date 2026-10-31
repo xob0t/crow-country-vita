@@ -268,7 +268,8 @@ namespace CrowCompat
             Debug.Log("CROW_FIGHT globals" + set);
         }
 
-        // "<name>=<value>;...", each value typed as the variable is.
+        // "<name>=<value>;...", each value typed as the variable is; one that isn't a number where one is wanted is
+        // logged (bad:) and left out, so the area's load (Diag, after this) still happens.
         static void Globals(string pairs, StringBuilder set)
         {
             foreach (string pair in pairs.Split(';'))
@@ -279,9 +280,16 @@ namespace CrowCompat
                 string text = pair.Substring(equals + 1).Trim();
                 object current = Variable(name) == null ? null : GlobalValue(name);
                 object value = text;
+                int whole;
+                float number;
                 if (current is bool) value = text == "1" || text.ToLowerInvariant() == "true";
-                else if (current is int) value = int.Parse(text, Inv);
-                else if (current is float) value = float.Parse(text, Inv);
+                else if (current is int) value = int.TryParse(text, NumberStyles.Integer, Inv, out whole) ? (object)whole : null;
+                else if (current is float) value = float.TryParse(text, NumberStyles.Float, Inv, out number) ? (object)number : null;
+                if (value == null)
+                {
+                    set.Append(" bad:").Append(name.Replace(' ', '_')).Append('=').Append(text);
+                    continue;
+                }
                 Global(name, value, set);
             }
         }

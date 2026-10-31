@@ -43,7 +43,8 @@ using Debug = UnityEngine.Debug;
 //   -crow-load-priority <p>   the loading thread's priority (High, Normal, BelowNormal, Low) for the
 //                             player's scene read in the background on the title (SceneFlow.cs' MaraScene; default Normal
 //                             with the loading thread moved, else High).
-//   -crow-shared-reverb on|off  sources whose reverbs are alike share one (SharedReverb; the PS Vita's default: on).
+//   -crow-shared-reverb on|off  sources whose reverbs are alike share one (SharedReverb; the PS Vita's default: on;
+//                             with -crow-reverb-max at 0, its default, no group is made: none could come on).
 //   -crow-thread <name>:<priority>:<cpus>  with -crow-audio, set the priority (0 keeps it; 64 highest ..
 //                             191) and the CPUs (digits 0-2, e.g. 1 or 12; - keeps them) of each thread
 //                             whose name has <name> ("FMOD mixer", UnityPreload) when the probe finds it;
@@ -291,6 +292,7 @@ namespace CrowCompat
 
             public bool Valid { get { return Shared != null ? Shared.Alive : Filter != null; } }
             public bool On { get { return Shared != null ? Shared.Routed : Filter.enabled; } }
+            public object Key { get { return Shared != null ? (object)Shared : Filter; } }
 
             public void Set(bool on)
             {
@@ -391,8 +393,23 @@ namespace CrowCompat
             Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
         }
 
+        // Each filter's and group's OffAt across a find, the only record of a tail: a reverb whose source stopped
+        // keeps its decay.
+        static readonly Dictionary<object, float> tails = new Dictionary<object, float>();
+
+        static Entry Carried(Entry entry)
+        {
+            float offAt;
+            if (tails.TryGetValue(entry.Key, out offAt)) entry.OffAt = offAt;
+            return entry;
+        }
+
         static void Find()
         {
+            tails.Clear();
+            float now = Time.realtimeSinceStartup;
+            foreach (Entry entry in entries)
+                if (entry.Valid && entry.OffAt > now) tails[entry.Key] = entry.OffAt;
             entries.Clear();
             var list = new List<Type>();
             bool all = types.Contains("all");
@@ -403,13 +420,17 @@ namespace CrowCompat
             if (all || types.Contains("echo")) list.Add(typeof(AudioEchoFilter));
             if (all || types.Contains("distortion")) list.Add(typeof(AudioDistortionFilter));
             // The reverbs that share one (SharedReverb): an entry for each group, its members' filters left out below.
-            // One list of the reverb filters for both (each FindObjectsOfTypeAll is a new array).
+            // One list of the reverb filters for both (each FindObjectsOfTypeAll is a new array). With a cap of 0 (the
+            // PS Vita's default, or rmax=0) no group could come on: none made, the mixers not loaded, and the groups made
+            // before released, their filters to the entries below.
             AudioReverbFilter[] reverbs = null;
             if (list.Contains(typeof(AudioReverbFilter)))
             {
                 reverbs = Resources.FindObjectsOfTypeAll<AudioReverbFilter>();
-                foreach (SharedReverb.Group group in SharedReverb.Find(reverbs))
-                    entries.Add(new Entry { Shared = group, Tail = group.Tail });
+                if (ceiling > 0)
+                    foreach (SharedReverb.Group group in SharedReverb.Find(reverbs))
+                        entries.Add(Carried(new Entry { Shared = group, Tail = group.Tail }));
+                else SharedReverb.ReleaseAll();
             }
             foreach (Type type in list)
                 foreach (UnityEngine.Object found in type == typeof(AudioReverbFilter) ? reverbs : Resources.FindObjectsOfTypeAll(type))
@@ -422,8 +443,9 @@ namespace CrowCompat
                     if (source == null && idleOnly) continue;
                     var reverb = filter as AudioReverbFilter;
                     if (reverb != null && SharedReverb.Owns(reverb)) continue;  // its group's entry above
-                    entries.Add(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f });
+                    entries.Add(Carried(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f }));
                 }
+            tails.Clear();  // no filter held between finds
             // The listener Unity hears with: the one enabled (none or two: no listener, so no source counts as silent).
             listener = null;
             int enabled = 0;
@@ -435,7 +457,7 @@ namespace CrowCompat
                 }
             if (enabled != 1) listener = null;
             nextFind = Time.realtimeSinceStartup + 3f;
-            nextRank = 0f;
+            order.Clear();  // the new entries ranked in this frame, the mixer measured on its own half second (Update)
         }
 
         // The entries by how audible their source is, the most first (see the class comment).
@@ -494,12 +516,13 @@ namespace CrowCompat
             if (now >= nextFind && CrowEvents.Turn(nextFind <= 0f)) Find();  // the 3 s finds in a frame of their own
             silentRule = silentOn && idleOnly;
             if (adapt) Watch(now);
-            if (now >= nextRank || order.Count != entries.Count)
+            if (now >= nextRank)
             {
                 Rank();
-                if (now >= nextRank) Measure(now);
+                Measure(now);
                 nextRank = now + 0.5f;
             }
+            else if (order.Count != entries.Count) Rank();  // after a find: a shorter window would misread the mixer
             // Which filters are wanted: their source plays and can be heard, or did within its tail.
             wants.Clear();
             Vector3 ear = listener != null ? listener.position : Vector3.zero;
@@ -747,6 +770,7 @@ namespace CrowCompat
                     int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out max);
                     ceiling = max;
                     learned.Clear();
+                    nextFind = 0f;  // the shared reverbs' groups made or released (Find)
                     Debug.Log("CROW_AUDIO rmax=" + max);
                     return true;
                 case "wshare":
@@ -857,9 +881,10 @@ namespace CrowCompat
     // rendered offline on Windows, per-source and shared differ by float rounding (-137 dB, status-log.md), 2D
     // or 3D, moving or with volume fades. A group counts as one filter for FilterGate's cap, ranking (its most
     // audible member) and silent rule (on while any member wants its filter, or within the tail of the last that
-    // did); off, its members go to their old group with no reverb, as their filters would be off. Without FilterGate
-    // (other players), every group is on. A group of one stays a filter. A mixer with no input suspends (its
-    // m_EnableSuspend), so the pool's spare mixers cost nothing.
+    // did); off, its members go to their old group with no reverb, as their filters would be off. With FilterGate's cap
+    // at 0 (-crow-reverb-max, 0 by default) no group is made. Without FilterGate (other players), every group is on.
+    // A group of one stays a filter. A mixer with no input suspends (its m_EnableSuspend), so the pool's spare mixers
+    // cost nothing.
     public static class SharedReverb
     {
         public struct Member
@@ -1337,7 +1362,7 @@ namespace CrowCompat
             }
         }
 
-        static void ReleaseAll()
+        internal static void ReleaseAll()
         {
             foreach (Group group in groups) Release(group);
             groups.Clear();
