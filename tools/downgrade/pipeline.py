@@ -58,6 +58,7 @@ from asset_rules import (
     mesh_duplicates,
     mesh_readable_overlay,
     mesh_weld_overlay,
+    mipmap_overlay,
     name_overlay,
     native_plugin_overlay,
     npot_texture_overlay,
@@ -834,6 +835,7 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(texture_overlay(exported, game, platform))
         overlay.update(npot_texture_overlay(exported, overlay, platform))
         overlay.update(texture_cap_overlay(exported, overlay, platform))
+        overlay.update(mipmap_overlay(exported, overlay, platform))
         overlay.update(streamed_mesh_overlay(exported, game))
         duplicates = mesh_duplicates(exported, overlay)
         overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
