@@ -1519,7 +1519,7 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
 # texture's name: SFB's Subtle-Grunge-Texture-N-Seamless) or that have none gets UVs projected from its position along
 # its normal's largest axis (as hull_mesh's), so the vertices that differed only in UVs become equal and weld_mesh
 # makes them one: the shape and lighting are the same, the grunge lies a little differently. Only meshes no other
-# scene, prefab or asset names.
+# scene, prefab or asset names, and not mesh_hull_overlay's hulls (Pool's rock), one vertex per position already.
 SEAMLESS = re.compile(r'seamless', re.I)
 UV_WELD_CACHE = WORK / 'uv-welded-meshes'
 CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: (\d+)\n      format: (\d+)\n      dimension: (\d+)\n')
@@ -1557,9 +1557,9 @@ def uv_weld_mesh(data: bytes):
     return weld_mesh(projected) if projected else None
 
 
-def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict):
-    """project_uvs, then weld_mesh, on the HULL_AREAS scenes' meshes drawn only with seamless or untextured materials
-    (cached in UV_WELD_CACHE)."""
+def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict, hulls: dict):
+    """uv_weld_mesh on the HULL_AREAS scenes' meshes drawn only with seamless or untextured materials (cached in
+    UV_WELD_CACHE). hulls: mesh_hull_overlay's result, meshes left as it made them (already one vertex per position)."""
     if platform != 'vita':
         return {}
     assets = exported / 'Assets'
@@ -1587,7 +1587,7 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
     result, before, after = {}, 0, 0
     for guid in sorted(meshes):
         path = guid_path.get(guid)
-        if path is None or path.suffix != '.asset':
+        if path is None or path.suffix != '.asset' or path in hulls:
             continue
         data = current_bytes(exported, overlay, path)
         cached = cached_output(UV_WELD_CACHE, path, data, uv_weld_mesh)
