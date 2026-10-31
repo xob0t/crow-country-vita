@@ -96,14 +96,13 @@ class CrowProBuilderMeshes : UnityEditor.Build.IProcessSceneWithReport
             }
             if (collider != null && collider.sharedMesh == mesh) collided.Add(mesh);
         }
-        // Awake reads the mesh's uv2 when the components stay, so then the meshes stay readable.
-        int unreadable = 0;
-        if (mode == "on")
-            foreach (Mesh mesh in shared.Values.Where(m => !collided.Contains(m)))
-                if (BuildUtil.MarkUnreadable(mesh)) unreadable++;
-        int dropped = 0;
+        // Awake reads the mesh's uv2 when the components stay (bake, or a mesh that failed), so then the
+        // meshes stay readable.
+        int unreadable = 0, dropped = 0;
         if (mode == "on" && failed == 0)
         {
+            foreach (Mesh mesh in shared.Values.Where(m => !collided.Contains(m)))
+                if (BuildUtil.MarkUnreadable(mesh)) unreadable++;
             foreach (Component component in components)
             {
                 preserveMesh.SetValue(component, true, null);  // its OnDestroy in the editor destroys the mesh otherwise
