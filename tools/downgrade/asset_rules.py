@@ -1303,6 +1303,295 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
     return result
 
 
+# Repeated meshes made simpler where the GPU can't keep up (31 Oct, POOLROCKS), PS Vita. Pool before the boss: looking
+# at the pool's centre the frame was 63.5 ms (vsync 2: the GPU a few ms over 33), and with only the rock floor hidden
+# 33.2 (`work/scratch/poolgpu`): its rock, 48 vertices placed 1,056 times, is 50,700 vertices that the lit vertex
+# program runs for. In HULL_AREAS a mesh placed HULL_MIN_USES times or more becomes the convex hull of the
+# HULL_KEEP share of its positions that shape it most (the others dropped one at a time, the one whose loss takes
+# least of the hull's volume first), one vertex per position: its normal kept, the UVs projected along the normal's
+# largest axis (the rock's texture is a seamless grunge). Pool's rock: 48 vertices, 48 triangles -> 18, 32. A mesh
+# that isn't nearly convex (a position more than 10% of its size inside the hull), or isn't one stream of float
+# positions, normals and UVs, is left alone. unity/MeshCombineBake.cs culls the hulls' buried triangles.
+HULL_AREAS = ('Pool',)
+HULL_MIN_USES = 1000
+HULL_KEEP = 0.7
+HULL_CACHE = WORK / 'hull-meshes'
+MESH_FILTER_MESH = re.compile(rb'^  m_Mesh: \{fileID: 4300000, guid: ([0-9a-f]{32})', re.M)
+
+
+def hull_normal(points: list, a: int, b: int, c: int):
+    u = [points[b][m] - points[a][m] for m in range(3)]
+    v = [points[c][m] - points[a][m] for m in range(3)]
+    return (u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0])
+
+
+def hull_faces(points: list):
+    """The convex hull of points as outward triangles (index triples), or None when it isn't a simple closed hull."""
+    n, faces = len(points), []
+    span = max(max(p[k] for p in points) - min(p[k] for p in points) for k in range(3))
+    eps = 1e-6 * span
+    for i in range(n):
+        for j in range(i + 1, n):
+            for k in range(j + 1, n):
+                normal = hull_normal(points, i, j, k)
+                if sum(x * x for x in normal) < eps * eps:
+                    continue
+                a = points[i]
+                sides = [sum(normal[m] * (q[m] - a[m]) for m in range(3)) for q in points]
+                above, below = any(s > eps for s in sides), any(s < -eps for s in sides)
+                if above and below:
+                    continue
+                if any(abs(s) <= eps for x, s in enumerate(sides) if x not in (i, j, k)):
+                    return None  # four on one face
+                faces.append((i, k, j) if above else (i, j, k))
+    return faces if len(faces) == 2 * n - 4 else None
+
+
+def hull_volume(points: list, faces: list):
+    return sum(
+        sum(points[a][m] * hull_normal([(0, 0, 0), points[b], points[c]], 0, 1, 2)[m] for m in range(3))
+        for a, b, c in faces
+    ) / 6
+
+
+def hull_mesh(data: bytes):
+    """The mesh asset as the convex hull of the HULL_KEEP share of its positions, or None (see above)."""
+    plain = (b'\n  m_MeshCompression: 0\n', b'\n  m_BindPose: []\n', b'\n    vertices: []\n')
+    if any(marker not in data for marker in plain):
+        return None
+    channels = [(int(s), int(d)) for s, d in WELD_CHANNEL.findall(data)]
+    formats = [int(f) for f in re.findall(rb'\n      format: (\d+)\n', data)]
+    if len(channels) < 5 or [d for _, d in channels[:5]] != [3, 3, 0, 0, 2] or any(d for _, d in channels[5:]):
+        return None
+    if any(s for s, d in channels if d) or any(formats[x] for x, (_, d) in enumerate(channels) if d):
+        return None
+    count = WELD_VERTEX_COUNT.search(data)
+    vertices = re.search(rb'\n    m_DataSize: (\d+)\n    _typelessdata: ([0-9a-f]*)\n', data)
+    if not (count and vertices) or len(WELD_SUBMESH.findall(data)) != 1:
+        return None
+    n = int(count[1])
+    raw = bytes.fromhex(vertices[2].decode())
+    if n < 8 or len(raw) != n * 32:
+        return None
+    normal_at = {}
+    for i in range(n):
+        row = struct.unpack_from('<8f', raw, i * 32)
+        normal_at.setdefault(row[:3], row[3:6])
+    positions = list(normal_at)
+    faces = hull_faces(positions)
+    if faces is None:
+        return None
+    size = max(max(p[k] for p in positions) - min(p[k] for p in positions) for k in range(3))
+    for p in positions:  # nearly convex: every position on or near the hull
+        depth = min(
+            -sum(normal[m] * (p[m] - positions[a][m]) for m in range(3)) / (sum(x * x for x in normal) ** 0.5)
+            for a, b, c in faces
+            for normal in [hull_normal(positions, a, b, c)]
+        )
+        if depth > 0.1 * size:
+            return None
+    keep = list(range(len(positions)))
+    while len(keep) > max(4, round(HULL_KEEP * len(positions))):
+        best = None
+        for drop in keep:
+            rest = [positions[x] for x in keep if x != drop]
+            rest_faces = hull_faces(rest)
+            if rest_faces is not None and (best is None or hull_volume(rest, rest_faces) > best[0]):
+                best = (hull_volume(rest, rest_faces), drop)
+        if best is None:
+            break
+        keep.remove(best[1])
+    points = [positions[x] for x in keep]
+    faces = hull_faces(points)
+    if faces is None or len(points) >= n:
+        return None
+    rows = []
+    for p in points:
+        normal = normal_at[p]
+        axis = max(range(3), key=lambda m: abs(normal[m]))
+        u, v = (p[m] + 0.5 for m in range(3) if m != axis)
+        rows.append(struct.pack('<8f', *p, *normal, u, v))
+    indices = [x for face in faces for x in face]
+    new_raw = b''.join(rows)
+    low = [min(p[k] for p in points) for k in range(3)]
+    high = [max(p[k] for p in points) for k in range(3)]
+    center = b'{x: %r, y: %r, z: %r}' % tuple((low[k] + high[k]) / 2 for k in range(3))
+    extent = b'{x: %r, y: %r, z: %r}' % tuple((high[k] - low[k]) / 2 for k in range(3))
+    out = WELD_SUBMESH.sub(
+        b'  - serializedVersion: 2\n    firstByte: 0\n    indexCount: %d\n    topology: 0\n'
+        b'    baseVertex: 0\n    firstVertex: 0\n    vertexCount: %d\n' % (len(indices), len(points)),
+        data,
+        count=1,
+    )
+    box = rb'(\n +)m_Center: .*\n +m_Extent: .*\n'
+    out = re.sub(box, lambda m: m[1] + b'm_Center: ' + center + m[1] + b'm_Extent: ' + extent + b'\n', out)
+    out = re.sub(rb'\n  m_IndexFormat: \d\n', b'\n  m_IndexFormat: 0\n', out, count=1)
+    packed = struct.pack(f'<{len(indices)}H', *indices).hex().encode()
+    out = re.sub(rb'\n  m_IndexBuffer: [0-9a-f]*\n', lambda m: b'\n  m_IndexBuffer: ' + packed + b'\n', out, count=1)
+    out = WELD_VERTEX_COUNT.sub(b'\n    m_VertexCount: %d\n' % len(points), out, count=1)
+    data_line = b'\n    m_DataSize: %d\n    _typelessdata: ' % len(new_raw) + new_raw.hex().encode() + b'\n'
+    return out.replace(vertices[0], data_line, 1)
+
+
+def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict):
+    """hull_mesh on the meshes placed HULL_MIN_USES times or more in a HULL_AREAS scene (cached in HULL_CACHE).
+    ProBuilder saved a copy of the mesh for each placing, so the uses are counted by mesh_duplicates' groups
+    (scene_dedup_overlay later points the scene at the group's mesh)."""
+    if platform != 'vita':
+        return {}
+    assets = exported / 'Assets'
+    guids = {}
+    for relative, stat in listing(assets / 'Scenes').items():
+        if stat is not None and relative.suffix == '.unity' and relative.stem in HULL_AREAS:
+            text = current_bytes(exported, overlay, Path('Assets') / 'Scenes' / relative)
+            uses = collections.Counter(duplicates.get(g.decode(), g.decode()) for g in MESH_FILTER_MESH.findall(text))
+            guids.update({guid: relative.stem for guid, n in uses.items() if n >= HULL_MIN_USES})
+    meshes = {}
+    for relative, stat in listing(assets / 'Mesh').items():
+        if stat is not None and relative.suffix == '.meta':
+            found = re.search(r'guid: ([0-9a-f]{32})', (assets / 'Mesh' / relative).read_text(encoding='utf-8'))
+            if found and found[1] in guids:
+                meshes[found[1]] = Path('Assets') / 'Mesh' / relative.with_suffix('')
+    result = {}
+    for guid, path in sorted(meshes.items()):
+        data = current_bytes(exported, overlay, path)
+        digest = hashlib.sha1(data).hexdigest()
+        cached, mark = HULL_CACHE / path, HULL_CACHE / path.with_suffix('.sha1')
+        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
+            hulled = hull_mesh(data)
+            if hulled is None:
+                log(f'{platform}: {guids[guid]}: {path.name} left as it is (not a simple hull)')
+                continue
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(hulled)
+            mark.write_text(digest)
+        result[path] = cached
+        before, after = (WELD_VERTEX_COUNT.search(d)[1].decode() for d in (data, cached.read_bytes()))
+        log(f'{platform}: {guids[guid]}: {path.name} as a hull, {before} -> {after} vertices')
+    return result
+
+# One vertex per position for seamless-textured meshes (31 Oct, POOLROOTS), PS Vita. Pool before the boss, looking into
+# the pool, was still 19 fps with the rock as a hull: its seven roots stand up out of the pool until the fight (they
+# slide 16 m down when it starts, so the fight is cheaper), 60,000 vertices in their combined meshes. Their normals
+# are smooth, one per position; ProBuilder's per-face UVs split every position into 2-4 vertices (14,310 vertices for
+# 4,630 positions). In HULL_AREAS, a mesh the scene draws only with materials whose textures are all seamless (by the
+# texture's name: SFB's Subtle-Grunge-Texture-N-Seamless) or that have none gets UVs projected from its position along
+# its normal's largest axis (as hull_mesh's), so the vertices that differed only in UVs become equal and weld_mesh
+# makes them one: the shape and lighting are the same, the grunge lies a little differently. Only meshes no other
+# scene, prefab or asset names.
+SEAMLESS = re.compile(r'seamless', re.I)
+UV_WELD_CACHE = WORK / 'uv-welded-meshes'
+SCENE_DOCUMENT_BYTES = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n(.*?)(?=^--- |\Z)', re.M | re.S)
+CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: (\d+)\n      format: (\d+)\n      dimension: (\d+)\n')
+
+
+def project_uvs(data: bytes):
+    """The mesh asset with UV0 projected from position and normal, or None when its layout isn't one stream with float
+    positions, float or half normals and float or half UV0."""
+    channels = [tuple(int(x) for x in c) for c in CHANNEL.findall(data)]
+    count = WELD_VERTEX_COUNT.search(data)
+    vertices = re.search(rb'\n    m_DataSize: (\d+)\n    _typelessdata: ([0-9a-f]*)\n', data)
+    if len(channels) < 5 or not (count and vertices) or any(s for s, o, f, d in channels if d & 15):
+        return None
+    (_, p_off, p_fmt, p_dim), (_, n_off, n_fmt, n_dim), uv = channels[0], channels[1], channels[4]
+    if p_fmt != 0 or p_dim & 15 != 3 or n_fmt not in (0, 1) or n_dim & 15 < 3 or uv[2] not in (0, 1) or uv[3] & 15 != 2:
+        return None
+    n = int(count[1])
+    raw = bytearray(bytes.fromhex(vertices[2].decode()))
+    if not n or len(raw) % n:
+        return None
+    stride = len(raw) // n
+    normal_code, uv_code = ('3f' if n_fmt == 0 else '3e'), ('2f' if uv[2] == 0 else '2e')
+    for i in range(n):
+        base = i * stride
+        position = struct.unpack_from('<3f', raw, base + p_off)
+        normal = struct.unpack_from('<' + normal_code, raw, base + n_off)
+        axis = max(range(3), key=lambda m: abs(normal[m]))
+        struct.pack_into('<' + uv_code, raw, base + uv[1], *(position[m] + 0.5 for m in range(3) if m != axis))
+    return data.replace(vertices[2], bytes(raw).hex().encode(), 1)
+
+
+def scene_mesh_materials(text: bytes):
+    """{mesh GUID: material GUIDs drawn with it} for the MeshFilters of a scene."""
+    mesh_of, materials_of = {}, collections.defaultdict(set)
+    for kind, _, body in SCENE_DOCUMENT_BYTES.findall(text):
+        owner = re.search(rb'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)
+        if not owner:
+            continue
+        if kind == b'33':
+            mesh = MESH_FILTER_MESH.search(body)
+            if mesh:
+                mesh_of[owner[1]] = mesh[1].decode()
+        elif kind in (b'23', b'137') and b'\n  m_Materials:\n' in body:
+            listed = body.split(b'\n  m_Materials:\n', 1)[1].split(b'\n  m_', 1)[0]
+            materials_of[owner[1]].update(g.decode() for g in re.findall(rb'guid: ([0-9a-f]{32})', listed))
+    result = collections.defaultdict(set)
+    for owner, mesh in mesh_of.items():
+        result[mesh].update(materials_of.get(owner, ()))
+    return result
+
+
+def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict):
+    """project_uvs, then weld_mesh, on the HULL_AREAS scenes' meshes drawn only with seamless or untextured materials
+    (cached in UV_WELD_CACHE)."""
+    if platform != 'vita':
+        return {}
+    assets = exported / 'Assets'
+    guid_path = {}
+    for folder in ('Mesh', 'Material', 'Texture2D'):
+        for relative, stat in listing(assets / folder).items():
+            if stat is not None and relative.suffix == '.meta':
+                found = re.search(r'guid: ([0-9a-f]{32})', (assets / folder / relative).read_text(encoding='utf-8'))
+                if found:
+                    guid_path[found[1]] = Path('Assets') / folder / relative.with_suffix('')
+    seamless = {}
+
+    def plain(material: str):
+        if material not in seamless:
+            path = guid_path.get(material)
+            text = current_text(exported, overlay, path) if path and path.suffix == '.mat' else None
+            textures = re.findall(r'm_Texture: \{fileID: [1-9]\d*, guid: ([0-9a-f]{32})', text) if text else None
+            seamless[material] = textures is not None and all(
+                guid_path.get(t) is not None and SEAMLESS.search(guid_path[t].name) for t in textures
+            )
+        return seamless[material]
+
+    meshes = set()
+    for relative, stat in listing(assets / 'Scenes').items():
+        if stat is not None and relative.suffix == '.unity' and relative.stem in HULL_AREAS:
+            text = current_bytes(exported, overlay, Path('Assets') / 'Scenes' / relative)
+            for mesh, materials in scene_mesh_materials(text).items():
+                if materials and all(plain(m) for m in materials):
+                    meshes.add(duplicates.get(mesh, mesh))
+    # Only meshes no other scene, prefab or asset names: elsewhere a material may need their UVs.
+    for found, users in scene_mesh_scan(assets).items():
+        if found.stem not in HULL_AREAS:
+            meshes.difference_update(duplicates.get(g, g) for guids in users for g in guids)
+    for guids in mesh_references_elsewhere(assets).values():
+        meshes.difference_update(duplicates.get(g, g) for g in guids)
+    result, before, after = {}, 0, 0
+    for guid in sorted(meshes):
+        path = guid_path.get(guid)
+        if path is None or path.suffix != '.asset':
+            continue
+        data = current_bytes(exported, overlay, path)
+        digest = hashlib.sha1(data).hexdigest()
+        cached, mark = UV_WELD_CACHE / path, UV_WELD_CACHE / path.with_suffix('.sha1')
+        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
+            projected = project_uvs(data)
+            welded = weld_mesh(projected) if projected else None
+            if welded is None:
+                continue
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(welded)
+            mark.write_text(digest)
+        result[path] = cached
+        before += int(WELD_VERTEX_COUNT.search(data)[1])
+        after += int(WELD_VERTEX_COUNT.search(cached.read_bytes())[1])
+    areas = ', '.join(HULL_AREAS)
+    log(f'{platform}: {areas}: {len(result)} seamless-textured meshes one vertex per position, {before} -> {after}')
+    return result
+
 # Meshes whose vertex data the game streams from a .resS file (m_StreamData): the 1,460 meshes that
 # MeshCombineStudio combined in the editor and SFB saved into the scenes (walls, fences, pipes, cars, a
 # level's vertex-coloured parts in one mesh: Roadside's Ford Fiesta, the red car's body, the fence rails

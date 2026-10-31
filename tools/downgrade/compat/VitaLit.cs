@@ -74,6 +74,17 @@ namespace CrowCompat
         static int swapPasses;
         static string lastLog, bundle;
         static int maxKeys = 4;
+        // Areas whose GPU can't draw maxKeys slots over what fills their screen, and the cap there (31 Oct, POOLFIGHT):
+        // Pool's boss fight, the pool's lit see-through liquid under the camera, was 39.5 ms a frame uncapped; with its
+        // edge rings drawn once (unity/StackedLayers.cs) 35.4, and with 2 slots as well 30.7-31.6 (3 slots: 34.5).
+        // A fixed cap from the area's load, never 0: the adaptive cap that went to 0 hung the GPU (30-31 Oct).
+        static readonly Dictionary<string, int> AreaKeys = new Dictionary<string, int> { { "Pool", 2 } };
+        static int areaKeys = Keys;
+
+        static int KeyCap
+        {
+            get { return Mathf.Min(maxKeys, areaKeys); }
+        }
         static float fadeTime = 0.35f, viewRadius = 4f;
 
         // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litfade=, litview=;
@@ -148,6 +159,12 @@ namespace CrowCompat
                 hooked = true;
                 CrowEvents.Loaded("VitaLit.sceneLoaded", (scene, mode) =>
                 {
+                    if (Scenes.IsArea(scene))
+                    {
+                        int cap;
+                        areaKeys = AreaKeys.TryGetValue(scene.name, out cap) ? cap : Keys;
+                        if (areaKeys < Keys) Debug.Log("CROW_LIT " + scene.name + ": at most " + areaKeys + " key lights");
+                    }
                     sceneTime = Time.realtimeSinceStartup;
                     peaks.Clear();
                     offSince.Clear();
@@ -653,10 +670,10 @@ namespace CrowCompat
                 candidates.Add(light);
                 scores.Add(score);
             }
-            // The fill light and the maxKeys best point and spot lights, best first.
+            // The fill light and the KeyCap best point and spot lights, best first.
             chosen.Clear();
             if (fill != null) chosen.Add(fill);
-            for (int n = 0; n < maxKeys; n++)
+            for (int n = 0; n < KeyCap; n++)
             {
                 int best = -1;
                 for (int i = 0; i < candidates.Count; i++)
@@ -736,7 +753,7 @@ namespace CrowCompat
             {
                 if (light == null || keys.Contains(light)) continue;
                 bool directional = light.type == LightType.Directional;
-                if (!directional && slots >= maxKeys)
+                if (!directional && slots >= KeyCap)
                 {
                     if (!urgent) continue;
                     // A spot light that just came on: the weakest leaving key gives its slot at once.
