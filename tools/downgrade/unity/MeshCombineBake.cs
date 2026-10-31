@@ -142,6 +142,9 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                                                        f.GetComponent<MeshRenderer>() != null && f.GetComponent<MeshRenderer>().enabled &&
                                                        f.gameObject.activeInHierarchy).ToList();
         if (placings.Count == 0) return;
+        // As placed, before any placing gets its copy below.
+        Dictionary<MeshFilter, Mesh> meshOf = placings.ToDictionary(f => f, f => f.sharedMesh);
+        Dictionary<MeshFilter, Bounds> boundsOf = placings.ToDictionary(f => f, f => f.GetComponent<MeshRenderer>().bounds);
         // Each repeated mesh's faces as planes (a point, an outward normal), when it is convex.
         var planes = new Dictionary<Mesh, KeyValuePair<Vector3, Vector3>[]>();
         foreach (Mesh mesh in placings.Select(f => f.sharedMesh).Distinct())
@@ -160,9 +163,9 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         }
         // The placings by 2 m cells of x, z.
         var near = new Dictionary<long, List<MeshFilter>>();
-        foreach (MeshFilter filter in placings.Where(f => planes.ContainsKey(f.sharedMesh)))
+        foreach (MeshFilter filter in placings.Where(f => planes.ContainsKey(meshOf[f])))
         {
-            Bounds bounds = filter.GetComponent<MeshRenderer>().bounds;
+            Bounds bounds = boundsOf[filter];
             foreach (long key in Cells(bounds.min.x, bounds.max.x, bounds.min.z, bounds.max.z))
             {
                 List<MeshFilter> list;
@@ -173,11 +176,11 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         int cut = 0, before = 0, after = 0, verticesBefore = 0, verticesAfter = 0;
         foreach (MeshFilter filter in placings)
         {
-            Mesh mesh = filter.sharedMesh;
+            Mesh mesh = meshOf[filter];
             Vector3[] vertices = mesh.vertices;
             int[] triangles = mesh.triangles;
             Matrix4x4 world = filter.transform.localToWorldMatrix;
-            Bounds bounds = filter.GetComponent<MeshRenderer>().bounds;
+            Bounds bounds = boundsOf[filter];
             // The other placings whose bounds meet this one's.
             var others = new HashSet<MeshFilter>();
             foreach (long key in Cells(bounds.min.x, bounds.max.x, bounds.min.z, bounds.max.z))
@@ -185,7 +188,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 List<MeshFilter> list;
                 if (near.TryGetValue(key, out list))
                     foreach (MeshFilter other in list)
-                        if (other != filter && other.GetComponent<MeshRenderer>().bounds.Intersects(bounds)) others.Add(other);
+                        if (other != filter && boundsOf[other].Intersects(bounds)) others.Add(other);
             }
             var points = vertices.Select(v => world.MultiplyPoint3x4(v)).ToArray();
             // Per vertex, the others it is inside of.
@@ -197,7 +200,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 {
                     Vector3 local = other.transform.worldToLocalMatrix.MultiplyPoint3x4(points[i]);
                     // In the other's own space its planes are unscaled; the margin is taken along each normal.
-                    if (planes[other.sharedMesh].All(f => Vector3.Dot(f.Value, local - f.Key) < -Inside)) within[i].Add(other);
+                    if (planes[meshOf[other]].All(f => Vector3.Dot(f.Value, local - f.Key) < -Inside)) within[i].Add(other);
                 }
             }
             var keep = new List<int>(triangles.Length);
