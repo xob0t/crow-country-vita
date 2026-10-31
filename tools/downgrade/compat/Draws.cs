@@ -68,6 +68,35 @@ namespace CrowCompat
             }
         }
 
+        // Cycle key hide=<what> (a probe for A/B windows: what the GPU's frame is spent on): the enabled renderers
+        // that match switched off until hide=none. what: transparent (a material past the opaque queue; particle
+        // systems not), dense:<n> (a mesh of n vertices or more), else a regex on the hierarchy path.
+        static readonly List<Renderer> hidden = new List<Renderer>();
+
+        internal static void Hide(string what)
+        {
+            foreach (Renderer renderer in hidden) if (renderer != null) renderer.enabled = true;
+            hidden.Clear();
+            if (what == "none") return;
+            System.Text.RegularExpressions.Regex pattern = what == "transparent" || what.StartsWith("dense:", StringComparison.Ordinal) ? null : new System.Text.RegularExpressions.Regex(what);
+            int dense = what.StartsWith("dense:", StringComparison.Ordinal) ? int.Parse(what.Substring(6), CultureInfo.InvariantCulture) : 0;
+            long vertices = 0;
+            foreach (Renderer renderer in UnityEngine.Object.FindObjectsOfType<Renderer>())
+            {
+                if (!renderer.enabled || renderer is ParticleSystemRenderer) continue;
+                var filter = renderer.GetComponent<MeshFilter>();
+                Mesh mesh = filter == null ? null : filter.sharedMesh;
+                bool match = what == "transparent" ? renderer.sharedMaterials.Any(m => m != null && m.renderQueue > 2500)
+                    : dense > 0 ? mesh != null && mesh.vertexCount >= dense
+                    : pattern.IsMatch(Hierarchy.Full(renderer.transform));
+                if (!match) continue;
+                renderer.enabled = false;
+                hidden.Add(renderer);
+                if (mesh != null) vertices += mesh.vertexCount;
+            }
+            Debug.Log("CROW_DRAWS hide " + what + ": " + hidden.Count + " renderers off, " + vertices + " vertices");
+        }
+
         // -crow-casters and -crow-ab casters=<rule>.
         static bool castersHooked;
         // What the rule turned off, with the casting mode it had (ShadowsOnly: switched off instead).

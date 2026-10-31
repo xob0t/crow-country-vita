@@ -1082,6 +1082,123 @@ def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicat
     return result
 
 
+# Exact duplicate vertices made one (30 Oct, BOSS), PS Vita: the game's ProBuilder meshes repeat a vertex for every
+# face that uses it even where all its channels are the same (Pool's rock, 1,056 of them in the pool room: 76 vertices,
+# 48 different), and the GPU transforms and lights each copy. Every mesh asset whose vertex data has such copies
+# gets one of each, its index buffer and submeshes' vertex ranges rewritten; the triangles are the same vertices byte
+# for byte, so nothing on screen changes (the meshes Pool's scene names: 889,000 vertices by their uses -> 598,000).
+# Left alone: compressed, skinned and blend-shape meshes, vertex data in several streams or streamed from a .resS.
+MESH_WELD_CACHE = WORK / 'welded-meshes'
+WELD_SUBMESH = re.compile(
+    rb'  - serializedVersion: 2\n    firstByte: (\d+)\n    indexCount: (\d+)\n    topology: (\d+)\n'
+    rb'    baseVertex: (\d+)\n    firstVertex: (\d+)\n    vertexCount: (\d+)\n'
+)
+WELD_CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: \d+\n      format: \d+\n      dimension: (\d+)\n')
+WELD_VERTEX_COUNT = re.compile(rb'\n    m_VertexCount: (\d+)\n')
+
+
+def weld_mesh(data: bytes):
+    """The mesh asset with its exactly equal vertices (every channel, byte for byte) made one, or None when it has
+    none or is a kind left alone."""
+    if (
+        b'\n  m_MeshCompression: 0\n' not in data
+        or b'\n  m_BindPose: []\n' not in data
+        or b'\n    vertices: []\n' not in data
+    ):
+        return None
+    count = WELD_VERTEX_COUNT.search(data)
+    vertices = re.search(rb'\n    m_DataSize: (\d+)\n    _typelessdata: ([0-9a-f]*)\n', data)
+    index_format = re.search(rb'\n  m_IndexFormat: (\d)\n', data)
+    index_buffer = re.search(rb'\n  m_IndexBuffer: ([0-9a-f]*)\n', data)
+    if not (count and vertices and index_format and index_buffer):
+        return None
+    n = int(count.group(1))
+    if n < 2 or any(int(stream) != 0 for stream, dimension in WELD_CHANNEL.findall(data) if int(dimension)):
+        return None
+    raw = bytes.fromhex(vertices.group(2).decode())
+    if not raw or len(raw) % n or len(raw) != int(vertices.group(1)):
+        return None
+    stride = len(raw) // n
+    remap, unique, seen = [], [], {}
+    for i in range(n):
+        vertex = raw[i * stride : (i + 1) * stride]
+        j = seen.get(vertex)
+        if j is None:
+            j = seen[vertex] = len(unique)
+            unique.append(vertex)
+        remap.append(j)
+    if len(unique) == n:
+        return None
+    wide = index_format.group(1) == b'1'
+    size, code = (4, 'I') if wide else (2, 'H')
+    indices_raw = bytes.fromhex(index_buffer.group(1).decode())
+    indices = list(struct.unpack(f'<{len(indices_raw) // size}{code}', indices_raw))
+    submeshes = list(WELD_SUBMESH.finditer(data))
+    if not submeshes:
+        return None
+    new_submeshes = []
+    for submesh in submeshes:
+        first, index_count, topology, base = (int(x) for x in submesh.groups()[:4])
+        if first % size or first // size + index_count > len(indices):
+            return None
+        start = first // size
+        for k in range(start, start + index_count):
+            if indices[k] + base >= n:
+                return None
+            indices[k] = remap[indices[k] + base]
+        used = indices[start : start + index_count]
+        low, high = (min(used), max(used)) if used else (0, -1)
+        new_submeshes.append(
+            b'  - serializedVersion: 2\n    firstByte: %d\n    indexCount: %d\n    topology: %d\n'
+            b'    baseVertex: 0\n    firstVertex: %d\n    vertexCount: %d\n' % (first, index_count, topology, low, high - low + 1)
+        )
+    packed = struct.pack(f'<{len(indices)}{code}', *indices)
+    new_raw = b''.join(unique)
+    out = data
+    for submesh, new in reversed(list(zip(submeshes, new_submeshes))):
+        out = out[: submesh.start()] + new + out[submesh.end() :]
+    out = out.replace(index_buffer.group(0), b'\n  m_IndexBuffer: ' + packed.hex().encode() + b'\n', 1)
+    out = WELD_VERTEX_COUNT.sub(b'\n    m_VertexCount: %d\n' % len(unique), out, count=1)
+    out = out.replace(vertices.group(0), b'\n    m_DataSize: %d\n    _typelessdata: ' % len(new_raw) + new_raw.hex().encode() + b'\n', 1)
+    return out
+
+
+def weld_count(path: Path):
+    """[vertices, different vertices] of a mesh asset weld_mesh would change, else None (for scan)."""
+    data = path.read_bytes()
+    welded = weld_mesh(data)
+    if welded is None:
+        return None
+    return [int(WELD_VERTEX_COUNT.search(data).group(1)), int(WELD_VERTEX_COUNT.search(welded).group(1))]
+
+
+def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
+    """weld_mesh on every mesh asset with duplicate vertices, as the rules before left it (cached in MESH_WELD_CACHE)."""
+    if platform != 'vita':
+        return {}
+    assets = exported / 'Assets'
+    counts = scan('mesh-weld', assets, lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset', weld_count)
+    result, before, after = {}, 0, 0
+    for relative, count in counts.items():
+        if not count:
+            continue
+        path = Path('Assets') / relative
+        data = current_bytes(exported, overlay, path)
+        digest = hashlib.sha1(data).hexdigest()
+        cached, mark = MESH_WELD_CACHE / path, MESH_WELD_CACHE / path.with_suffix('.sha1')
+        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
+            welded = weld_mesh(data)
+            if welded is None:
+                continue
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(welded)
+            mark.write_text(digest)
+        result[path] = cached
+        before, after = before + count[0], after + count[1]
+    log(f'{platform}: {len(result)} meshes welded, their vertices {before} -> {after}')
+    return result
+
+
 # Meshes whose vertex data the game streams from a .resS file (m_StreamData): the 1,460 meshes that
 # MeshCombineStudio combined in the editor and SFB saved into the scenes (walls, fences, pipes, cars, a
 # level's vertex-coloured parts in one mesh: Roadside's Ford Fiesta, the red car's body, the fence rails
