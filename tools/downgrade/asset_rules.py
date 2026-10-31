@@ -1577,9 +1577,12 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
             )
         return seamless[material]
 
-    meshes = set()
+    # By the group's mesh, which every copy's placing draws after scene_dedup_overlay: all their materials.
+    drawn_with = collections.defaultdict(set)
     for filters in area_mesh_filters(exported, overlay, duplicates).values():
-        meshes.update(mesh for mesh, materials in filters if materials and all(plain(m) for m in materials))
+        for mesh, materials in filters:
+            drawn_with[mesh] |= materials
+    meshes = {mesh for mesh, materials in drawn_with.items() if materials and all(plain(m) for m in materials)}
     meshes -= meshes_named_elsewhere(assets, duplicates)  # elsewhere a material may need their UVs
     result, before, after = {}, 0, 0
     for guid in sorted(meshes):
