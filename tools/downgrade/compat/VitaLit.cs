@@ -43,21 +43,19 @@ using UnityEngine.SceneManagement;
 //                          vita as above (the PS Vita's default)
 //   -crow-lit-keys <n>     at most n point and spot key lights (default 4, at most 4; 8 slots cost Mansion
 //                          8 ms for nothing seen)
-//   -crow-lit-adapt off    keep the key lights' cap at -crow-lit-keys (KeyCap below lowers it per area where
-//                          the GPU can't keep up; on by default on the PS Vita)
 //   -crow-lit-log          log the key lights whenever they change (CROW_LIT)
 //   -crow-lit-fade <s>     the fade when keys change (default 0.35; 0: at once)
 //   -crow-lit-view <m>     the radius around the player the view scoring counts (default 4)
 //   -crow-lit-bundle <path>  load CrowVita/Lit from an asset bundle (for builds without it)
 //   -crow-lit-debug <n>    the shader's _CrowDebug (every build reads it: 1 switches the depth layers off);
 //                          2 lets the key lights light every layer, as before 27 Oct (their culling masks off)
-// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litfade=<s>, litview=<m> and litadapt=on|off.
+// -crow-ab and -crow-cycle take lit=game|vita, litkeys=<n>, litfade=<s> and litview=<m>.
 // Part of CrowCompat; see Compat2018.cs.
 namespace CrowCompat
 {
     static class VitaLit
     {
-        internal const int Keys = 4;
+        const int Keys = 4;
         static bool on, hooked, log;
         static Shader lit, standard;
         // The swapped materials' original shaders, by instance ID: a static that holds an asset can keep
@@ -75,9 +73,7 @@ namespace CrowCompat
         static float nextSelect, sceneTime;
         static int swapPasses;
         static string lastLog, bundle;
-        static int maxKeys = 4;  // -crow-lit-keys, litkeys=
-        static int cap = Keys;  // KeyCap's, in this area
-        static int MaxKeys { get { return Math.Min(maxKeys, cap); } }
+        static int maxKeys = 4;
         static float fadeTime = 0.35f, viewRadius = 4f;
 
         // -crow-ab's, -crow-cycle's and -crow-fight-cycle's lit=, litkeys=, litfade=, litview=;
@@ -96,7 +92,6 @@ namespace CrowCompat
                 case "litkeys": maxKeys = Mathf.Clamp((int)number, 0, Keys); break;
                 case "litfade": fadeTime = Mathf.Max(0f, number); break;
                 case "litview": viewRadius = Mathf.Max(0f, number); break;
-                case "litadapt": KeyCap.Set(value != "off"); break;
                 default: return false;
             }
             nextSelect = 0f;
@@ -115,17 +110,7 @@ namespace CrowCompat
             allLayers = CrowFlags.Number(args, "-crow-lit-debug", 0f) == 2f;
             string value = CrowFlags.Value(args, "-crow-lit", "vita");
             if (value != null) Set(value);
-            KeyCap.Install(args);
         }
-
-        // KeyCap's: the cap in this area, and the point and spot key lights wanted now.
-        internal static void Cap(int keys)
-        {
-            cap = keys;
-            nextSelect = 0f;
-        }
-
-        internal static int Wanted { get { return desired.Count(l => l != null && l.type != LightType.Directional); } }
 
         internal static void Set(string value)
         {
@@ -671,7 +656,7 @@ namespace CrowCompat
             // The fill light and the maxKeys best point and spot lights, best first.
             chosen.Clear();
             if (fill != null) chosen.Add(fill);
-            for (int n = 0; n < MaxKeys; n++)
+            for (int n = 0; n < maxKeys; n++)
             {
                 int best = -1;
                 for (int i = 0; i < candidates.Count; i++)
@@ -751,7 +736,7 @@ namespace CrowCompat
             {
                 if (light == null || keys.Contains(light)) continue;
                 bool directional = light.type == LightType.Directional;
-                if (!directional && slots >= MaxKeys)
+                if (!directional && slots >= maxKeys)
                 {
                     if (!urgent) continue;
                     // A spot light that just came on: the weakest leaving key gives its slot at once.
@@ -990,87 +975,6 @@ namespace CrowCompat
                 if (name == wanted) Shader.EnableKeyword(name);
                 else Shader.DisableKeyword(name);
             keyword = wanted;
-        }
-    }
-
-    // The key lights' adaptive cap (30 Oct, BOSS): each key light costs the GPU its pixels' share of the frame, and
-    // where the GPU is what holds the frame back, one fewer is the cheapest look to give up (Pool's boss fight,
-    // GPU-bound: 58.6 ms a frame with its 3 keys, 54.5 with 1, 40.4 with none). Every 2 s from 5 s after an area's
-    // load, a window is GPU-bound when its frames took over 34 ms on average, the render thread waited on the GPU in
-    // most of the samples a thread of its own takes of it every 4 ms (wait type 0x100: sceGxm's notification, as
-    // -crow-frame-probe's CROW_FRAME names it), and the main thread ran 3 ms or more under the frame (it waits, not
-    // works). Then the cap goes one below the key lights in use, for the rest of the area's visits, as FilterGate's
-    // reverb cap does for the mixer. The keys then left are Unity's lights again, per vertex. PS Vita only;
-    // -crow-lit-adapt off (litadapt=off) keeps -crow-lit-keys.
-    static class KeyCap
-    {
-        const float Window = 2f, Settle = 5f, OverMs = 34f, WaitShare = 0.5f, MainUnderMs = 3f;
-        const int GpuWait = 0x100;
-        static bool adapt;
-        static int mainUid, frames;
-        static volatile int samples, gpuWaits;
-        static float windowStart, watchFrom;
-        static long mainRun = -1;
-        static string area;
-        static readonly Dictionary<string, int> learned = new Dictionary<string, int>();
-
-        internal static void Install(string[] args)
-        {
-            if (Application.platform != RuntimePlatform.PSP2 || CrowFlags.Value(args, "-crow-lit-adapt") == "off") return;
-            mainUid = Threads.SelfAnyway();
-            if (mainUid == 0) return;
-            Threads.Find("UnityGfxDeviceWorker", uid =>
-            {
-                var info = new int[4];
-                while (true)
-                {
-                    System.Threading.Thread.Sleep(4);
-                    if (!adapt || Threads.Wait(uid, info) < 0) continue;
-                    samples++;
-                    if ((info[0] & 8) != 0 && info[1] == GpuWait) gpuWaits++;
-                }
-            });
-            CrowEvents.Loaded("KeyCap.sceneLoaded", (scene, mode) =>
-            {
-                if (!Scenes.IsArea(scene) || scene.name == Scenes.Kept) return;
-                area = scene.name;
-                int keys;
-                VitaLit.Cap(adapt && learned.TryGetValue(area, out keys) ? keys : VitaLit.Keys);
-                watchFrom = Time.realtimeSinceStartup + Settle;
-            });
-            CrowEvents.BeforeRender("KeyCap.Tick", Tick);
-            adapt = true;
-        }
-
-        internal static void Set(bool on)
-        {
-            adapt = on && mainUid != 0;
-            int keys;
-            VitaLit.Cap(adapt && area != null && learned.TryGetValue(area, out keys) ? keys : VitaLit.Keys);
-        }
-
-        static void Tick()
-        {
-            float now = Time.realtimeSinceStartup;
-            frames++;
-            if (now - windowStart < Window) return;
-            long run = Threads.RunMicros(mainUid);
-            int sampled = samples, waited = gpuWaits;
-            samples = gpuWaits = 0;
-            float frameMs = (now - windowStart) * 1000f / frames, mainMs = mainRun >= 0 && run >= 0 ? (run - mainRun) / 1000f / frames : -1f;
-            windowStart = now;
-            frames = 0;
-            mainRun = run;
-            int wanted = VitaLit.Wanted;
-            if (!adapt || now < watchFrom || area == null || mainMs < 0f || sampled == 0 || wanted == 0) return;
-            if (frameMs <= OverMs || waited < sampled * WaitShare || mainMs > frameMs - MainUnderMs) return;
-            int keys = wanted - 1;
-            learned[area] = keys;
-            VitaLit.Cap(keys);
-            Debug.Log("CROW_LIT GPU-bound in " + area + " (" + frameMs.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + " ms a frame, main thread " +
-                      mainMs.ToString("F1", System.Globalization.CultureInfo.InvariantCulture) + ", render thread on the GPU in " + (100 * waited / sampled) +
-                      "% of " + sampled + " samples): at most " + keys + " key lights now");
-            watchFrom = now + Window;  // the next window measures the new cap
         }
     }
 }
