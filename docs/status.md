@@ -53,7 +53,7 @@ The meshes' triangles are in vertex cache order and the textures only materials 
 The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
 PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
 The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.
-Area loads go through an empty scene with the old area's assets freed first.
+Area loads go through an empty scene with the old area's assets freed first, unless the area's load is known to fit beside them with 48 MB of main memory to spare (a revisit; the loads into Haunted Hilltop and Ocean Kingdom take too much to qualify).
 The GC heap is capped to leave Unity 16 MB, its table of pinned handles is grown at the start, and the allocator keeps its free blocks sorted.
 A collection runs half a second into a pause once 2 MB have been allocated, so fewer come in play (Boehm otherwise collects after every 5.5-6.6 MB, a 0.75-1 s stop).
 MeshCombineStudio's mesh caches are released once every combiner has combined.
@@ -78,5 +78,8 @@ The game runs in its console mode (Control Mode Console 1) with the Switch's pla
 
 1. More memory margin for the loads into Haunted Hilltop.
 2. The Station Square fight's frame time.
-3. Load times, last measured as a whole on 15 Oct (boot to title about 21 s); reading PlayMaker's data was then the biggest cost.
+3. Load times (30 Oct): an area load takes 2-23 s on the console (Corridor B 15-17 s, Fairy Forest and Station Square 12-16, Haunted Hilltop 16-20, Machine Centre 2-7).
+   Each is the renderer's drain and the old scenes' unload (0.2-0.5 s), the unused-asset pass (1.7-2.1 s, left out on revisits that fit), a collection (0.5 s) and the additive load.
+   In a big area most of the additive load is Unity's loading thread at full use reading the level's objects (Station Square: 8 s of 12.3, PlayMaker's FSM setup 2.5 s of those), after 3.5 s of reading and uploads, then 0.6 s on the main thread.
+   Cutting that needs smaller level data, which a code change can't give: about half of Station Square's level file is PlayMaker's FSMs (15 Oct).
 4. Play further: story events, fights across the game, and saves made in play and loaded later.
