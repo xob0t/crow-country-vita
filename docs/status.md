@@ -48,7 +48,7 @@ Physics steps once per 30 fps frame, at most two steps a frame.
 The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
 The small wobbling parts of the bosses' bodies (non-enemy rigidbodies) are held still and merged like an enemy's: Pool's boss, Crypt's Wader, Control Room's Shambler, Corridor A's Scamper.
 Every mesh's exactly equal vertices are made one at build time (51,443 meshes, 7.86 -> 5.28 million vertices; the areas' scenes 15-37% fewer), with nothing on screen changed.
-The meshes' triangles are in vertex cache order and the textures only materials use have mipmaps (760; Fairy Forest's tree fairy note no longer shimmers). Optimize Mesh Data is off by default (`CROW_MESH_STRIP=on`): it took the build's scenes from 13 to 59 minutes for 2.3 MB.
+The meshes' triangles are in vertex cache order and the textures only materials use have mipmaps (760; Fairy Forest's tree fairy note no longer shimmers). Optimize Mesh Data was tried and dropped: Pool's ground rocks flickered with it, and it took the build's scenes from 13 to 59 minutes.
 The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
 PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
 The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.

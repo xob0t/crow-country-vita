@@ -155,7 +155,6 @@ These environment variables change what a stage writes, for experiments and meas
 | `CROW_MCS_BAKE`, `CROW_MCS_STRIP` | build | `on`, `off` (`on`, `off`; the strip as the bake) | MeshCombineStudio's run-time combining done at build time, and the combined sources left out (`unity/MeshCombineBake.cs`). |
 | `CROW_STRIP` | build | `on`, `off` (`on`, `off`) | The scripts that do nothing in the player left out of the scenes (`unity/StripScenes.cs`). |
 | `CROW_LIT_BAKE` | project | `on`, `off` (`on`; PS Vita only) | The materials saved with CrowVita/Lit; `off` leaves the swap to run time. |
-| `CROW_MESH_STRIP` | project | `on`, `off` (`off`; PS Vita only) | `on`: Optimize Mesh Data, the vertex channels no material reads left out. About 45 minutes more build for 2.3 MB less build. |
 | `CROW_FSM_COMPILE` | code | `on`, `off` (`off`) | The FSMs' compiled bodies only, without the originals beside them (`rewriter/FsmCompile.cs`). |
 | `CROW_ACTION_PROFILE` | code | `0`, `1` (`0`) | PlayMaker's actions and the behaviours timed, for `-crow-action-profile` ([vita.md](vita.md)). |
 | `CROW_GFX_JOBS` | build, quickcode | `on`, `off` (`on`; PS Vita only) | The PS Vita player's graphics jobs, in `Media/boot.config` ([vita.md](vita.md)). |

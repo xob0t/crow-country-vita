@@ -1909,14 +1909,7 @@ def settings_overlay(exported: Path, platform: str):
     relative = Path('ProjectSettings') / 'ProjectSettings.asset'
     text = (exported / relative).read_text(encoding='utf-8')
     text = product_guid(text)
-    rules = {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}
-    if platform == 'vita':
-        # StripUnusedMeshComponents (Optimize Mesh Data, CROW_MESH_STRIP): the build leaves out the vertex channels no
-        # material drawing a mesh reads (30 Oct, MESHDATA). Off by default: it took the build's scenes from 13 to 59
-        # minutes for a build 2.3 MB smaller and about 1 MB in the loads, the frame unchanged.
-        strip = build_switches(platform, ('project',))['CROW_MESH_STRIP'] == 'on'
-        rules['StripUnusedMeshComponents'] = '1' if strip else '0'
-    for key, value in rules.items():
+    for key, value in {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}.items():
         text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
         if count == 0:
             # Keys the source version no longer has; the file holds one PlayerSettings mapping.
