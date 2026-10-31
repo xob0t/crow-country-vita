@@ -1869,9 +1869,7 @@ SETTING_RULES = {
 # Per platform. The PS Vita player starts in power mode A, with the GPU at 111 MHz; mode C (2)
 # raises the GPU clock and gives up the camera and full screen brightness (The Drifter's port).
 PLATFORM_SETTING_RULES = {
-    # StripUnusedMeshComponents (Optimize Mesh Data): the build leaves out the vertex channels no material drawing a
-    # mesh reads (30 Oct, MESHDATA).
-    'vita': {'psp2PowerMode': '2', 'StripUnusedMeshComponents': '1'},
+    'vita': {'psp2PowerMode': '2'},
     # Unity keeps PlayerPrefs (the game's display, sound and control settings) under the company and
     # product name, in the registry on Windows: test players get their own, apart from the game's.
     'windows': {'productName': 'Crow Country 2018 port'},
@@ -1911,7 +1909,14 @@ def settings_overlay(exported: Path, platform: str):
     relative = Path('ProjectSettings') / 'ProjectSettings.asset'
     text = (exported / relative).read_text(encoding='utf-8')
     text = product_guid(text)
-    for key, value in {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}.items():
+    rules = {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}
+    if platform == 'vita':
+        # StripUnusedMeshComponents (Optimize Mesh Data, CROW_MESH_STRIP): the build leaves out the vertex channels no
+        # material drawing a mesh reads (30 Oct, MESHDATA). Off by default: it took the build's scenes from 13 to 59
+        # minutes for a build 2.3 MB smaller and about 1 MB in the loads, the frame unchanged.
+        strip = build_switches(platform, ('project',))['CROW_MESH_STRIP'] == 'on'
+        rules['StripUnusedMeshComponents'] = '1' if strip else '0'
+    for key, value in rules.items():
         text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
         if count == 0:
             # Keys the source version no longer has; the file holds one PlayerSettings mapping.

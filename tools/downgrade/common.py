@@ -660,6 +660,8 @@ BUILD_SWITCHES = {
     'CROW_STRIP': Switch('build', 'on off', 'on', 'off'),
     # The materials saved with CrowVita/Lit (asset_rules.vita_lit_overlay); off leaves the swap to run time.
     'CROW_LIT_BAKE': Switch('project', 'on off', 'on', 'on', ('vita',)),
+    # on: Optimize Mesh Data, the vertex channels no material reads left out (asset_rules.settings_overlay).
+    'CROW_MESH_STRIP': Switch('project', 'on off', 'off', 'off', ('vita',)),
     # on: the FSMs' compiled bodies only (rewriter/FsmCompile.cs); off keeps the originals beside them.
     'CROW_FSM_COMPILE': Switch('code', 'on off', 'off', 'off'),
     # 1: PlayMaker's actions and the behaviours timed, for -crow-action-profile (rewriter/ActionProfile.cs).
