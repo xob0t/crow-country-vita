@@ -152,9 +152,9 @@ These environment variables change what a stage writes, for experiments and meas
 | `CROW_SPLIT` | build | `movers`, `on`, `off` (`movers`, `off`) | The scene split after the merge: the still parts (`on`), and those that move on their own (`movers`). |
 | `CROW_PLAYER_MERGE` | build | `on`, `ab`, `off` (`on`, `off`) | The player merge (`unity/PlayerMerge.cs`); `ab` keeps the parts, for `-crow-player-merge off`. |
 | `CROW_PLAYER_MERGE_PARTIAL` | build | `0`, `1` (`0`) | The player merge from the scenes there are uses of, in a test build before any full one. |
-| `CROW_MCS_BAKE`, `CROW_MCS_STRIP` | build | `on`, `off` (`on`, `off`; the strip as the bake) | MeshCombineStudio's run-time combining done at build time, and the combined sources left out (`unity/MeshCombineBake.cs`). |
+| `CROW_MCS_BAKE`, `CROW_MCS_STRIP` | build | `on`, `off` (`on`, `off`; the strip as the bake) | MeshCombineStudio's run-time combining done at build time (in Pool, first each rock placing's triangles hidden inside another rock culled), and the combined sources left out (`unity/MeshCombineBake.cs`). |
 | `CROW_STRIP` | build | `on`, `off` (`on`, `off`) | The scripts that do nothing in the player left out of the scenes (`unity/StripScenes.cs`). |
-| `CROW_STACK_FOLD` | build | `on`, `off` (`on`, `off`) | See-through layers stacked at one place (one mesh and material, scales within 2.5%) drawn once, with the stack's alpha. |
+| `CROW_STACK_FOLD` | build | `on`, `off` (`on`, `off`) | See-through layers stacked at one place (one mesh and material, scales within 2.5%) drawn once, with the stack's alpha (`unity/StackedLayers.cs`). |
 | `CROW_LIT_BAKE` | project | `on`, `off` (`on`; PS Vita only) | The materials saved with CrowVita/Lit; `off` leaves the swap to run time. |
 | `CROW_FSM_COMPILE` | code | `on`, `off` (`off`) | The FSMs' compiled bodies only, without the originals beside them (`rewriter/FsmCompile.cs`). |
 | `CROW_ACTION_PROFILE` | code | `0`, `1` (`0`) | PlayMaker's actions and the behaviours timed, for `-crow-action-profile` ([vita.md](vita.md)). |

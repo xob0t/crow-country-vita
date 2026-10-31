@@ -357,7 +357,6 @@ partial class DowngradeAssemblies
         foreach (TypeDefinition type in AllTypes(module.Types))
         foreach (MethodDefinition method in type.Methods.Where(m => m.HasBody))
         {
-            ILProcessor il = method.Body.GetILProcessor();
             foreach (Instruction instruction in method.Body.Instructions.ToArray())
             {
                 var field = instruction.Operand as FieldReference;
@@ -373,7 +372,7 @@ partial class DowngradeAssemblies
                 // C# declares a conversion on either of its two types.
                 MethodDefinition convert = to.Methods.Concat(target[rule[2]].Methods).Single(m => m.Name == "op_Implicit" &&
                     m.ReturnType.FullName == rule[3] && m.Parameters[0].ParameterType.FullName == rule[2]);
-                il.InsertBefore(instruction, il.Create(OpCodes.Call, module.ImportReference(convert)));
+                InsertBeforeRetarget(method, instruction, Instruction.Create(OpCodes.Call, module.ImportReference(convert)));
                 instruction.Operand = new FieldReference(field.Name, module.ImportReference(to), field.DeclaringType);
                 count++;
             }
@@ -492,7 +491,8 @@ partial class DowngradeAssemblies
     // - Prepend: at a method's start, run once on entry (a loop back to the first instruction
     //   does not run it again; a try block that started there still starts there).
     // - InsertBeforeRetarget: before a statement, as part of it (branches to the statement and
-    //   handler bounds there take in the inserted code); also BeforeRets.
+    //   handler bounds there take in the inserted code); also BeforeRets, and a conversion of the
+    //   value a store stores (a ternary branches to the store with its value).
     // - InsertBefore: before an instruction whose operands are already on the stack, such as a
     //   call's added arguments (branches to the anchor skip the inserted code).
     // - InsertAfter: after an instruction, with its value on the stack.

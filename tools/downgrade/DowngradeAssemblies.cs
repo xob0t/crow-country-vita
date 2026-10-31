@@ -75,10 +75,10 @@ partial class DowngradeAssemblies
     // Input assemblies never written (the roots' "-" names): CrowCompat replaces them.
     static readonly HashSet<string> excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
     static readonly List<string> problems = new List<string>();
-    // Methods a pass could not inspect because a type or method they name failed to resolve
-    // (printed as SKIPPED; the run still succeeds): the pass left them as they were, so its rule
-    // may be missing there. For MarkNativeCallbacks that means a native callback IL2CPP would
-    // reject at run time; for CacheEnumNames only a slower enum name.
+    // Methods and types a pass could not inspect because a type or method they name failed to
+    // resolve (printed as SKIPPED; the run still succeeds): the pass left them as they were, so its
+    // rule may be missing there. For MarkNativeCallbacks that means a native callback IL2CPP would
+    // reject at run time; for ReimplementedInterfaces a listing Mono may reject (TypeLoadException).
     static readonly List<string> skipped = new List<string>();
     static readonly HashSet<string> strippedTypes = new HashSet<string>();
     static ModuleDefinition compatModule;

@@ -24,9 +24,7 @@ partial class DowngradeAssemblies
             if (type.IsInterface || type.BaseType == null) continue;
             foreach (InterfaceImplementation listed in type.Interfaces.ToArray())
             {
-                TypeDefinition contract;
-                try { contract = listed.InterfaceType.Resolve(); }
-                catch (AssemblyResolutionException) { continue; }
+                TypeDefinition contract = ResolveOrSkip(listed.InterfaceType, "ReimplementedInterfaces " + type.FullName);
                 if (contract == null) continue;
                 string name = listed.InterfaceType.FullName;
                 bool own = type.Methods.Any(m => m.Overrides.Any(o => o.DeclaringType.FullName == name)) ||
@@ -90,14 +88,23 @@ partial class DowngradeAssemblies
                a.Parameters.Select(p => p.ParameterType.FullName).SequenceEqual(b.Parameters.Select(p => p.ParameterType.FullName));
     }
 
+    // A type's definition, or null; one in an assembly that isn't found is listed as SKIPPED for the pass.
+    static TypeDefinition ResolveOrSkip(TypeReference reference, string pass)
+    {
+        try { return reference.Resolve(); }
+        catch (AssemblyResolutionException e)
+        {
+            skipped.Add(pass + " " + reference.FullName + ": " + e.Message);
+            return null;
+        }
+    }
+
     // The nearest base class method that explicitly implements an interface method.
     static MethodDefinition BaseExplicitImplementation(TypeReference baseType, MethodDefinition method, string interfaceName)
     {
         for (TypeReference current = baseType; current != null;)
         {
-            TypeDefinition definition;
-            try { definition = current.Resolve(); }
-            catch (AssemblyResolutionException) { return null; }
+            TypeDefinition definition = ResolveOrSkip(current, "ReimplementedInterfaces");
             if (definition == null) return null;
             MethodDefinition found = definition.Methods.FirstOrDefault(m =>
                 m.Overrides.Any(o => o.Name == method.Name && o.DeclaringType.FullName == interfaceName));
@@ -111,9 +118,7 @@ partial class DowngradeAssemblies
     {
         for (TypeReference current = baseType; current != null;)
         {
-            TypeDefinition definition;
-            try { definition = current.Resolve(); }
-            catch (AssemblyResolutionException) { return false; }
+            TypeDefinition definition = ResolveOrSkip(current, "ReimplementedInterfaces");
             if (definition == null) return false;
             if (definition.Interfaces.Any(i => i.InterfaceType.FullName == interfaceName || Extends(i.InterfaceType, interfaceName))) return true;
             current = definition.BaseType;
@@ -123,9 +128,7 @@ partial class DowngradeAssemblies
 
     static bool Extends(TypeReference contract, string interfaceName)
     {
-        TypeDefinition definition;
-        try { definition = contract.Resolve(); }
-        catch (AssemblyResolutionException) { return false; }
+        TypeDefinition definition = ResolveOrSkip(contract, "ReimplementedInterfaces");
         return definition != null && definition.Interfaces.Any(i => i.InterfaceType.FullName == interfaceName || Extends(i.InterfaceType, interfaceName));
     }
 
@@ -195,8 +198,7 @@ partial class DowngradeAssemblies
             if (current.Methods.Any(m => m.IsVirtual && m.IsPublic && m.Name == method.Name && m.Parameters.Count == method.Parameters.Count &&
                                          m.Parameters.Select(p => p.ParameterType.FullName).SequenceEqual(method.Parameters.Select(p => p.ParameterType.FullName))))
                 return true;
-            try { current = current.BaseType == null ? null : current.BaseType.Resolve(); }
-            catch (AssemblyResolutionException) { return false; }
+            current = current.BaseType == null ? null : ResolveOrSkip(current.BaseType, "DefaultInterfaceMethods");
         }
         return false;
     }

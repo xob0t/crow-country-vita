@@ -50,14 +50,13 @@ partial class DowngradeAssemblies
         TypeDefinition type = GameType(module, "Rewired.InputManager");
         if (type == null) return 0;
         MethodDefinition detect = type.Methods.Single(m => m.Name == "DetectPlatform");
-        ILProcessor il = detect.Body.GetILProcessor();
         int platforms = 0, backends = 0;
         foreach (Instruction store in detect.Body.Instructions.ToArray())
         {
             var field = store.Operand as FieldReference;
             if (store.OpCode != OpCodes.Stfld || field == null || (field.Name != "platform" && field.Name != "scriptingBackend")) continue;
             string name = field.Name == "platform" ? "Platform" : "ScriptingBackend";
-            il.InsertBefore(store, Instruction.Create(OpCodes.Call, CompatMethod(module, "RewiredPlatform", name)));
+            InsertBeforeRetarget(detect, store, Instruction.Create(OpCodes.Call, CompatMethod(module, "RewiredPlatform", name)));
             if (field.Name == "platform") platforms++;
             else backends++;
         }
@@ -75,13 +74,12 @@ partial class DowngradeAssemblies
         if (type == null) return 0;
         MethodDefinition cctor = type.Methods.SingleOrDefault(m => m.IsConstructor && m.IsStatic);
         if (cctor == null) return 0;
-        ILProcessor il = cctor.Body.GetILProcessor();
         int count = 0;
         foreach (Instruction store in cctor.Body.Instructions.ToArray())
         {
             var field = store.Operand as FieldReference;
             if (store.OpCode != OpCodes.Stsfld || field == null || field.Name != "isKeyboard") continue;
-            il.InsertBefore(store, Instruction.Create(OpCodes.Call, CompatMethod(module, "RewiredPlatform", "StartsWithKeyboard")));
+            InsertBeforeRetarget(cctor, store, Instruction.Create(OpCodes.Call, CompatMethod(module, "RewiredPlatform", "StartsWithKeyboard")));
             count++;
         }
         return count;
