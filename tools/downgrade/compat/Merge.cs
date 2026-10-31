@@ -200,7 +200,7 @@ namespace CrowCompat
             });
         }
 
-        // -crow-cycle merge=on|off|report: now, in every loaded scene.
+        // -crow-cycle merge=on|off|merged|report: now, in every loaded scene.
         internal static void Set(string value)
         {
             for (int i = 0; i < SceneManager.sceneCount; i++)
@@ -214,7 +214,7 @@ namespace CrowCompat
         {
             try
             {
-                if (value == "off" || value == "back") Switch(scene, false);
+                if (value == "off") Switch(scene, false);
                 else if (value == "merged") Switch(scene, true);
                 else if (value == "report" || value == "on")
                 {
