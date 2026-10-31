@@ -9,13 +9,14 @@ using UnityEngine;
 // layer over the pool, which fills the screen in the boss fight: the three cost the GPU about 8 ms of its 39 (hiding
 // two of them, 4 ms). Blending one colour k times over the same pixels is the same as blending it once with alpha
 // 1 - (1 - a)^k, so here renderers with the same mesh and one see-through material, under the same parent at the same
-// local position and rotation, with scales within StackScale of the largest, become one: the largest keeps drawing,
+// local rotation and position (within Same of their size: Pool's rings are 7 mm apart in height, 3 m across), with
+// scales within StackScale of the largest, become one: the largest keeps drawing,
 // with a copy of the material whose colour has that alpha, and the others are switched off (their objects stay, for
 // the scripts that name them). The only difference is at the edges: the largest's band beyond the others (2% of
 // Pool's rings) has the stack's alpha, not one layer's. From CROW_STACK_FOLD (common.BUILD_SWITCHES): on or off.
 class CrowStackedLayers : IProcessSceneWithReport
 {
-    const float StackScale = 0.025f, Same = 1e-3f;
+    const float StackScale = 0.025f, Same = 0.01f;
 
     public int callbackOrder
     {
@@ -39,7 +40,8 @@ class CrowStackedLayers : IProcessSceneWithReport
             while (left.Count > 1)
             {
                 MeshRenderer first = left[0];
-                var stack = left.Where(r => Close(r.transform.localPosition, first.transform.localPosition) &&
+                float size = Mathf.Max(Mathf.Abs(first.transform.localScale.x), Mathf.Abs(first.transform.localScale.y), Mathf.Abs(first.transform.localScale.z));
+                var stack = left.Where(r => (r.transform.localPosition - first.transform.localPosition).magnitude <= Same * size &&
                                             Quaternion.Angle(r.transform.localRotation, first.transform.localRotation) < 0.1f).ToList();
                 left.RemoveAll(stack.Contains);
                 MeshRenderer largest = stack.OrderByDescending(r => r.transform.localScale.sqrMagnitude).First();
@@ -59,11 +61,6 @@ class CrowStackedLayers : IProcessSceneWithReport
             }
         }
         if (folded > 0) Debug.Log("DOWNGRADE_STACK " + scene.name + " folded=" + folded + " off=" + off);
-    }
-
-    static bool Close(Vector3 a, Vector3 b)
-    {
-        return (a - b).sqrMagnitude < Same * Same;
     }
 
     // Each axis of a within StackScale of b's, with the same signs.
