@@ -186,7 +186,7 @@ namespace CrowCompat
                     }
                     if (Time.realtimeSinceStartup - shown < hold) return;
                 }
-                ScreenCapture.CaptureScreenshot(name);
+                Diag.Shot(name);  // on the PS Vita too (ScreenCapture writes nothing there)
                 Debug.Log("CROW_AB saved " + name + " (" + set + ")");
                 if (picture == sets.Length) Debug.Log("CROW_AB done");
             }

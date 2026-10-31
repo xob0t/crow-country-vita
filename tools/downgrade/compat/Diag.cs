@@ -196,7 +196,7 @@ namespace CrowCompat
         static float lastUpdateAt = -1f;
         static Diag probe;
 
-        // A screenshot of the frame as shown (-crow-shot, -crow-pad-press's shot). On the PS Vita
+        // A screenshot of the frame as shown (-crow-shot, -crow-pad-press's shot, -crow-ab). On the PS Vita
         // ScreenCapture writes nothing (and vitacompanion's screenshot can run out of memory), so there the
         // frame is read back at its end and saved as a PNG (960x544 RGB, about 1.5 MB while it is made).
         internal static void Shot(string path)

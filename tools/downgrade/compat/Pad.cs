@@ -44,8 +44,8 @@ using UnityEngine.SceneManagement;
 //                                  the start (or after -crow-pad-press-from <scene> first loads), held for s
 //                                  seconds (0.15): cross, circle, square, triangle, l, r, select, start, up,
 //                                  down, left, right joined by '+', and lx=, ly=, rx=, ry= as Unity's axis values;
-//                                  shot: a screenshot then, into -crow-pad-shots <folder> (pad-<n>-<t>.png; not on
-//                                  the PS Vita, which writes no ScreenCapture file)
+//                                  shot: a screenshot then, into -crow-pad-shots <folder> (pad-<n>-<t>.png; on
+//                                  the PS Vita too: Diag.Shot)
 //   -crow-pad-log                  CROW_PAD every 10 s: the mode, whether the reader serves, its time a frame,
 //                                  its rebuilds; and each table it builds (CROW_PAD maps)
 // Part of CrowCompat; see Compat2018.cs.
