@@ -291,6 +291,7 @@ namespace CrowCompat
 
             public bool Valid { get { return Shared != null ? Shared.Alive : Filter != null; } }
             public bool On { get { return Shared != null ? Shared.Routed : Filter.enabled; } }
+            public object Key { get { return Shared != null ? (object)Shared : Filter; } }
 
             public void Set(bool on)
             {
@@ -391,8 +392,23 @@ namespace CrowCompat
             Debug.Log("CROW_AUDIO filters off: " + string.Join(",", types.ToArray()) + (idleOnly ? " while their source is idle, at most " + max + " on" : ""));
         }
 
+        // Each filter's and group's OffAt across a find, the only record of a tail: a reverb whose source stopped
+        // keeps its decay.
+        static readonly Dictionary<object, float> tails = new Dictionary<object, float>();
+
+        static Entry Carried(Entry entry)
+        {
+            float offAt;
+            if (tails.TryGetValue(entry.Key, out offAt)) entry.OffAt = offAt;
+            return entry;
+        }
+
         static void Find()
         {
+            tails.Clear();
+            float now = Time.realtimeSinceStartup;
+            foreach (Entry entry in entries)
+                if (entry.Valid && entry.OffAt > now) tails[entry.Key] = entry.OffAt;
             entries.Clear();
             var list = new List<Type>();
             bool all = types.Contains("all");
@@ -409,7 +425,7 @@ namespace CrowCompat
             {
                 reverbs = Resources.FindObjectsOfTypeAll<AudioReverbFilter>();
                 foreach (SharedReverb.Group group in SharedReverb.Find(reverbs))
-                    entries.Add(new Entry { Shared = group, Tail = group.Tail });
+                    entries.Add(Carried(new Entry { Shared = group, Tail = group.Tail }));
             }
             foreach (Type type in list)
                 foreach (UnityEngine.Object found in type == typeof(AudioReverbFilter) ? reverbs : Resources.FindObjectsOfTypeAll(type))
@@ -422,8 +438,9 @@ namespace CrowCompat
                     if (source == null && idleOnly) continue;
                     var reverb = filter as AudioReverbFilter;
                     if (reverb != null && SharedReverb.Owns(reverb)) continue;  // its group's entry above
-                    entries.Add(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f });
+                    entries.Add(Carried(new Entry { Filter = filter, Source = source, Tail = reverb != null ? reverb.decayTime + 0.3f : 0.1f }));
                 }
+            tails.Clear();  // no filter held between finds
             // The listener Unity hears with: the one enabled (none or two: no listener, so no source counts as silent).
             listener = null;
             int enabled = 0;
