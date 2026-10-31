@@ -247,13 +247,13 @@ namespace CrowCompat
             bool titleUp = sceneToLoad != null && !sceneRequested && now - lastLoad >= 2f && SceneManager.GetActiveScene().name == Scenes.Title;
             if (sceneToLoad != null && !sceneRequested && (titleUp || now - started >= 180f))
             {
-                MaraScene.Request();  // the player's scene, which the title would have loaded (Loading.cs)
+                MaraScene.Request();  // the player's scene, which the title would have loaded (SceneFlow.cs)
                 if (MaraScene.Settled)
                 {
                     sceneRequested = true;
                     Debug.Log("CROW_DIAG loading " + sceneToLoad);
                     Fight.BeforeLoad();  // the globals the area's FSMs read as it starts
-                    if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (Loading.cs)
+                    if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (SceneFlow.cs)
                 }
                 else if (!waitLogged)
                 {

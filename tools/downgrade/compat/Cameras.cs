@@ -414,7 +414,7 @@ namespace CrowCompat
             culling = false;
         }
 
-        // The mask to give a camera back after a load's gap (Loading.cs SceneGap's drain, which culls nothing
+        // The mask to give a camera back after a load's gap (SceneFlow.cs SceneGap's drain, which culls nothing
         // until the old assets are gone): while a menu culls the camera, the mask the menu saved, and the gap
         // gives that back instead of the menu's. A load from the pause menu (Quit to Title) used to leave the
         // gap holding layer 5 only and the menu nothing to give back: in the next area the Main Camera drew
@@ -461,7 +461,7 @@ namespace CrowCompat
             if (covered && !culling)
             {
                 int mask = camera.cullingMask;
-                if (mask == 0 || mask == MenuLayers) return;  // a load's gap culls nothing (Loading.cs): leave it
+                if (mask == 0 || mask == MenuLayers) return;  // a load's gap culls nothing (SceneFlow.cs): leave it
                 saved = mask;
                 camera.cullingMask = MenuLayers;
                 culling = true;
