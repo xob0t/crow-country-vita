@@ -27,6 +27,7 @@ from common import (
     CSC,
     EDITORS,
     EXTERNAL,
+    GOG_GAME,
     ROOT,
     SOURCE_VERSION,
     STEAM,
@@ -105,13 +106,14 @@ DOTNET = EXTERNAL / 'dotnet'
 GAME_DIR = STEAM_GAME.name
 GAME_EXE = 'Crow Country.exe'
 GAME_DATA = 'Crow Country_Data'
-# The game's GOG product ID, and the folder GOG installs it in by default.
+# The game's GOG product ID (GOG_GAME, in common, is the folder GOG installs it in by default).
 GOG_ID = '1109825617'
-GOG_GAME = Path(r'C:\GOG Games\Crow Country')
 # The game code the rules are written for, by the SHA-256 of Crow Country_Data/Managed/Assembly-CSharp.dll:
-# the Steam release of build 18838972. Another release may work, but the rules weren't checked on it.
+# the Steam and GOG releases of the game's version 1.0.1, whose code differs only in the store it is built for
+# (Steamworks or Galaxy, both stubbed). Another release may work, but the rules weren't checked on it.
 GAME_CODE = {
     'cc90ced94d880c2d3b2e4defa8e150c726cd4f65d02e541f23c48c864d756997': 'Steam build 18838972',
+    'c2583cb7a896399a022af5928156f6dd5dd23d1be6007b04f8be7beb6283ff3f': 'GOG build 58711154377035024',
 }
 
 # Where setup.py extracts an SDK archive by default; the SDK is its sdk folder.
@@ -349,11 +351,16 @@ def find_game():
     return steam_game() or gog_game()
 
 
-def steam_build(game: Path):
-    """The Steam build ID of the install in game, from its library's appmanifest, or None."""
-    text = read_text(game.parent.parent / f'appmanifest_{STEAM_APP_ID}.acf')
-    match = re.search(r'"buildid"\s+"(\d+)"', text or '')
-    return match.group(1) if match else None
+def store_build(game: Path):
+    """The install's store build ('Steam build 18838972', from its library's appmanifest; 'GOG build ...',
+    from GOG's goggame-<id>.info in the game's folder), or None."""
+    for store, path, pattern in (
+        ('Steam', game.parent.parent / f'appmanifest_{STEAM_APP_ID}.acf', r'"buildid"\s+"(\d+)"'),
+        ('GOG', game / f'goggame-{GOG_ID}.info', r'"buildId":\s*"(\d+)"'),
+    ):
+        if match := re.search(pattern, read_text(path) or ''):
+            return f'{store} build {match[1]}'
+    return None
 
 
 def sdk_version(sdk: Path):
@@ -498,13 +505,13 @@ def check_game(game: Path):
         return Check(name, False, f'{game}: no {GAME_DATA}/Managed/Assembly-CSharp.dll (not a Mono build)', fix)
     release = GAME_CODE.get(file_hash(code))
     if release is None:
-        build = steam_build(game)
+        build = store_build(game)
         return Check(
             name,
             False,
-            f'{game} ({f"Steam build {build}, " if build else ""}Unity {version}): another release than the '
+            f'{game} ({f"{build}, " if build else ""}Unity {version}): another release than the '
             f'rules were written for ({", ".join(GAME_CODE.values())}); it may build, but nothing checked it',
-            'update the game, or have Steam verify its files',
+            'update the game, or have Steam or GOG Galaxy verify its files',
             required=False,
         )
     return Check(name, True, f'{game} ({release}, Unity {version})')

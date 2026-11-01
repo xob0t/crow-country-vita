@@ -13,7 +13,7 @@ uv run build.py --windows       # a Windows player: builds/crow-2018.2.19f1/Crow
 
 ## 1. Set up
 
-1. Install Crow Country from Steam, updated to the current release, and uv:
+1. Install Crow Country from Steam or GOG, updated to the current release, and uv:
 
    ```powershell
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
@@ -40,7 +40,7 @@ The setup script installs what is missing and skips what is already there, so yo
 - runs `uv sync` for the Python packages;
 - installs the Unity 2018.2.19f1 editor from Unity's CDN into `%LOCALAPPDATA%\Unity\Editors\2018.2.19f1`, with `--vita` its PS Vita module and with `--il2cpp` its Windows IL2CPP module;
 - downloads AssetRipper 2.0.0 into `tools/external/assetripper-2.0.0`, the .NET 8 SDK (8.0.425) into `tools/external/dotnet`, and Mono.Cecil 0.10.0-beta6 from NuGet;
-- finds the game in your Steam libraries, or else a GOG install, and offers to set `CROW_GAME` if it is not in Steam's default folder;
+- finds the game in your Steam libraries, or else a GOG install, and offers to set `CROW_GAME` if it is not in Steam's or GOG's default folder;
 - with `--vita`, installs Sony's PS Vita SDK (downloaded from archive.org, or your copy with `--vita-sdk`), checks it and sets `SCE_PSP2_SDK_DIR` for your user, then installs the SDK's Target Manager Server and Publishing Tools, which the editor's PS Vita build runs, and sets `SCE_ROOT_DIR`;
 - removes the editor's license checks with unigate, then starts it once in batch mode to check that it runs (see [The Unity license](#the-unity-license));
 - ends with the doctor's checklist (see [Checking the setup](#checking-the-setup)).
@@ -97,7 +97,7 @@ The doctor prints a checklist of everything the targets need, with the command t
 These are the steps the script takes, if you prefer to do them yourself:
 
 - `uv sync` in the repository installs the Python packages from `uv.lock`.
-- The game: the pipeline looks in `C:\Program Files (x86)\Steam\steamapps\common\Crow Country`. Set `CROW_GAME` or pass `--game <path>` if yours is elsewhere. The rules were written for Steam build 18838972 (Unity 2022.3.49f1); the doctor compares the hash of `Crow Country_Data\Managed\Assembly-CSharp.dll`.
+- The game: the pipeline looks in `C:\Program Files (x86)\Steam\steamapps\common\Crow Country`, then in GOG's `C:\GOG Games\Crow Country`. Set `CROW_GAME` or pass `--game <path>` if yours is elsewhere. The rules were written for the game's version 1.0.1 (Unity 2022.3.49f1): Steam build 18838972 or GOG build 58711154377035024; the doctor compares the hash of `Crow Country_Data\Managed\Assembly-CSharp.dll`. The two releases have the same assets; their code differs only in the store it signs in to, Steam's or GOG Galaxy's, and the pipeline stubs both (`STUBBED_ON` in `pipeline.py`), so they build the same game.
 - [AssetRipper](https://github.com/AssetRipper/AssetRipper) 2.0.0: extract the release's `AssetRipper_win_x64.zip` to `tools\external\assetripper-2.0.0`.
 - The .NET 8 SDK: extract [dotnet-sdk-8.0.425-win-x64.zip](https://builds.dotnet.microsoft.com/dotnet/Sdk/8.0.425/dotnet-sdk-8.0.425-win-x64.zip) to `tools\external\dotnet`. The pipeline builds USCSandbox, the shader decompiler, with it.
 - Unity **2018.2.19f1**: `UnitySetup64-2018.2.19f1.exe /S /D=%LOCALAPPDATA%\Unity\Editors\2018.2.19f1` ([installer](https://download.unity3d.com/download_unity/06990f28ba00/Windows64EditorInstaller/UnitySetup64-2018.2.19f1.exe)).
@@ -129,7 +129,7 @@ The stages run under the `vita-build` (or `pc-build`) lock of `tools/downgrade/l
 | Option | Effect |
 | --- | --- |
 | `--vita`, `--windows`, `--il2cpp` | The targets. Without any, `--vita`. |
-| `--game <folder>` | The game's folder, instead of `CROW_GAME` or the Steam default. |
+| `--game <folder>` | The game's folder, instead of `CROW_GAME` or the Steam or GOG default. |
 | `--vita-sdk <path>` | Passed to setup: your own PS Vita SDK. |
 | `--skip-setup` | Go straight to the pipeline. |
 | `--from <stage>` | Start at `project`, `build` or `package`, when the earlier stages are done. |
@@ -250,7 +250,7 @@ Install `builds/crow-2018.2.19f1-vita.vpk` with VitaShell on a console with HENk
 ## When something fails
 
 - **setup**: a download that fails is retried; a hash or signature that doesn't match stops the script and deletes the file. Run it again.
-- **The game check**: "another release than the rules were written for" means `Assembly-CSharp.dll` differs from Steam build 18838972's. It may build; if a rule stops in `project`, update the game or have Steam verify its files.
+- **The game check**: "another release than the rules were written for" means `Assembly-CSharp.dll` differs from that of Steam build 18838972 and GOG build 58711154377035024. It may build; if a rule stops in `project`, update the game or have Steam or GOG Galaxy verify its files.
 - **`rip`**: "AssetRipper did not start" or "produced no project": check `tools/external/assetripper-2.0.0` and `artifacts/downgrade/assetripper.log`. A run of `rip` alone always exports again.
 - **`project`**: "No .NET 8 SDK" means `tools/external/dotnet` is missing: run setup. A rewriter failure names the assemblies that don't resolve; its log is `artifacts/downgrade/rewrite-<version>-<platform>.log`.
 - **`build`**: the editor's log is `artifacts/downgrade/build-<version>-<platform>[-il2cpp].log`, and the pipeline prints a summary of it. A good build has 0 errors (`DOWNGRADE_BUILD Succeeded errors=0`): the stage stops on any error in the build's report or any failed scene step of the editor scripts, and lists them (the report's are also in `<player>.messages.txt` beside the player). "A Unity editor has ... open" means an editor still has the project open: close it. If the editor stops at once, check the license (`uv run tools/setup.py doctor --license`). If IL2CPP or the PS Vita build steps fail, check the SDK with `uv run tools/setup.py doctor --target vita`.
