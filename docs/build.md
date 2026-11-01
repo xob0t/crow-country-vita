@@ -136,7 +136,37 @@ The stages run under the `vita-build` (or `pc-build`) lock of `tools/downgrade/l
 | `--wait <seconds>` | How long to wait for the build lock. |
 | `--dry-run` | Print what would run. |
 
-The stages can also be run one at a time; the [README](../README.md) lists them with the quicker loops for code changes (`code`, `link`, `loadcheck`, `quickcode`).
+### Running the stages one at a time
+
+```powershell
+uv run tools/downgrade/pipeline.py rip                       # AssetRipper export, about 4 minutes
+uv run tools/downgrade/pipeline.py code                      # rewrite the game's assemblies, list what fails
+uv run tools/downgrade/pipeline.py link --platform vita      # Unity's linker and IL2CPP's conversion on it, in a minute
+uv run tools/downgrade/pipeline.py project --platform vita   # assemble work/crow-2018.2.19f1-vita
+uv run tools/downgrade/pipeline.py build --platform vita     # import and build with the Unity editor
+uv run tools/downgrade/pipeline.py package                   # builds/crow-2018.2.19f1-vita.vpk
+```
+
+For Windows players, `project` and `build` take `--platform windows` (and `build` `--backend il2cpp`). `loadcheck` loads every rewritten type and compiles every method under 2018's Mono, in a copy of the Windows player. The players take `-crow-*` flags for measurements (`tools/downgrade/compat/Diag.cs`), and `tools/downgrade/vitalike.py` runs the Windows IL2CPP player at about the PS Vita's CPU speed.
+
+For quicker rounds on the PS Vita:
+
+```powershell
+uv run tools/downgrade/pipeline.py quickcode                 # code changes only: a new IL2CPP module in the last build, in about 2 minutes
+uv run tools/downgrade/vita.py sync                          # upload what changed to the console
+uv run tools/downgrade/pipeline.py build --scenes "Title,Station Square"   # a test build of a few scenes
+uv run tools/downgrade/vita.py --build builds/crow-2018.2.19f1-vita-scenes install
+```
+
+`quickcode` rewrites the assemblies and replays the last full build's UnityLinker and IL2CPP steps, without the editor. The build's scenes and assets keep the scripts' fields as they were, so it stops when a type the data serializes changed (a field, a new MonoBehaviour or ScriptableObject) or a `[RuntimeInitializeOnLoadMethod]` came or went, and warns when the asset rules or the build script changed since that build: those need `project` and `build` (`--force` tries anyway). `build --scenes` builds the first scene (Logos) and the named ones only, into a folder of its own (`builds/crow-2018.2.19f1-vita-scenes`, the scenes listed beside it), and leaves the full build, its log and what `quickcode` needs alone. It's for tests: the game loads scenes by name, so loading one that was left out fails. `build --development` makes Unity's development player.
+
+`project` keeps what it read from the export in `work/scan-cache` and leaves unchanged files with their dates, so the editor imports only what changed; a rerun takes a minute or two. Every stage writes in `work/`, `builds/` or `artifacts/`; when several jobs share the machine, run them under a lock, one pipeline at a time (`tools/downgrade/lock.py` has the details):
+
+```powershell
+uv run tools/downgrade/lock.py run vita-build "me: what for" --wait 1800 -- uv run tools/downgrade/pipeline.py quickcode
+```
+
+`--game <folder>` reads the game from another folder (or set `CROW_GAME`). The console's address comes from `CROW_VITA_HOST`, or `DRIFTER_VITA_HOST` if you set that up for The Drifter.
 
 ### Build switches
 
