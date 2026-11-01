@@ -69,15 +69,18 @@ WORK = ROOT / 'work'
 BUILDS = ROOT / 'builds'
 ARTIFACTS = ROOT / 'artifacts' / 'downgrade'
 EDITORS = Path(os.environ['LOCALAPPDATA']) / 'Unity' / 'Editors'
-# Steam's default install folder, and the game's folder in its library.
+# Steam's default install folder, and the game's folder in its library; the folder GOG installs it in.
 STEAM = Path(r'C:\Program Files (x86)\Steam')
 STEAM_GAME = STEAM / 'steamapps' / 'common' / 'Crow Country'
+GOG_GAME = Path(r'C:\GOG Games\Crow Country')
 
 
 def default_game():
-    """The game installation pipeline.py reads (--game overrides it) and the test tools copy saves from:
-    CROW_GAME for another install folder, else Steam's default folder."""
-    return Path(setting('CROW_GAME') or STEAM_GAME)
+    """The game installation pipeline.py reads (--game overrides it): CROW_GAME for another install folder,
+    else Steam's default folder, else GOG's when only that one has the game."""
+    if game := setting('CROW_GAME'):
+        return Path(game)
+    return next((g for g in (STEAM_GAME, GOG_GAME) if (g / 'Crow Country.exe').exists()), STEAM_GAME)
 
 
 DEFAULT_GAME = default_game()

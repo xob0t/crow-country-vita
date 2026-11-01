@@ -111,7 +111,7 @@ def main():
     parser.add_argument('--vita', action='store_true', help='the PS Vita VPK (the default without --windows/--il2cpp)')
     parser.add_argument('--windows', action='store_true', help='a Windows player with Mono')
     parser.add_argument('--il2cpp', action='store_true', help='a Windows player with IL2CPP (as the Vita runs code)')
-    parser.add_argument('--game', metavar='FOLDER', help="Crow Country, when it isn't in Steam's default folder")
+    parser.add_argument('--game', metavar='FOLDER', help="Crow Country, if not in Steam's or GOG's default folder")
     parser.add_argument('--vita-sdk', metavar='PATH', help='your own PS Vita SDK, an archive or a folder')
     parser.add_argument('--skip-setup', action='store_true', help='go straight to the pipeline')
     parser.add_argument(

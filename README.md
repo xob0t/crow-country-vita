@@ -10,7 +10,7 @@ Playable on the PS Vita. [docs/status.md](docs/status.md) has the details, the m
 
 ## Building
 
-With Crow Country installed from Steam and [uv](https://docs.astral.sh/uv/), in the repository:
+With Crow Country installed from Steam or GOG and [uv](https://docs.astral.sh/uv/), in the repository:
 
 ```powershell
 uv run build.py              # set up, then build builds/crow-2018.2.19f1-vita.vpk

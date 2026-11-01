@@ -46,9 +46,9 @@ from common import (
     EDITORS,
     EXTERNAL,
     ROOT,
-    STEAM_GAME,
     TARGET,
     WORK,
+    default_game,
     download,
     finish_deleting,
     mono_cecil,
@@ -422,8 +422,8 @@ class Setup:
         if found is None:
             self.say('game', 'Crow Country is in no Steam library or GOG install; install it, or pass --game <folder>')
             self.notes.append('Install Crow Country, or: uv run tools/setup.py --game <folder>')
-        elif os.path.normcase(str(found)) == os.path.normcase(str(STEAM_GAME)):
-            self.say('game', f"already found at Steam's default folder ({STEAM_GAME})")
+        elif os.path.normcase(str(found)) == os.path.normcase(str(default_game())):
+            self.say('game', f'already found in {found}, where the pipeline looks for it')
         else:
             self.say('game', f'found in {found}')
             self.set_env('game', 'CROW_GAME', found, ask=True)
