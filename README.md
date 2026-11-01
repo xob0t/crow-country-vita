@@ -6,7 +6,7 @@ There are no game files in this repository. You bring your own copy, and the pip
 
 ## Where it stands
 
-The game is fully playable from start to finish, at 30 fps nearly everywhere, the final boss included.
+The game is fully playable from start to finish, at 30 fps nearly everywhere.
 
 - Loading a large area takes a while, up to about 20 seconds.
 - The biggest fights can drop a little below 30 fps.
