@@ -1169,6 +1169,7 @@ namespace CrowCompat
                 }
                 else GunKill(enemy);
                 killed++;
+                Debug.Log("CROW_FIGHT killed " + enemy.Root.name);
                 enemy.Forced = true;
                 victim = enemy;
                 victimCheck = Time.realtimeSinceStartup + 1.5f;
