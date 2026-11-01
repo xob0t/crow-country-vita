@@ -22,7 +22,7 @@ You need Windows 10 or 11, Crow Country from Steam or GOG, about 20 GB of free d
 The build needs Unity's old editor and Sony's PS Vita SDK, so `build.py` installs these on your PC the first time it runs:
 
 - **Unity 2018.2.19f1** with its PS Vita module, in `%LOCALAPPDATA%\Unity\Editors` (about 4 GB). The editor comes from Unity's servers, and the PS Vita module from a copy on archive.org, because Unity no longer offers it.
-- **A patch to that editor's license check**, made with [unigate](https://github.com/xob0t/unigate), so you don't need a Unity license. If you have one, run `uv run build.py --no-unigate` to keep the check.
+- **A patch to that editor's license check**, made with [unigate](https://github.com/xob0t/unigate), so you don't need a Unity license.
 - **Sony's PS Vita SDK 3.570**, from archive.org, in `C:\vitasdk` (0.6 GB). Setup sets the `SCE_PSP2_SDK_DIR` variable for your user. To use your own copy of the SDK instead, pass `--vita-sdk <archive or folder>`.
 - **The SDK's Target Manager Server and Publishing Tools**, which the editor's PS Vita build runs. Their installers need administrator rights, so Windows asks first. If Publishing Tools needs it, setup also turns on the Windows feature .NET Framework 3.5. Setup sets `SCE_ROOT_DIR` to point at them.
 - **AssetRipper 2.0.0, the .NET 8 SDK and Mono.Cecil**, in `tools\external` inside the extracted folder.
