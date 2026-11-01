@@ -16,7 +16,7 @@ With Crow Country installed from Steam or GOG and [uv](https://docs.astral.sh/uv
 uv run build.py              # set up, then build builds/crow-2018.2.19f1-vita.vpk
 ```
 
-`build.py` installs what is missing (the Unity 2018.2.19f1 editor, AssetRipper, the .NET 8 SDK and Sony's PS Vita SDK), then builds. [docs/build.md](docs/build.md) has the details and what to do when something fails; [docs/vita.md](docs/vita.md) covers installing the VPK on the console.
+`build.py` installs what is missing (the Unity 2018.2.19f1 editor, AssetRipper, the .NET 8 SDK and Sony's PS Vita SDK), then builds. [docs/build.md](docs/build.md) has the details and what to do when something fails. [docs/vita.md](docs/vita.md) covers installing the VPK on the console.
 
 ## License
 
