@@ -1,85 +1,97 @@
 # Status
 
-Where the port stands now: what works, the PS Vita's defaults, the open issues and the next steps.
-[status-log.md](status-log.md) is the dated record behind it, with every measurement, oldest first.
-New entries go at the end of status-log.md, one per change; the coordinator appends them and updates this file where a change moves the current state.
-This file has one sentence per line, so a change shows as the lines it touches.
+What works on the PS Vita, how fast it runs, what the build changes for it, and what is still open.
+[status-log.md](status-log.md) is the dated record behind this page, with every measurement, oldest first.
+Each change adds one entry at the end of status-log.md, and this page changes only when the current state does.
+Prose here is one sentence per line, so a diff shows only the sentences that changed.
 
 ## What works
 
-The pipeline builds the PS Vita VPK and the Windows Mono and IL2CPP players from the Steam game ([build.md](build.md)).
-On the console the game boots to the title, starts a new game and plays through the areas tried so far: every one of the 30 areas with the most data ran in chains of 29-38 loads without an exception or a crash (status-log: Every big area in long chains, 23 Oct).
-Saves are written to `ux0:data/CrowCountry`, and a save loads from the title, after Quit to Title and after a relaunch (Black screen after Quit to Title, 21 Oct; Long session on the combined build, 22 Oct).
-Numbers and dates are written in the invariant culture whatever the console's system language is (25 Oct).
-Underground's elevator rides free Mara as the game does, and the areas' pre-combined floors and walls are drawn on every visit, not only the first (28 Oct).
-The pad drives the game through CrowCompat's pad reader, with PlayStation prompts and the console's menus (no Quit on the title, no Screen entry).
-Audio keeps up with real time: the DSP clock ran at 0.99-1.01 of the wall clock in the 22 Oct soak's fights, with short dips after some loads.
-The Windows players boot, load areas and draw as the original does; the test tools run them hidden and muted ([vita.md](vita.md#fight-benchmark)).
+The pipeline builds the PS Vita VPK and the Windows Mono and IL2CPP players from the Steam or the GOG release ([build.md](build.md)).
+The game has been played through to the end on the console.
+Every one of the 30 areas with the most data ran in chains of 29-38 loads with no exception and no crash.
+Saves go to `ux0:data/CrowCountry`, and a save loads from the title, after Quit to Title and after a relaunch.
+Numbers and dates use the invariant culture, whatever the console's system language is.
+The pad drives the game through CrowCompat's pad reader, with PlayStation button prompts and the console version's menus.
+Audio keeps up with real time. In fights the DSP clock runs at 0.99-1.01 of the wall clock.
+The Windows players boot, load areas and draw as the original does, and the test tools run them hidden and muted ([vita.md](vita.md#fight-benchmark)).
 
-Frame time on the console (30 fps is 33.4 ms; the latest measurement of each):
+## Frame time on the console
+
+The game is capped at 30 fps, which is 33.4 ms a frame.
+The table gives the latest measurement of each place.
 
 | Where | Frame | Measured |
 | --- | --- | --- |
-| Roadside, Mansion, Driving Intro, standing and walking | 33.4 ms (30 fps) | 15 Oct, Roadside again 20 Oct |
+| Roadside, Mansion, Driving Intro, standing and walking | 33.4 ms (30 fps) | 15-20 Oct |
 | Crypt, Corridor S, Corridor D | 33.5 ms | 24 Oct |
-| Corridor B at the user's view, the Save room | 33.4 ms | 25-26 Oct |
-| Ocean Kingdom fight | 34.2 ms | 22 Oct |
-| Haunted Hilltop fight | 35.7 ms | 22 Oct |
-| Fairy Forest fight | 37.2 ms | 20 Oct |
-| Station Square fight (the benchmark) | 38.0-38.9 ms (about 26 fps) | 22-26 Oct |
-| Pool, the final boss (its benchmark) | 33.4 ms (30 fps; 29.3-31.0 with vsync off; 58.3 before) | 31 Oct |
-| Pool before the boss, at the pool's rim facing it | 33.4 ms (30 fps; the user saw 15) | 31 Oct |
+| Corridor B, the Save room | 33.4 ms | 25-26 Oct |
+| Pool before the boss, looking into the pool | 33.4 ms (27.2 with the cap off) | 1 Nov |
+| Pool, the final boss fight | 33.4 ms (29.3-29.9 with the cap off) | 1 Nov |
+| Fairy Forest fight | 27-33 ms with the cap off | 1 Nov |
+| Haunted Hilltop fight | 41 ms in its first 10 s, then 25-33, cap off | 1 Nov |
+| Station Square fight (the benchmark) | 44 ms in its first 10 s, then 24-35, cap off | 1 Nov |
 
-Free main memory during an area load is 33 MB or more everywhere but three areas: Haunted Hilltop 12-54 MB (once 8), Ocean Kingdom 11-36, Arcade 14-31 (23 Oct).
+The CPU limits the two slow fights. Their frame time falls as enemies die, and the GPU clock makes no difference there.
+The GPU limits Pool. At the stock GPU clock of 166 MHz it runs at 29 fps before the boss and 25-26 fps in the fight.
+
+Free main memory during an area load is 33 MB or more everywhere except three areas: Haunted Hilltop 12-54 MB (once 8), Ocean Kingdom 11-36 and Arcade 14-31.
 Each recovers to 37 MB or more once loaded.
 
-## The PS Vita's defaults
+## What the build changes for the PS Vita
 
-Each default is a build setting or a CrowCompat flag's PS Vita value; [vita.md](vita.md#probe-flags) has the flag that turns it back.
-The shader patcher has 1 MB of USSE memory, twice Unity's fixed 512 KB (`pipeline.patcher_usse`, 512 KB more main memory).
-The CPU runs at 444 MHz and the GPU at 222 MHz (PSVshell's 500 MHz CPU is left alone).
-Frames are capped at 30 fps (vSyncCount 2): an even 30 where a frame fits in 33 ms.
-Graphics jobs are on (`CROW_GFX_JOBS=on` writes them into `boot.config`), with Unity's two job workers at the render thread's priority on CPU 1.
-Every light draws in one pass through CrowVita/Lit: up to 4 key lights per pixel chosen by what they give the ground around Mara, one fill light, the rest per vertex.
-Shadows are hard, Low resolution, 12 m, and only the player casts them.
-The camera films at 550x351 and the camera effect runs at half size, in three passes written for the SGX543.
-Every opaque lit material draws a depth layer back, so the decals, writing and overlays laid a few millimetres over it don't fight it (`asset_rules.vita_lit_bake`).
-Particle noise is Unity's low-quality 1D noise.
-Physics steps once per 30 fps frame, at most two steps a frame.
-The build merges static geometry, rebuilds the enemies (atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
-The small wobbling parts of the bosses' bodies (non-enemy rigidbodies) are held still and merged like an enemy's: Pool's boss, Crypt's Wader, Control Room's Shambler, Corridor A's Scamper.
-Every mesh's exactly equal vertices are made one at build time (51,443 meshes, 7.86 -> 5.28 million vertices; the areas' scenes 15-37% fewer), with nothing on screen changed.
-The meshes' triangles are in vertex cache order and the textures only materials use have mipmaps (760; Fairy Forest's tree fairy note no longer shimmers). Optimize Mesh Data was tried and dropped: Pool's ground rocks flickered with it, and it took the build's scenes from 13 to 59 minutes. In Pool, the rock placed 1,056 times is a convex hull (48 vertices -> 18), its faces inside a neighbour left out, and the meshes drawn only with seamless textures have one vertex per position (the roots, 14,310 -> 4,726 each); see-through layers stacked at one place are drawn once with the stack's alpha (Pool's three edge rings), and Pool has at most 2 key lights.
-The fights' cuts are on: Blob trails off, held enemies frozen, decoration and enemy cosmetics at reduced rates.
-PlayMaker's FSM updates that would do nothing are skipped, and its small methods are compiled into the FSM code.
-The gameplay canvas's and the camera rig's switched-off parts are parked out of their hierarchies.
-Area loads go through an empty scene with the old area's assets freed first, unless the area's load is known to fit beside them with 48 MB of main memory to spare (a revisit; the loads into Haunted Hilltop and Ocean Kingdom take too much to qualify).
-The GC heap is capped to leave Unity 16 MB, its table of pinned handles is grown at the start, and the allocator keeps its free blocks sorted.
-A collection runs half a second into a pause once 2 MB have been allocated, so fewer come in play (Boehm otherwise collects after every 5.5-6.6 MB, a 0.75-1 s stop).
-MeshCombineStudio's mesh caches are released once every combiner has combined.
-AudioSources idle for 2 s are disabled, and no reverb plays: with one on, FMOD's mixer fell behind (a crackle) as soon as other sounds started, in nearly every area that has one.
-The game runs in its console mode (Control Mode Console 1) with the Switch's platform animations.
+Each item is a build switch ([build.md](build.md#build-switches)) or a CrowCompat flag's PS Vita default ([vita.md](vita.md#probe-flags)), and either can turn it back.
+
+Clocks, threads and memory:
+
+- CrowClock, a small native library inside the game's package (`Media/Plugins/CrowClock.suprx`), sets the CPU to 444 MHz and the GPU to 222 MHz. It only raises the CPU clock, so a higher PSVshell setting stays. It is not a system plugin and nothing outside the game sees it.
+- Unity's two graphics job workers run at the render thread's priority on CPU 1.
+- The shader patcher gets 1 MB of USSE memory, twice Unity's fixed 512 KB.
+- The GC heap is capped to leave Unity 16 MB. Once 2 MB have been allocated, a collection runs half a second into a pause, so fewer collections happen in play.
+- An area load goes through an empty scene and frees the old area's assets first, unless the new area fits beside them with 48 MB to spare.
+
+Rendering:
+
+- Frames are capped at 30 fps (vSyncCount 2).
+- The camera renders at 550x351, and the post effect runs at half size in three passes written for the SGX543.
+- Every light draws in one pass through CrowVita/Lit: up to 4 key lights per pixel, picked by what they add around Mara, one fill light, and the rest per vertex. Pool allows at most 2 key lights.
+- Every opaque lit material draws one depth layer back, so the decals and overlays laid a few millimetres over it don't fight it. The black backing faces that sit just behind such a wall move further back, so they stay hidden (`CROW_BACKING`).
+- Shadows are hard, Low resolution, 12 m, and only Mara casts them.
+- Particle noise is Unity's 1D noise instead of the game's 3D noise.
+
+Meshes and scenes:
+
+- The build merges static geometry, rebuilds the enemies (one atlas, flattened pivots), merges Mara's parts and bakes MeshCombineStudio's combining.
+- The small wobbling parts of the bosses' bodies are held still and merged like an enemy's.
+- Every mesh's identical vertices become one, and triangles are put in vertex cache order. Textures used only by materials get mipmaps.
+- In Pool, the rock placed 1,056 times becomes a convex hull without the faces hidden inside its neighbours, and the meshes with only seamless textures get one vertex per position.
+- See-through layers stacked at one place draw once with the stack's alpha (`CROW_STACK_FOLD`).
+- An enemy's growing death pool uses a box trigger instead of a mesh collider, so a corpse no longer drops the frame rate.
+
+Game logic:
+
+- Physics steps once per frame, at most twice a frame.
+- In fights, Blob trails are off, held enemies are frozen, and decoration and enemy cosmetics update less often.
+- PlayMaker's FSM updates that would do nothing are skipped, and its small actions are compiled into the FSM code.
+- The gameplay canvas's and the camera rig's switched-off parts are moved out of their hierarchies.
+- AudioSources idle for 2 s are disabled, and reverb is off. With reverb on, FMOD's mixer fell behind and crackled in nearly every area that has it.
+- The game runs in its console mode with the Switch's platform animations.
 
 ## Open issues
 
-- Haunted Hilltop's loads are the tightest: 8-14 MB free at their lowest in the long chains (Ocean Kingdom -> Haunted Hilltop 10-11, Arcade -> Haunted Hilltop once 8), against a 12 MB target (22-23 Oct).
-- Unity's allocator leaves about 2.7 MB more holes after each Ocean Kingdom <-> Haunted Hilltop round trip (22 Oct).
-- The Station Square fight is the slowest place measured, at about 26 fps (38-39 ms a frame).
-- The player's log stopped being written after a console standby while the game ran on (26 Oct, not investigated).
-- Dig Site's dark spots have not been checked with the depth layers (22 Oct).
-- The PS Vita's save clock re-reads its file after a wake; that fix has not been tried at the console (22 Oct).
-- The render-thread crashes of 17 and 26 Oct were the shader patcher's 512 KB of USSE memory running full, not graphics jobs; the eboot gives it 1 MB since 27 Oct.
-  Whether 1 MB lasts a whole playthrough is not known: 223 KB after 15 loads, about 9 KB per new area (`usseKB` in `-crow-memory-watch`; 27 Oct).
-- Something launched the game with no flags while the console sat idle (27 Oct, 04:03 and 06:40); the cause was not found.
-- The main menu once dropped to about 10 fps while idle; it was never reproduced (15 Oct).
-- vitacompanion once failed to allocate memory for a screenshot and the console hung 7 loads later (23 Oct): a tool problem, not the game's.
+- Haunted Hilltop's loads are the tightest on memory: 8-14 MB free at their lowest in long chains, against a 12 MB target.
+- Unity's allocator leaves about 2.7 MB more holes after each Ocean Kingdom to Haunted Hilltop round trip.
+- The first seconds of the Station Square and Haunted Hilltop fights, with every enemy awake, run at 23-25 fps.
+- The shader patcher had 223 KB of its 1 MB used after 15 loads, about 9 KB more per new area. Whether 1 MB lasts a whole playthrough is not known.
+- The GOG build has not been tested on the console.
+- Once, after a console standby with the game running, the player's log stopped being written. Not investigated.
+- Dig Site's dark spots have not been checked with the depth layers.
+- The save clock's re-read after a wake has not been tried on the console.
+- The game was once launched with no flags while the console sat idle. The cause was not found.
 
 ## Next steps
 
-1. More memory margin for the loads into Haunted Hilltop.
-2. The Station Square fight's frame time.
-3. Load times (30 Oct): an area load takes 2-23 s on the console (Corridor B 15-17 s, Fairy Forest and Station Square 12-16, Haunted Hilltop 16-20, Machine Centre 2-7).
-   Each is the renderer's drain and the old scenes' unload (0.2-0.5 s), the unused-asset pass (1.7-2.1 s, left out on revisits that fit), a collection (0.5 s) and the additive load.
-   In a big area most of the additive load is Unity's loading thread at full use reading the level's objects (Station Square: 8 s of 12.3, PlayMaker's FSM setup 2.5 s of those), after 3.5 s of reading and uploads, then 0.6 s on the main thread.
-   Cutting that needs smaller level data, which a code change can't give: about half of Station Square's level file is PlayMaker's FSMs (15 Oct).
-4. Play further: story events, fights across the game, and saves made in play and loaded later.
+1. More free memory for the loads into Haunted Hilltop.
+2. The CPU cost of the big fights' first seconds.
+3. Load times. An area load takes 2-23 s, and in a big area most of it is Unity's loading thread reading the level's objects. About half of Station Square's level file is PlayMaker FSMs, so a shorter load needs smaller level data.
+4. A console test of the GOG build.
