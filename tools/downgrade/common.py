@@ -260,8 +260,8 @@ def remove_tree(folder: Path):
         size = folder.lstat().st_size
         return (size, []) if remove_path(folder, os.remove) else (0, [folder])
     deleted, left, folders = 0, [], []
-    for root, names, files in os.walk(folder):
-        root = Path(root)
+    for top, names, files in os.walk(folder):
+        root = Path(top)
         folders.append(root)
         for name in [n for n in names if is_link(root / n)]:
             names.remove(name)  # not into it
@@ -318,7 +318,6 @@ def remove_path(path: Path, function):
     for attempt in range(REMOVE_ATTEMPTS):
         try:
             function(path)
-            return True
         except FileNotFoundError:
             return True
         except PermissionError:
@@ -328,6 +327,8 @@ def remove_path(path: Path, function):
                 time.sleep(0.5)
         except OSError:  # a folder that still has files
             return False
+        else:
+            return True
     return False
 
 
@@ -338,11 +339,12 @@ def replace_path(source: Path, target: Path, attempts=REMOVE_ATTEMPTS):
     for attempt in range(attempts):
         try:
             os.replace(source, target)
-            return
         except PermissionError:
             if attempt == attempts - 1:
                 raise
             time.sleep(0.5)
+        else:
+            return
 
 
 def github_source(repository, commit, digest, folder: Path):
@@ -425,8 +427,8 @@ YAML_FILES = NATIVE_ASSETS | {'.unity'}
 # matched no such material, so the Fade particles lost _ALPHABLEND_ON (drawn opaque).
 NUMBER = r'([-+\d.eE]+|-?Infinity|NaN)'
 VECTOR = rf'\{{r: {NUMBER}, g: {NUMBER}, b: {NUMBER}, a: {NUMBER}\}}'  # a colour (Vector4 alike)
-SHADER_LINE = re.compile(r'^  m_Shader: (\{.*\})$', re.M)  # a material's shader reference
-NAME_LINE = re.compile(r'^  m_Name: ?(.*)$', re.M)  # the first is the main object's name
+SHADER_LINE = re.compile(r'^  m_Shader: (\{.*\})$', re.MULTILINE)  # a material's shader reference
+NAME_LINE = re.compile(r'^  m_Name: ?(.*)$', re.MULTILINE)  # the first is the main object's name
 
 
 def builtin_shader(file_id):
@@ -455,7 +457,7 @@ def game_data(game: Path) -> Path:
 
 
 def meta_guid(meta: Path):
-    match = re.search(r'^guid: ([0-9a-f]{32})', meta.read_text(encoding='utf-8'), re.M)
+    match = re.search(r'^guid: ([0-9a-f]{32})', meta.read_text(encoding='utf-8'), re.MULTILINE)
     return match.group(1) if match else None
 
 
@@ -669,7 +671,8 @@ BUILD_SWITCHES = {
     'CROW_STRIP': Switch('build', 'on off', 'on', 'off'),
     # See-through layers stacked at one place drawn once, with the stack's alpha (unity/StackedLayers.cs).
     'CROW_STACK_FOLD': Switch('build', 'on off', 'on', 'off'),
-    # Opaque faces of the game's other shaders just behind a depth-layered wall moved further back (unity/BackingFaces.cs).
+    # Opaque faces of the game's other shaders just behind a depth-layered wall moved further back
+    # (unity/BackingFaces.cs).
     'CROW_BACKING': Switch('build', 'on off', 'on', 'off'),
     # The materials saved with CrowVita/Lit (asset_rules.vita_lit_overlay); off leaves the swap to run time.
     'CROW_LIT_BAKE': Switch('project', 'on off', 'on', 'on', ('vita',)),

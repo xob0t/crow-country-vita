@@ -18,7 +18,7 @@ import progress
 from asset_rules import current_text
 from common import BUILTIN_STANDARD, NAME_LINE, NUMBER, VECTOR, WORK, game_data, log, require
 
-STANDARD = re.compile(rf'^  m_Shader: {re.escape(BUILTIN_STANDARD)}$', re.M)
+STANDARD = re.compile(rf'^  m_Shader: {re.escape(BUILTIN_STANDARD)}$', re.MULTILINE)
 CACHE = WORK / 'material-keywords.json'
 
 
@@ -85,9 +85,10 @@ def exported_properties(text, path):
     """(name, floats, colors, textures) of an exported material's YAML, its numbers read with
     common.NUMBER (which takes the export's Infinity and NaN)."""
     name = require(NAME_LINE.search(text), path, 'm_Name')[1]
-    floats = {m[1]: float(m[2]) for m in re.finditer(r'^      (\w+): ' + NUMBER + '$', text, re.M)}
+    floats = {m[1]: float(m[2]) for m in re.finditer(r'^      (\w+): ' + NUMBER + '$', text, re.MULTILINE)}
     colors = {
-        m[1]: [float(m[i]) for i in range(2, 6)] for m in re.finditer(r'^      (\w+): ' + VECTOR + '$', text, re.M)
+        m[1]: [float(m[i]) for i in range(2, 6)]
+        for m in re.finditer(r'^      (\w+): ' + VECTOR + '$', text, re.MULTILINE)
     }
     textures = {}
     for m in re.finditer(
@@ -95,7 +96,7 @@ def exported_properties(text, path):
         rf'        m_Scale: \{{x: {NUMBER}, y: {NUMBER}\}}\n'
         rf'        m_Offset: \{{x: {NUMBER}, y: {NUMBER}\}}',
         text,
-        re.M,
+        re.MULTILINE,
     ):
         if m[2] != '0':
             textures[m[1]] = [float(m[i]) for i in range(3, 7)]
@@ -152,7 +153,9 @@ def material_keyword_overlay(exported: Path, game: Path, overlay: dict):
         else:
             unknown += 1
             continue
-        text, count = re.subn(r'^  m_ShaderKeywords:.*$', '  m_ShaderKeywords: ' + ' '.join(keywords), text, flags=re.M)
+        text, count = re.subn(
+            r'^  m_ShaderKeywords:.*$', '  m_ShaderKeywords: ' + ' '.join(keywords), text, flags=re.MULTILINE
+        )
         if count != 1:
             raise RuntimeError(f'{relative}: {count} m_ShaderKeywords lines')
         result[relative] = text.encode('utf-8')

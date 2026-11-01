@@ -193,7 +193,10 @@ class Setup:
             return
         script = download(url, EXTERNAL / 'unigate' / 'unigate.py', sha256)
         result = subprocess.run(
-            [uv, 'run', '--script', str(script), '--editor', str(unity.parent)], capture_output=True, text=True
+            [uv, 'run', '--script', str(script), '--editor', str(unity.parent)],
+            capture_output=True,
+            text=True,
+            check=False,
         )
         if result.returncode:
             print(result.stdout + result.stderr)
@@ -499,6 +502,7 @@ def authenticode(path: Path):
         capture_output=True,
         text=True,
         env={**os.environ, 'SETUP_SIGNED_FILE': str(path)},
+        check=False,
     )
     lines = result.stdout.strip().splitlines()
     return (lines[0].strip() if lines else 'unknown'), (lines[1].strip() if len(lines) > 1 else '')
@@ -518,7 +522,7 @@ def run_installer(installer: Path, arguments: str):
     """Run an NSIS installer silently; through UAC when it asks for administrator rights. NSIS wants
     /D= last and unquoted, so the command line is passed as one string."""
     try:
-        return subprocess.run(f'"{installer}" {arguments}').returncode
+        return subprocess.run(f'"{installer}" {arguments}', check=False).returncode
     except OSError as error:
         if getattr(error, 'winerror', None) != 740:  # ERROR_ELEVATION_REQUIRED
             raise
@@ -534,6 +538,7 @@ def run_elevated(program, arguments: str):
     return subprocess.run(
         ['powershell', '-NoProfile', '-NonInteractive', '-Command', script],
         env={**os.environ, 'SETUP_PROGRAM': str(program), 'SETUP_ARGUMENTS': arguments},
+        check=False,
     ).returncode
 
 

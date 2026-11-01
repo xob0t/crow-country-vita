@@ -57,8 +57,10 @@ INSTALLERS = {
         '56d829305af445d0d91a1b52790fe8a59e02020c73771c5162fee94c351c9d24',
     ),
     'vita': (
-        'https://archive.org/download/unitypsvitasupport/'
-        'UnitySetup-Playstation-Vita-Support-for-Editor-2018.2.19f1.exe',
+        (
+            'https://archive.org/download/unitypsvitasupport/'
+            'UnitySetup-Playstation-Vita-Support-for-Editor-2018.2.19f1.exe'
+        ),
         'e68ad5a92622c34abb0c535a6de166531a1e8a192944fd1a50fe8297f7427901',
     ),
 }
@@ -207,7 +209,7 @@ def parse_library_folders(text):
     """The library paths in Steam's steamapps/libraryfolders.vdf (both the old and the new format)."""
     paths = [m.group(1) for m in re.finditer(r'"path"\s+"((?:[^"\\]|\\.)*)"', text)]
     if not paths:  # before 2021: "1" "D:\\SteamLibrary"
-        paths = [m.group(1) for m in re.finditer(r'^\s*"\d+"\s+"((?:[^"\\]|\\.)*)"\s*$', text, re.M)]
+        paths = [m.group(1) for m in re.finditer(r'^\s*"\d+"\s+"((?:[^"\\]|\\.)*)"\s*$', text, re.MULTILINE)]
     return [p.replace('\\\\', '\\') for p in paths]
 
 
@@ -236,7 +238,8 @@ def unity_version(header: bytes):
 def signer_is_unity(status, subject):
     """Get-AuthenticodeSignature's Status and SignerCertificate.Subject of a Unity installer."""
     return (
-        status == 'Valid' and re.search(r'(^|,\s*)O=Unity Technologies( ApS| SF)?\s*(,|$)', subject, re.I) is not None
+        status == 'Valid'
+        and re.search(r'(^|,\s*)O=Unity Technologies( ApS| SF)?\s*(,|$)', subject, re.IGNORECASE) is not None
     )
 
 
@@ -445,6 +448,7 @@ def visual_cpp():
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
     return result.stdout.strip() or None
 
@@ -705,6 +709,7 @@ def check_license(version, platform):
                     str(log_path),
                 ],
                 timeout=LICENSE_CHECK_SECONDS,
+                check=False,
             )
             code = result.returncode
         except subprocess.TimeoutExpired:
@@ -737,11 +742,11 @@ def license_checked(version, platform):
     return bool(text) and license_key(version, platform) in text.splitlines()
 
 
-def license_status(platform, version, license):
-    """license: the check setup.py has just run, True to run it now, or False to report the last one."""
-    if isinstance(license, Check):
-        return license
-    if license:
+def license_status(platform, version, license_check):
+    """license_check: the check setup.py has just run, True to run it now, or False to report the last one."""
+    if isinstance(license_check, Check):
+        return license_check
+    if license_check:
         return check_license(version, platform)
     if license_checked(version, platform):
         return Check(LICENSE_CHECK, True, f'the editor ran in batch mode with the {platform} target when last checked')
@@ -757,7 +762,7 @@ def project_dir(version, platform):
     return WORK / (f'crow-{version}' + ('-vita' if platform == 'vita' else ''))
 
 
-def checks_for(targets, game: Path, license=False):
+def checks_for(targets, game: Path, license_check=False):
     """Every requirement of the targets, for the doctor's full checklist."""
     version = TARGET
     vita = 'vita' in targets
@@ -781,7 +786,7 @@ def checks_for(targets, game: Path, license=False):
     checks.append(check_space(targets))
     # The license check starts the editor with the PS Vita target when the targets include it (that also
     # checks the module loads), else the Windows one.
-    checks.append(license_status('vita' if vita else 'windows', version, license))
+    checks.append(license_status('vita' if vita else 'windows', version, license_check))
     return checks
 
 
@@ -800,7 +805,7 @@ def main(argv=None, license_check=None):
     args = parser.parse_args(argv)
     chosen = args.target or ['all']
     targets = TARGETS if 'all' in chosen else tuple(t for t in TARGETS if t in chosen)
-    checks = checks_for(targets, default_game(), license=license_check or args.license)
+    checks = checks_for(targets, default_game(), license_check=license_check or args.license)
     lines, failed = summarize(checks)
     title = 'every target' if targets == TARGETS else f'the {" and ".join(targets)} target' + 's' * (len(targets) > 1)
     for line in [Text(f'Requirements for {title}:'), *lines]:

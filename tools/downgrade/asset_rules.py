@@ -81,15 +81,15 @@ VIDEO_FIELDS = (
     'm_DirectAudioVolumes',
 )
 COMPONENT_HEADER = ('m_ObjectHideFlags', 'm_CorrespondingSourceObject', 'm_PrefabInternal', 'm_GameObject', 'm_Enabled')
-COMPONENT_FIELD = re.compile(r'^  (\w+):(.*)\n((?:  - .*\n)*)', re.M)
+COMPONENT_FIELD = re.compile(r'^  (\w+):(.*)\n((?:  - .*\n)*)', re.MULTILINE)
 
 
 def compat_component_overlay(exported: Path, overlay: dict, platform: str):
     classes = COMPAT_COMPONENTS
     document = re.compile(
-        r'^--- !u!(' + '|'.join(map(str, classes)) + r') &(-?\d+)([^\n]*)\n(?:(?!--- !u!).*\n?)*', re.M
+        r'^--- !u!(' + '|'.join(map(str, classes)) + r') &(-?\d+)([^\n]*)\n(?:(?!--- !u!).*\n?)*', re.MULTILINE
     )
-    header = re.compile(rb'^--- !u!(' + '|'.join(map(str, classes)).encode() + rb') ', re.M)
+    header = re.compile(rb'^--- !u!(' + '|'.join(map(str, classes)).encode() + rb') ', re.MULTILINE)
     # Which scenes and prefabs have such a component, read once per file version (scan): the scenes
     # are up to 35 MB each.
     has_component = scan(
@@ -100,8 +100,9 @@ def compat_component_overlay(exported: Path, overlay: dict, platform: str):
         version=header.pattern.decode(),
     )
     result, replaced = {}, 0
-    for found, has in has_component.items():
+    for found, listed in has_component.items():
         relative = Path('Assets') / found
+        has = listed
         if relative in overlay:
             has = header.search(current_bytes(exported, overlay, relative)) is not None
         if has:
@@ -157,8 +158,9 @@ def scene_reference_overlay(exported: Path, overlay: dict):
         version=' '.join(sorted(scenes)),
     )
     result, cut = {}, 0
-    for found, named in names_scene.items():
+    for found, listed in names_scene.items():
         relative = Path('Assets') / found
+        named = listed
         if relative in overlay:
             data = current_bytes(exported, overlay, relative)
             named = any(key in data for key in keys)
@@ -179,7 +181,7 @@ def scene_reference_overlay(exported: Path, overlay: dict):
 # pass uv1 (with normals and tangents, 25), where UIPixelate's grid is; on 2018.2 the grid's size goes
 # in uv2 (compat/ApiShims.cs, VertexHelper.SetUV1), so each canvas that passes uv1 passes uv2 too.
 CANVAS_TEXCOORD1, CANVAS_TEXCOORD2 = 1, 2
-CANVAS_CHANNELS = re.compile(r'^(  m_AdditionalShaderChannelsFlag: )(\d+)$', re.M)
+CANVAS_CHANNELS = re.compile(r'^(  m_AdditionalShaderChannelsFlag: )(\d+)$', re.MULTILINE)
 
 
 def canvas_channel_overlay(exported: Path, overlay: dict):
@@ -199,8 +201,9 @@ def canvas_channel_overlay(exported: Path, overlay: dict):
         changed += 1
         return f'{m[1]}{flags | CANVAS_TEXCOORD2}'
 
-    for found, has in has_canvas.items():
+    for found, listed in has_canvas.items():
         relative = Path('Assets') / found
+        has = listed
         if relative in overlay:
             has = b'm_AdditionalShaderChannelsFlag' in current_bytes(exported, overlay, relative)
         if has:
@@ -238,10 +241,12 @@ REWIRED_VITA_ELEMENTS = {
 }
 REWIRED_SHOULDERS = {10: 11, 12: 13}  # shoulder 1 -> shoulder 2
 REWIRED_PLATFORMS = {'vita'}
-REWIRED_SECTION = re.compile(r'^    joystickMaps:\n(.*?)(?=^    keyboardMaps:\n)', re.M | re.S)
-REWIRED_MAP = re.compile(r'^    - id: (\d+)\n.*?(?=^    - id: |\Z)', re.M | re.S)
-REWIRED_ELEMENT_MAP = re.compile(r'^      - _actionCategoryId: .*?(?=^      - _actionCategoryId: |\Z)', re.M | re.S)
-REWIRED_ACTION = re.compile(r'^    - _id: (-?\d+)\n      _name: (.*)$', re.M)
+REWIRED_SECTION = re.compile(r'^    joystickMaps:\n(.*?)(?=^    keyboardMaps:\n)', re.MULTILINE | re.DOTALL)
+REWIRED_MAP = re.compile(r'^    - id: (\d+)\n.*?(?=^    - id: |\Z)', re.MULTILINE | re.DOTALL)
+REWIRED_ELEMENT_MAP = re.compile(
+    r'^      - _actionCategoryId: .*?(?=^      - _actionCategoryId: |\Z)', re.MULTILINE | re.DOTALL
+)
+REWIRED_ACTION = re.compile(r'^    - _id: (-?\d+)\n      _name: (.*)$', re.MULTILINE)
 
 
 def rewired_vita_maps(text: str):
@@ -309,7 +314,7 @@ def rewired_vita_overlay(exported: Path, overlay: dict, platform: str):
 # Camera, RectTransform: 19 properties; uGUI and TextMeshPro are kept whole anyway). The linker strips a
 # member only reflection reaches: the save rooms' fire lights threw "Set Method not found for 'range'"
 # several times a frame once code_trim had removed the unused PlayMaker light actions that kept it.
-FSM_PROPERTY_TYPE = re.compile(rb'^ +TargetTypeName: (\S+)\r?\n +PropertyName: ', re.M)
+FSM_PROPERTY_TYPE = re.compile(rb'^ +TargetTypeName: (\S+)\r?\n +PropertyName: ', re.MULTILINE)
 # By hand, engine types only CrowCompat's own reflection reaches: MeshCollider, whose sharedMesh getter
 # only MeshRelease reads (the game only sets it), on by default on the PS Vita; per platform, the PS Vita's
 # free memory for the memory probe (compat/Memory.cs).
@@ -377,12 +382,12 @@ def render_texture_overlay(exported: Path):
     overlay = {}
     for path in (exported / 'Assets').rglob('*.renderTexture'):
         text = path.read_text(encoding='utf-8')
-        graphics = int(require(re.search(r'^  m_ColorFormat: (\d+)$', text, re.M), path, 'm_ColorFormat')[1])
+        graphics = int(require(re.search(r'^  m_ColorFormat: (\d+)$', text, re.MULTILINE), path, 'm_ColorFormat')[1])
         if graphics not in RENDER_TEXTURE_FORMATS:
             sys.exit(f'{path.name}: no RenderTextureFormat rule for GraphicsFormat {graphics}')
         legacy, srgb = RENDER_TEXTURE_FORMATS[graphics]
-        text = re.sub(r'^  m_ColorFormat: \d+$', f'  m_ColorFormat: {legacy}', text, flags=re.M)
-        text = re.sub(r'^  m_SRGB: \d+$', f'  m_SRGB: {srgb}', text, flags=re.M)
+        text = re.sub(r'^  m_ColorFormat: \d+$', f'  m_ColorFormat: {legacy}', text, flags=re.MULTILINE)
+        text = re.sub(r'^  m_SRGB: \d+$', f'  m_SRGB: {srgb}', text, flags=re.MULTILINE)
         overlay[path.relative_to(exported)] = text.encode('utf-8')
     log(f'Converted the color format of {len(overlay)} render textures')
     return overlay
@@ -407,7 +412,7 @@ STREAM_SECONDS = 45
 STREAM_LOOP_SECONDS = 25
 CLIP_REFERENCE = re.compile(rb'fileID: 8300000, guid: ([0-9a-f]{32})')
 LOOPING_SOURCE = re.compile(
-    rb'^  m_audioClip: \{fileID: 8300000, guid: ([0-9a-f]{32}).*\n(?:  \w+: .*\n)*?  Loop: 1$', re.M
+    rb'^  m_audioClip: \{fileID: 8300000, guid: ([0-9a-f]{32}).*\n(?:  \w+: .*\n)*?  Loop: 1$', re.MULTILINE
 )
 
 
@@ -445,9 +450,20 @@ SHARED_REVERB_MIXERS = 12
 SHARED_REVERB_FOLDER = Path('Assets') / 'Resources' / 'CrowSharedReverb'
 # The SFX Reverb's parameters, as the editor names them, and Unity's defaults (Room at -10000: no reverb until set).
 SHARED_REVERB_PARAMETERS = [
-    ('Dry Level', 0), ('Room', -10000), ('Room HF', 0), ('Decay Time', 1), ('Decay HF Ratio', 0.5), ('Reflections', -10000),
-    ('Reflect Delay', 0.02), ('Reverb', 0), ('Reverb Delay', 0.04), ('Diffusion', 100), ('Density', 100),
-    ('HF Reference', 5000), ('Room LF', 0), ('LF Reference', 250),
+    ('Dry Level', 0),
+    ('Room', -10000),
+    ('Room HF', 0),
+    ('Decay Time', 1),
+    ('Decay HF Ratio', 0.5),
+    ('Reflections', -10000),
+    ('Reflect Delay', 0.02),
+    ('Reverb', 0),
+    ('Reverb Delay', 0.04),
+    ('Diffusion', 100),
+    ('Density', 100),
+    ('HF Reference', 5000),
+    ('Room LF', 0),
+    ('LF Reference', 250),
 ]
 
 
@@ -560,15 +576,20 @@ def audio_overlay(exported: Path, platform: str):
         return shared_reverb_mixers()
     overlay, streamed, loops = shared_reverb_mixers(), [], []
     references, looping = collections.Counter(), collections.Counter()
-    for every, looped in scan('clip-references', exported / 'Assets', lambda relative: relative.suffix in YAML_FILES,
-                              clip_references, version=LOOPING_SOURCE.pattern.decode()).values():
+    for every, looped in scan(
+        'clip-references',
+        exported / 'Assets',
+        lambda relative: relative.suffix in YAML_FILES,
+        clip_references,
+        version=LOOPING_SOURCE.pattern.decode(),
+    ).values():
         references.update(every)
         looping.update(looped)
     looped = {guid for guid, count in looping.items() if count == references[guid]}
     settings = re.compile(
         r'^(  defaultSettings:\n    loadType: )(\d)(\n(?:    .*\n)*?    compressionFormat: )(\d+)'
         r'(\n    quality: )([\d.]+)',
-        re.M,
+        re.MULTILINE,
     )
     clips = 0
     for meta in (exported / 'Assets').rglob('*.meta'):
@@ -583,7 +604,9 @@ def audio_overlay(exported: Path, platform: str):
             if load_type == 1:
                 stem = meta.with_suffix('').stem
                 seconds = audio_seconds(meta.with_suffix('')) or 0
-                loop = seconds >= STREAM_LOOP_SECONDS and re.search(r'^guid: (\w+)', original, re.M)[1] in looped
+                loop = (
+                    seconds >= STREAM_LOOP_SECONDS and re.search(r'^guid: (\w+)', original, re.MULTILINE)[1] in looped
+                )
                 if loop or seconds >= STREAM_SECONDS:
                     load_type, compression, quality = formats[2]
                     (streamed if seconds >= STREAM_SECONDS else loops).append(stem)
@@ -592,7 +615,7 @@ def audio_overlay(exported: Path, platform: str):
         text, count = settings.subn(convert, text, count=1)
         if not count:
             sys.exit(f'{meta}: an AudioImporter whose defaultSettings audio_overlay cannot read')
-        text = re.sub(r'^  preloadAudioData: 1$', '  preloadAudioData: 0', text, flags=re.M)
+        text = re.sub(r'^  preloadAudioData: 1$', '  preloadAudioData: 0', text, flags=re.MULTILINE)
         if text != original:
             overlay[meta.relative_to(exported)] = text.encode('utf-8')
             clips += 1
@@ -670,8 +693,8 @@ def texture_overlay(exported: Path, game: Path, platform: str):
             kept += 1
             continue
         size = max_texture_size(largest.get(name, 0))
-        text = re.sub(r'^(\s*)textureCompression: \d+$', r'\g<1>textureCompression: 0', text, flags=re.M)
-        text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, flags=re.M)
+        text = re.sub(r'^(\s*)textureCompression: \d+$', r'\g<1>textureCompression: 0', text, flags=re.MULTILINE)
+        text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, flags=re.MULTILINE)
         if platform in PLATFORM_TEXTURE_FORMATS:
             chosen = ALPHA8_IMPORT if name in alpha_only else dxt_format(platform, fully_opaque(meta.with_suffix('')))
             text = with_platform_format(text, platform, chosen, size)
@@ -720,8 +743,8 @@ def pad_to_power_of_two(image: Path):
 
     from PIL import Image
 
-    with Image.open(image) as picture:
-        picture = picture.convert('RGBA' if picture.mode not in ('RGB', 'RGBA') else picture.mode)
+    with Image.open(image) as opened:
+        picture = opened.convert('RGBA' if opened.mode not in ('RGB', 'RGBA') else opened.mode)
     width, height = picture.size
     wide, high = power_of_two(width), power_of_two(height)
     padded = Image.new(picture.mode, (wide, high))
@@ -747,9 +770,9 @@ def with_platform_format(text: str, platform: str, texture_format: int, size: in
     """The importer text with the platform's override (TEXTURE_PLATFORM_ENTRY) added, or replacing its own."""
     target = PLATFORM_TEXTURE_FORMATS[platform][0]
     entry = TEXTURE_PLATFORM_ENTRY.format(target=target, size=size, format=texture_format)
-    existing = re.compile(rf'^  - serializedVersion: \d+\n    buildTarget: {target}\n(?:    .*\n)*', re.M)
+    existing = re.compile(rf'^  - serializedVersion: \d+\n    buildTarget: {target}\n(?:    .*\n)*', re.MULTILINE)
     if existing.search(text):
-        return existing.sub(lambda m: entry, text, count=1)
+        return existing.sub(lambda _: entry, text, count=1)
     return text.replace('  platformSettings:\n', '  platformSettings:\n' + entry, 1)
 
 
@@ -792,8 +815,8 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
             continue
         if re.search(rf'buildTarget: PSP2\n(?:    .*\n)*?    textureFormat: {ALPHA8_IMPORT}\n', text):
             continue  # Alpha8 is kept at any size (texture_overlay)
-        guid = require(re.search(r'^guid: (\w+)', text, re.M), relative, 'guid')[1]
-        field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.M))).get  # first of each
+        guid = require(re.search(r'^guid: (\w+)', text, re.MULTILINE), relative, 'guid')[1]
+        field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.MULTILINE))).get  # first of each
         users = others.get(guid, set())
         size = max(int(field('maxTextureSize')), power_of_two(max(width, height)))
         smooth = field('filterMode') != '0' and '.asset' not in users
@@ -801,7 +824,7 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
             result[relative.with_suffix('')] = pad_to_power_of_two(image)
             padded += 1
         elif smooth and guid not in sprites and field('textureType') == '0':
-            text = re.sub(r'^(\s*)nPOTScale: \d+$', r'\g<1>nPOTScale: 1', text, flags=re.M)
+            text = re.sub(r'^(\s*)nPOTScale: \d+$', r'\g<1>nPOTScale: 1', text, flags=re.MULTILINE)
             scaled += 1
         elif smooth and width == height:
             size = power_of_two(width) // 2
@@ -812,7 +835,7 @@ def npot_texture_overlay(exported: Path, overlay: dict, platform: str):
             continue
         saved += width * height * 4
         text = with_platform_format(text, platform, dxt_format(platform, fully_opaque(image)), size)
-        text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, count=1, flags=re.M)
+        text = re.sub(r'^(\s*)maxTextureSize: \d+$', rf'\g<1>maxTextureSize: {size}', text, count=1, flags=re.MULTILINE)
         result[relative] = text.encode('utf-8')
     log(
         f'{platform}: {scaled} textures scaled, {padded} padded and {resized} resized to powers of two for DXT '
@@ -843,11 +866,18 @@ def mipmap_overlay(exported: Path, overlay: dict, platform: str):
         text = current_text(exported, overlay, relative)
         if 'TextureImporter:' not in text:
             continue
-        guid = require(re.search(r'^guid: (\w+)', text, re.M), relative, 'guid')[1]
-        field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.M))).get  # first of each
-        if field('enableMipMap') != '0' or field('filterMode') == '0' or field('textureType') != '0' or users.get(guid) != {'.mat'}:
+        guid = require(re.search(r'^guid: (\w+)', text, re.MULTILINE), relative, 'guid')[1]
+        field = dict(reversed(re.findall(r'^ {2,4}(\w+): (-?\d+)$', text, re.MULTILINE))).get  # first of each
+        if (
+            field('enableMipMap') != '0'
+            or field('filterMode') == '0'
+            or field('textureType') != '0'
+            or users.get(guid) != {'.mat'}
+        ):
             continue
-        result[relative] = re.sub(r'^(\s*)enableMipMap: 0$', r'\g<1>enableMipMap: 1', text, count=1, flags=re.M).encode('utf-8')
+        result[relative] = re.sub(
+            r'^(\s*)enableMipMap: 0$', r'\g<1>enableMipMap: 1', text, count=1, flags=re.MULTILINE
+        ).encode('utf-8')
         added += 1
     log(f'{platform}: mipmaps for {added} textures only materials use')
     return result
@@ -900,7 +930,9 @@ def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
         return {}
     target = PLATFORM_TEXTURE_FORMATS[platform][0]
     entry = re.compile(rf'(buildTarget: {target}\n    maxTextureSize: )\d+')
-    default = re.compile(r'(^  maxTextureSize: |buildTarget: DefaultTexturePlatform\n    maxTextureSize: )\d+', re.M)
+    default = re.compile(
+        r'(^  maxTextureSize: |buildTarget: DefaultTexturePlatform\n    maxTextureSize: )\d+', re.MULTILINE
+    )
     sprites = {}
     for found, (lone_sprite, guids) in texture_reference_scan(exported / 'Assets').items():
         for guid in guids if lone_sprite else ():
@@ -916,7 +948,7 @@ def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
         if not count:
             sys.exit(f'{relative} has no {target} import settings to cap')
         result[relative] = text.encode('utf-8')
-        guid = require(re.search(r'^guid: (\w+)', text, re.M), relative, 'guid')[1]
+        guid = require(re.search(r'^guid: (\w+)', text, re.MULTILINE), relative, 'guid')[1]
         if guid in sprites:
             capped = sprite_texture_cap(exported, overlay, relative.with_suffix(''), sprites[guid], size)
             result.update(capped)
@@ -935,8 +967,8 @@ def texture_cap_overlay(exported: Path, overlay: dict, platform: str):
 # (29 Oct). So a capped texture that sprites draw from is resized here (bicubic, the alpha premultiplied),
 # and its sprites' sizes in texels (rects, offsets, borders, the pivot's place in the texture) and their
 # pixels per unit are scaled alike: the same size in units and on the canvas, the same pivot.
-SPRITE_TEXELS = re.compile(r'^( +(?:x|y|width|height|m_PixelsToUnits): )(\S+)$', re.M)
-SPRITE_TEXEL_MAPS = re.compile(r'^( +(?:m_Offset|m_Border|textureRectOffset|uvTransform): )\{(.*)\}$', re.M)
+SPRITE_TEXELS = re.compile(r'^( +(?:x|y|width|height|m_PixelsToUnits): )(\S+)$', re.MULTILINE)
+SPRITE_TEXEL_MAPS = re.compile(r'^( +(?:m_Offset|m_Border|textureRectOffset|uvTransform): )\{(.*)\}$', re.MULTILINE)
 MAP_VALUE = re.compile(r'(\w+: )([^,]+)')
 
 
@@ -983,7 +1015,7 @@ def sprite_texture_cap(exported: Path, overlay: dict, image: Path, sprite_assets
 # meshes): only that much is searched.
 MESH_COMBINER_SCRIPT = script_file_id('MeshCombineStudio', 'MeshCombiner')
 MESH_REFERENCE = re.compile(rb'fileID: 4300000, guid: ([0-9a-f]{32})')
-SCENE_DOCUMENT = re.compile(r'^--- !u!(\d+) &(-?\d+)[^\n]*\n((?:(?!--- !u!).*\n?)*)', re.M)
+SCENE_DOCUMENT = re.compile(r'^--- !u!(\d+) &(-?\d+)[^\n]*\n((?:(?!--- !u!).*\n?)*)', re.MULTILINE)
 READABLE_FLAGS = (b'  m_IsReadable: 1\n', b'  m_KeepVertices: 1\n', b'  m_KeepIndices: 1\n')
 READABLE_FLAGS_BYTES = 4096
 MESH_CACHE = WORK / 'unreadable-meshes'
@@ -996,26 +1028,26 @@ def scene_mesh_users(path: Path):
     father, transform_of, tag, filters, combiners, named = {}, {}, {}, {}, [], set()
     for kind, file_id, body in SCENE_DOCUMENT.findall(text):
         if kind in ('4', '224'):  # Transform, RectTransform
-            parent = re.search(r'^  m_Father: \{fileID: (-?\d+)\}', body, re.M)
+            parent = re.search(r'^  m_Father: \{fileID: (-?\d+)\}', body, re.MULTILINE)
             father[file_id] = parent[1] if parent else '0'
-            transform_of[re.search(r'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)[1]] = file_id
+            transform_of[re.search(r'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.MULTILINE)[1]] = file_id
         elif kind == '1':  # GameObject
-            found = re.search(r'^  m_TagString: (.*)$', body, re.M)
+            found = re.search(r'^  m_TagString: (.*)$', body, re.MULTILINE)
             tag[file_id] = found[1].strip() if found else 'Untagged'
         elif kind == '33':  # MeshFilter
             mesh = MESH_REFERENCE.search(body.encode())
             if mesh:
-                filters[re.search(r'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)[1]] = mesh[1].decode()
+                filters[re.search(r'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.MULTILINE)[1]] = mesh[1].decode()
         else:
             named.update(g.decode() for g in MESH_REFERENCE.findall(body.encode()))
             if kind == '114' and f'fileID: {MESH_COMBINER_SCRIPT},' in body and 'combineInRuntime: 1' in body:
-                found = re.search(r'^    parentGOs:\n((?:    - .*\n)*)', body, re.M)
+                found = re.search(r'^    parentGOs:\n((?:    - .*\n)*)', body, re.MULTILINE)
                 parents = re.findall(r'fileID: (-?\d+)', found[1]) if found else []
-                single = re.search(r'^    parent: \{fileID: (-?\d+)\}', body, re.M)
+                single = re.search(r'^    parent: \{fileID: (-?\d+)\}', body, re.MULTILINE)
                 if not parents and single and single[1] != '0':
                     parents = [single[1]]
-                by_tag = re.search(r'^    useTag: 1$', body, re.M) is not None
-                wanted = re.search(r'^    tag: (.*)$', body, re.M)
+                by_tag = re.search(r'^    useTag: 1$', body, re.MULTILINE) is not None
+                wanted = re.search(r'^    tag: (.*)$', body, re.MULTILINE)
                 combiners.append(
                     ({transform_of.get(p) for p in parents}, wanted[1].strip() if by_tag and wanted else None)
                 )
@@ -1144,8 +1176,9 @@ WELD_VERTEX_COUNT = re.compile(rb'\n    m_VertexCount: (\d+)\n')
 
 
 def cache_order(triangles: list, size: int = 32):
-    """Triangles (a flat index list) in an order for the GPU's post-transform vertex cache: Tom Forsyth's linear-speed
-    vertex cache optimisation (a cache of size entries, a vertex's score from its place in it and its triangles left)."""
+    """Triangles (a flat index list) in an order for the GPU's post-transform vertex cache: Tom Forsyth's
+    linear-speed vertex cache optimisation (a cache of size entries, a vertex's score from its place in it and its
+    triangles left)."""
     count = len(triangles) // 3
     if count < 3:
         return triangles
@@ -1267,15 +1300,19 @@ def weld_mesh(data: bytes):
         low, high = (min(used), max(used)) if used else (0, -1)
         new_submeshes.append(
             b'  - serializedVersion: 2\n    firstByte: %d\n    indexCount: %d\n    topology: %d\n'
-            b'    baseVertex: 0\n    firstVertex: %d\n    vertexCount: %d\n' % (first, index_count, topology, low, high - low + 1)
+            b'    baseVertex: 0\n    firstVertex: %d\n    vertexCount: %d\n'
+            % (first, index_count, topology, low, high - low + 1)
         )
     out = data
-    for submesh, new in reversed(list(zip(submeshes, new_submeshes))):
+    for submesh, new in reversed(list(zip(submeshes, new_submeshes, strict=True))):
         out = out[: submesh.start()] + new + out[submesh.end() :]
     out = out.replace(index_buffer.group(0), b'\n  m_IndexBuffer: ' + packed.hex().encode() + b'\n', 1)
     out = WELD_VERTEX_COUNT.sub(b'\n    m_VertexCount: %d\n' % len(unique), out, count=1)
-    out = out.replace(vertices.group(0), b'\n    m_DataSize: %d\n    _typelessdata: ' % len(new_raw) + new_raw.hex().encode() + b'\n', 1)
-    return out
+    return out.replace(
+        vertices.group(0),
+        b'\n    m_DataSize: %d\n    _typelessdata: ' % len(new_raw) + new_raw.hex().encode() + b'\n',
+        1,
+    )
 
 
 def weld_count(path: Path):
@@ -1304,11 +1341,14 @@ def cached_output(cache: Path, path: Path, data: bytes, make):
 
 
 def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
-    """weld_mesh on every mesh asset with duplicate vertices, as the rules before left it (cached in MESH_WELD_CACHE)."""
+    """weld_mesh on every mesh asset with duplicate vertices, as the rules before left it (cached in
+    MESH_WELD_CACHE)."""
     if platform != 'vita':
         return {}
     assets = exported / 'Assets'
-    counts = scan('mesh-weld', assets, lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset', weld_count)
+    counts = scan(
+        'mesh-weld', assets, lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset', weld_count
+    )
     result, before, after = {}, 0, 0
     for relative, count in counts.items():
         if not count:
@@ -1338,8 +1378,8 @@ HULL_AREAS = ('Pool',)
 HULL_MIN_USES = 1000
 HULL_KEEP = 0.7
 HULL_CACHE = WORK / 'hull-meshes'
-MESH_FILTER_MESH = re.compile(rb'^  m_Mesh: \{fileID: 4300000, guid: ([0-9a-f]{32})', re.M)
-SCENE_DOCUMENT_BYTES = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n(.*?)(?=^--- |\Z)', re.M | re.S)
+MESH_FILTER_MESH = re.compile(rb'^  m_Mesh: \{fileID: 4300000, guid: ([0-9a-f]{32})', re.MULTILINE)
+SCENE_DOCUMENT_BYTES = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n(.*?)(?=^--- |\Z)', re.MULTILINE | re.DOTALL)
 
 
 def hull_normal(points: list, a: int, b: int, c: int):
@@ -1371,10 +1411,13 @@ def hull_faces(points: list):
 
 
 def hull_volume(points: list, faces: list):
-    return sum(
-        sum(points[a][m] * hull_normal([(0, 0, 0), points[b], points[c]], 0, 1, 2)[m] for m in range(3))
-        for a, b, c in faces
-    ) / 6
+    return (
+        sum(
+            sum(points[a][m] * hull_normal([(0, 0, 0), points[b], points[c]], 0, 1, 2)[m] for m in range(3))
+            for a, b, c in faces
+        )
+        / 6
+    )
 
 
 def hull_mesh(data: bytes):
@@ -1440,7 +1483,7 @@ def hull_mesh(data: bytes):
     out = re.sub(box, lambda m: m[1] + b'm_Center: ' + center + m[1] + b'm_Extent: ' + extent + b'\n', out)
     out = re.sub(rb'\n  m_IndexFormat: \d\n', b'\n  m_IndexFormat: 0\n', out, count=1)
     packed = struct.pack(f'<{len(indices)}H', *indices).hex().encode()
-    out = re.sub(rb'\n  m_IndexBuffer: [0-9a-f]*\n', lambda m: b'\n  m_IndexBuffer: ' + packed + b'\n', out, count=1)
+    out = re.sub(rb'\n  m_IndexBuffer: [0-9a-f]*\n', lambda _: b'\n  m_IndexBuffer: ' + packed + b'\n', out, count=1)
     out = WELD_VERTEX_COUNT.sub(b'\n    m_VertexCount: %d\n' % len(points), out, count=1)
     data_line = b'\n    m_DataSize: %d\n    _typelessdata: ' % len(new_raw) + new_raw.hex().encode() + b'\n'
     return out.replace(vertices[0], data_line, 1)
@@ -1450,7 +1493,7 @@ def scene_mesh_filters(text: bytes):
     """[(mesh GUID, the material GUIDs its renderer draws it with)] for each MeshFilter of a scene."""
     mesh_of, materials_of = {}, collections.defaultdict(set)
     for kind, _, body in SCENE_DOCUMENT_BYTES.findall(text):
-        owner = re.search(rb'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)
+        owner = re.search(rb'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.MULTILINE)
         if not owner:
             continue
         if kind == b'33':
@@ -1511,6 +1554,7 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
         log(f'{platform}: {guids[guid]}: {path.name} as a hull, {before} -> {after} vertices')
     return result
 
+
 # One vertex per position for seamless-textured meshes (31 Oct, POOLROOTS), PS Vita. Pool before the boss, looking into
 # the pool, was still 19 fps with the rock as a hull: its seven roots stand up out of the pool until the fight (they
 # slide 16 m down when it starts, so the fight is cheaper), 60,000 vertices in their combined meshes. Their normals
@@ -1520,7 +1564,7 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
 # its normal's largest axis (as hull_mesh's), so the vertices that differed only in UVs become equal and weld_mesh
 # makes them one: the shape and lighting are the same, the grunge lies a little differently. Only meshes no other
 # scene, prefab or asset names, and not mesh_hull_overlay's hulls (Pool's rock), one vertex per position already.
-SEAMLESS = re.compile(r'seamless', re.I)
+SEAMLESS = re.compile(r'seamless', re.IGNORECASE)
 UV_WELD_CACHE = WORK / 'uv-welded-meshes'
 CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: (\d+)\n      format: (\d+)\n      dimension: (\d+)\n')
 
@@ -1600,6 +1644,7 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
     log(f'{platform}: {areas}: {len(result)} seamless-textured meshes one vertex per position, {before} -> {after}')
     return result
 
+
 # Meshes whose vertex data the game streams from a .resS file (m_StreamData): the 1,460 meshes that
 # MeshCombineStudio combined in the editor and SFB saved into the scenes (walls, fences, pipes, cars, a
 # level's vertex-coloured parts in one mesh: Roadside's Ford Fiesta, the red car's body, the fence rails
@@ -1615,13 +1660,13 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
 # a key with sources whose vertices differ takes the one in the level file of the scene that uses the mesh.
 STREAMED_MESHES = WORK / 'streamed-meshes.json'
 STREAMED_MESH_CACHE = WORK / 'streamed-meshes'
-NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.M)
+NO_VERTEX_DATA = re.compile(rb'^    m_DataSize: 0\n    _typelessdata: *\n', re.MULTILINE)
 MESH_KEY_VERSION = 'bounds'
 LOCAL_AABB = re.compile(
     rb'^  m_LocalAABB:\n'
     rb'    m_Center: \{x: (\S+), y: (\S+), z: (\S+)\}\n'
     rb'    m_Extent: \{x: (\S+), y: (\S+), z: (\S+)\}\n',
-    re.M,
+    re.MULTILINE,
 )
 
 
@@ -1675,9 +1720,9 @@ def exported_mesh_key(path: Path):
     data = path.read_bytes()
     if not NO_VERTEX_DATA.search(data):
         return None
-    name = re.search(rb'^  m_Name: (.*)\n', data, re.M)
-    count = re.search(rb'^    m_VertexCount: (\d+)\n', data, re.M)
-    indices = re.search(rb'^  m_IndexBuffer: ([0-9a-f]*)\n', data, re.M)
+    name = re.search(rb'^  m_Name: (.*)\n', data, re.MULTILINE)
+    count = re.search(rb'^    m_VertexCount: (\d+)\n', data, re.MULTILINE)
+    indices = re.search(rb'^  m_IndexBuffer: ([0-9a-f]*)\n', data, re.MULTILINE)
     bounds = LOCAL_AABB.search(data)
     if not (name and count and indices and bounds) or count[1] == b'0':
         return None
@@ -1698,7 +1743,7 @@ def scene_source(exported: Path, relative: Path, sources):
     guid = mesh_guids(assets).get(relative.with_name(relative.name + '.meta'))
     scenes = [s for s, users in scene_mesh_scan(assets).items() if any(guid in found for found in users)]
     settings = (exported / 'ProjectSettings' / 'EditorBuildSettings.asset').read_text(encoding='utf-8')
-    order = re.findall(r'^  - enabled: 1\n    path: Assets/(.*)$', settings, re.M)
+    order = re.findall(r'^  - enabled: 1\n    path: Assets/(.*)$', settings, re.MULTILINE)
     levels = {order.index(s.as_posix()) for s in scenes if s.as_posix() in order}
     level = re.compile(r'(?:level|sharedassets)(\d+)(?:\.assets)?\.resS')
     picked = [s for s in sources if level.fullmatch(s[0]) and int(level.fullmatch(s[0])[1]) in levels]
@@ -1770,8 +1815,8 @@ def streamed_mesh_overlay(exported: Path, game: Path):
 # and an area, whose meshes MeshRelease makes unreadable once combined. No game script or PlayMaker
 # action reads or writes a mesh; MeshCombineStudio, MeshColliders and particle systems take shared ones.
 MESH_DEDUP_CACHE = WORK / 'deduplicated-scenes'
-READABLE_LINES = re.compile(rb'^  m_(?:IsReadable|KeepVertices|KeepIndices): \d+\n', re.M)
-MESH_NAME_LINE = re.compile(rb'^  m_Name: .*\n', re.M)
+READABLE_LINES = re.compile(rb'^  m_(?:IsReadable|KeepVertices|KeepIndices): \d+\n', re.MULTILINE)
+MESH_NAME_LINE = re.compile(rb'^  m_Name: .*\n', re.MULTILINE)
 
 
 def mesh_geometry(path: Path):
@@ -1822,7 +1867,7 @@ def mesh_duplicates(exported: Path, overlay: dict):
 # assets sharing one atlas could write over each other.
 TEXTURE_USE = re.compile(rb'fileID: (?:2800000|21300000), guid: ([0-9a-f]{32})')
 ANY_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
-META_IDENTITY_LINES = re.compile(r'^(?:guid|timeCreated): .*\n', re.M)
+META_IDENTITY_LINES = re.compile(r'^(?:guid|timeCreated): .*\n', re.MULTILINE)
 
 
 def texture_users(assets: Path):
@@ -1867,14 +1912,15 @@ def texture_dedup_overlay(exported: Path, overlay: dict):
         lambda path: hashlib.sha1(path.read_bytes()).hexdigest(),
     )
     groups = {}
-    for found, image in content.items():
+    for found, digest in content.items():
         relative = Path('Assets') / found
+        image = digest
         if relative in overlay:  # npot_texture_overlay's padded images
             image = hashlib.sha1(current_bytes(exported, overlay, relative)).hexdigest()
         meta = current_text(exported, overlay, meta_of(relative))
-        if 'TextureImporter:' not in meta or re.search(r'^  isReadable: 1$', meta, re.M):
+        if 'TextureImporter:' not in meta or re.search(r'^  isReadable: 1$', meta, re.MULTILINE):
             continue
-        guid = require(re.search(r'^guid: (\w+)', meta, re.M), meta_of(relative), 'guid')[1]
+        guid = require(re.search(r'^guid: (\w+)', meta, re.MULTILINE), meta_of(relative), 'guid')[1]
         settings = hashlib.sha1(META_IDENTITY_LINES.sub('', meta).encode()).hexdigest()
         groups.setdefault((image, settings), []).append(guid)
     resident = resident_guids(assets)
@@ -1977,7 +2023,7 @@ ON_DEMAND_FOLDERS = {'MonoBehaviour': '.asset', 'Material': '.mat'}
 def i2_font_overlay(exported: Path, overlay: dict, excluded: set):
     """Returns (overlay entries, excluded original paths)."""
     text = current_text(exported, overlay, I2_SOURCE)
-    block = re.search(r'^    Assets:\n((?:    - .*\n)*)', text, re.M)
+    block = re.search(r'^    Assets:\n((?:    - .*\n)*)', text, re.MULTILINE)
     listed = set(re.findall(r'guid: (\w+)', block[1])) if block else set()
     moved, gone, dropped = {}, set(), set()
     for found, stat in listing(exported / 'Assets').items():
@@ -2052,7 +2098,7 @@ def original_asset_names(game: Path):
 def main_object_name(path: Path):
     """The m_Name in a native asset's first lines (its main object's), or None."""
     with path.open(encoding='utf-8', errors='replace') as handle:
-        match = re.search(r'^  m_Name: (.*)$', handle.read(NAME_SEARCH_BYTES), re.M)
+        match = re.search(r'^  m_Name: (.*)$', handle.read(NAME_SEARCH_BYTES), re.MULTILINE)
     return match.group(1) if match else None
 
 
@@ -2101,7 +2147,7 @@ def name_overlay(exported: Path, game: Path, overlay: dict):
                 relative = path.relative_to(exported)
                 text = current_text(exported, overlay, relative)
                 name_line = '  m_Name: ' + path.stem
-                text, count = re.subn(r'^  m_Name: .*$', lambda _: name_line, text, count=1, flags=re.M)  # noqa: B023
+                text, count = re.subn(r'^  m_Name: .*$', lambda _: name_line, text, count=1, flags=re.MULTILINE)  # noqa: B023
                 if count:
                     moved[relative] = text.encode('utf-8')
             skipped += 1
@@ -2132,7 +2178,7 @@ ADDRESSABLE_ASSETS = {'CharacterCameraPrefab': Path('Assets') / 'CharacterCamera
 ADDRESSABLES_LIST = Path('ProjectSettings') / 'CrowAddressables.txt'
 
 
-def addressables_overlay(exported: Path, overlay: dict):
+def addressables_overlay(exported: Path):
     """The list of Addressables assets for the build script, and the Addressables catalog left out.
     Returns (overlay entries, excluded original paths)."""
     lines = []
@@ -2184,7 +2230,7 @@ PHYSICS_RULES = {'m_AutoSimulation': '1'}
 # doesn't read: the editor then made a new random one at every build, into the project's settings and the
 # player's PlayerSettings, so no two builds were the same. Written in 2018's form, 32 hex digits, each word's
 # from its lowest four bits up.
-PRODUCT_GUID = re.compile(r'^  productGUID:\n((?:    data\[\d\]: \d+\n){4})', re.M)
+PRODUCT_GUID = re.compile(r'^  productGUID:\n((?:    data\[\d\]: \d+\n){4})', re.MULTILINE)
 
 
 def product_guid(text: str):
@@ -2201,7 +2247,7 @@ def settings_overlay(exported: Path, platform: str):
     text = (exported / relative).read_text(encoding='utf-8')
     text = product_guid(text)
     for key, value in {**SETTING_RULES, **PLATFORM_SETTING_RULES.get(platform, {})}.items():
-        text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
+        text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.MULTILINE)
         if count == 0:
             # Keys the source version no longer has; the file holds one PlayerSettings mapping.
             text = text.rstrip('\n') + f'\n  {key}: {value}\n'
@@ -2214,14 +2260,14 @@ def settings_overlay(exported: Path, platform: str):
         text = (exported / relative).read_text(encoding='utf-8')
         for key, value in quality_rules.items():
             # The levels' entries, indented under m_QualitySettings; the game has one level.
-            text, count = re.subn(rf'^(    {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
+            text, count = re.subn(rf'^(    {key}:).*$', rf'\g<1> {value}', text, flags=re.MULTILINE)
             if count != 1:
                 sys.exit(f'QualitySettings has {count} entries for {key}, expected one quality level')
         overlay[relative] = text.encode('utf-8')
     relative = Path('ProjectSettings') / 'DynamicsManager.asset'
     text = (exported / relative).read_text(encoding='utf-8')
     for key, value in PHYSICS_RULES.items():
-        text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.M)
+        text, count = re.subn(rf'^(  {key}:).*$', rf'\g<1> {value}', text, flags=re.MULTILINE)
         if count != 1:
             sys.exit(f'DynamicsManager has {count} entries for {key}')
     overlay[relative] = text.encode('utf-8')
@@ -2338,17 +2384,18 @@ DIELECTRIC_DIFFUSE = 1 - 0.220916301  # Standard's diffuse factor for dielectric
 # wrong way. Opaque lit surfaces on each other still tie. `-crow-lit-debug 1` switches the layers off.
 
 
-# The layer a CrowVita/Lit material is drawn on (vita_shaders/CrowLit.shader's _CrowLayerLo/Hi), so that a key light
-# whose culling mask leaves the layer out doesn't light it, as the game's light doesn't (each Arcade cabinet's point light
-# 8 cm in front of its screen lights the cabinet and leaves out the screen's layer, 28; as a key light it washed the screen
-# out to white). From the enabled renderers of every scene and prefab, those switched off at the load as well; a material
+# The layer a CrowVita/Lit material is drawn on (vita_shaders/CrowLit.shader's _CrowLayerLo/Hi), so that a key
+# light whose culling mask leaves the layer out doesn't light it, as the game's light doesn't (each Arcade cabinet's
+# point light 8 cm in front of its screen lights the cabinet and leaves out the screen's layer, 28; as a key light it
+# washed the screen out to white). From the enabled renderers of every scene and prefab, those switched off at the
+# load as well; a material
 # drawn on several layers keeps Default's (every key lights it). compat/VitaLit.cs gives each key's mask.
 # CrowVita/Particles Lit tests the masks too: the guns' lights leave out Particles, the layer of the Crypt's dust.
-LAYER_DOCUMENT = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n', re.M)
-GAME_OBJECT_LAYER = re.compile(rb'^  m_Layer: (\d+)$', re.M)
-COMPONENT_OWNER = re.compile(rb'^  m_GameObject: \{fileID: (-?\d+)\}', re.M)
-COMPONENT_ENABLED = re.compile(rb'^  m_Enabled: (\d)', re.M)
-RENDERER_MATERIALS = re.compile(rb'^  m_Materials:\n((?:  - \{[^\n]*\}\n)*)', re.M)
+LAYER_DOCUMENT = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n', re.MULTILINE)
+GAME_OBJECT_LAYER = re.compile(rb'^  m_Layer: (\d+)$', re.MULTILINE)
+COMPONENT_OWNER = re.compile(rb'^  m_GameObject: \{fileID: (-?\d+)\}', re.MULTILINE)
+COMPONENT_ENABLED = re.compile(rb'^  m_Enabled: (\d)', re.MULTILINE)
+RENDERER_MATERIALS = re.compile(rb'^  m_Materials:\n((?:  - \{[^\n]*\}\n)*)', re.MULTILINE)
 MATERIAL_GUID = re.compile(rb'guid: ([0-9a-f]{32})')
 
 
@@ -2415,16 +2462,18 @@ def vita_lit_bake(exported: Path, overlay: dict, lit_guid: str, drawn_on: dict):
         colors = {}
         if kind == 3:
             # Its colour, which the shader's default (white) would replace without a word.
-            color = require(re.search(rf'^      _Color: {VECTOR}$', text, re.M), relative, 'readable _Color')
+            color = require(re.search(rf'^      _Color: {VECTOR}$', text, re.MULTILINE), relative, 'readable _Color')
             r, g, b, a = (float(v) for v in color.groups())
             colors['_CrowLitColor'] = f'{{r: {r!r}, g: {g!r}, b: {b!r}, a: {a!r}}}'
             d = DIELECTRIC_DIFFUSE
             colors['_Color'] = f'{{r: {r / d!r}, g: {g / d!r}, b: {b / d!r}, a: {a!r}}}'
             floats.update(_Glossiness='0', _Metallic='0')
-            keywords = require(re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M), relative, 'm_ShaderKeywords')
+            keywords = require(
+                re.search(r'^  m_ShaderKeywords:(.*)$', text, re.MULTILINE), relative, 'm_ShaderKeywords'
+            )
             words = set(keywords.group(1).split()) | {'_GLOSSYREFLECTIONS_OFF', '_SPECULARHIGHLIGHTS_OFF'}
             text = text[: keywords.start(1)] + ' ' + ' '.join(sorted(words)) + text[keywords.end(1) :]
-        mode = re.search(r'^      _Mode: ([-\d.e]+)$', text, re.M)
+        mode = re.search(r'^      _Mode: ([-\d.e]+)$', text, re.MULTILINE)
         if not mode or float(mode.group(1)) == 0:
             floats['_CrowDepthLayer'] = '-1'
             layered += 1
@@ -2446,11 +2495,11 @@ def set_properties(text: str, block: str, values: dict):
     """Sets m_Floats/m_Colors entries (the mapping form of serializedVersion 3), adding the missing."""
     if not values:
         return text
-    empty = re.search(rf'^    {block}: (\{{\}}|\[\])$', text, re.M)
+    empty = re.search(rf'^    {block}: (\{{\}}|\[\])$', text, re.MULTILINE)
     if empty:
         lines = ''.join(f'\n      {k}: {v}' for k, v in values.items())
         return text[: empty.start()] + f'    {block}:' + lines + text[empty.end() :]
-    start = re.search(rf'^    {block}:\n', text, re.M)
+    start = re.search(rf'^    {block}:\n', text, re.MULTILINE)
     if not start:
         raise RuntimeError(f'no {block} in a material')
     end = start.end()
@@ -2461,7 +2510,7 @@ def set_properties(text: str, block: str, values: dict):
         end += line.end()
     body = text[start.end() : end]
     for key, value in values.items():
-        entry = re.search(rf'^      {re.escape(key)}: .*$', body, re.M)
+        entry = re.search(rf'^      {re.escape(key)}: .*$', body, re.MULTILINE)
         if entry:
             body = body[: entry.start()] + f'      {key}: {value}' + body[entry.end() :]
         else:
@@ -2503,7 +2552,7 @@ def vita_lit_overlay(exported: Path, overlay: dict, platform: str):
         found = SHADER_LINE.search(text)
         if not found or found.group(1) != BUILTIN_STANDARD:
             continue
-        found = re.search(r'^  m_ShaderKeywords:(.*)$', text, re.M)
+        found = re.search(r'^  m_ShaderKeywords:(.*)$', text, re.MULTILINE)
         sets.add(' '.join(sorted(k for k in (found.group(1).split() if found else []) if k in VITA_LIT_KEYWORDS)))
     shader = VITA_SHADERS / 'CrowLit.shader'
     # Assets/Resources is the export's (Addressables' assets move there).

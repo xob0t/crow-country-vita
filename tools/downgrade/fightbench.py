@@ -193,7 +193,7 @@ def vita_runs(args):
         for step, clean in (('quit', vita.quit_game), ('args', lambda: vita.set_args([]))):
             try:
                 clean()
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - the cleanup goes on whatever failed
                 print(f'cleanup {step} failed: {error}')
         print('quit the game, cleared args.txt')
     return [log for log in logs if log is not None]
@@ -215,7 +215,7 @@ def vita_run(vita, mode, run, args, tag_dir):
         time.sleep(POLL_SECONDS)
         try:
             text = vita.read(f'{vita.REMOTE}/log.txt').decode(errors='replace')
-        except Exception as error:
+        except Exception as error:  # noqa: BLE001 - a failed poll is tried again
             print(f'  log read failed: {error}')
             continue
         head = [line.strip() for line in text.split('\n', HEAD_LINES)[:HEAD_LINES]]
@@ -243,7 +243,7 @@ def vita_run(vita, mode, run, args, tag_dir):
             try:
                 with perf.open('a') as file:
                     file.write(f'--- window {len(windows)}\n{vita.command("perf", timeout=5)}\n')
-            except Exception as error:
+            except Exception as error:  # noqa: BLE001 - perf is optional
                 print(f'  perf failed: {error}')
         if summary is not None or failure:
             break

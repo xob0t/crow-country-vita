@@ -56,8 +56,8 @@ from asset_rules import (
     i2_font_overlay,
     link_xml,
     mesh_duplicates,
-    mesh_readable_overlay,
     mesh_hull_overlay,
+    mesh_readable_overlay,
     mesh_uv_weld_overlay,
     mesh_weld_overlay,
     mipmap_overlay,
@@ -266,7 +266,7 @@ def compile_csharp(command: list):
     digest = hashlib.sha256()
     for arg in map(str, command):
         digest.update(arg.encode() + bytes(1))  # a separator
-        path = Path(arg[len('/r:') :] if arg.startswith('/r:') else arg)
+        path = Path(arg.removeprefix('/r:'))
         if arg.endswith('.cs'):
             digest.update(path.read_bytes())
         elif arg.startswith('/r:') and path.exists():
@@ -519,7 +519,7 @@ def rewrite_assemblies(plugins: Path, out: Path, version: str, platform: str, ro
     switches = build_switches(platform, ('code',))
     log('Code switches: ' + describe_switches(switches))
     env = {**os.environ, **switches, 'CROW_API_VERSION': version}
-    result = subprocess.run([str(c) for c in command], capture_output=True, text=True, env=env)
+    result = subprocess.run([str(c) for c in command], capture_output=True, text=True, env=env, check=False)
     log_path.write_text(result.stdout + result.stderr, encoding='utf-8')
     for name in STUBBED_ON.get(platform, []):
         target = out / f'{name}.dll'
@@ -581,7 +581,7 @@ def link_check(version: str, platform: str):
         '--dotnetprofile=unityaot',
     ]
     log_path = ARTIFACTS / f'link-{platform}.log'
-    result = subprocess.run([str(c) for c in command], capture_output=True, text=True)
+    result = subprocess.run([str(c) for c in command], capture_output=True, text=True, check=False)
     log_path.write_text(result.stdout + result.stderr, encoding='utf-8')
     lines = [line for line in (result.stdout + result.stderr).splitlines() if line.strip()]
     log(f'UnityLinker exited {result.returncode}' + (': ' + ' | '.join(lines[:3]) if result.returncode else ''))
@@ -608,7 +608,7 @@ def link_check(version: str, platform: str):
         *(f'--assembly={dll}' for dll in converted),
         f'--generatedcppdir={staging / "cpp"}',
     ]
-    result = subprocess.run([str(c) for c in command], capture_output=True, text=True)
+    result = subprocess.run([str(c) for c in command], capture_output=True, text=True, check=False)
     (ARTIFACTS / f'il2cpp-{platform}.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     errors = [line for line in (result.stdout + result.stderr).splitlines() if 'error' in line.lower()]
     log(f'IL2CPP conversion exited {result.returncode}' + (': ' + ' | '.join(errors[:3]) if result.returncode else ''))
@@ -640,7 +640,11 @@ def load_check(version: str):
     mono = editor_data(version) / 'MonoBleedingEdge' / 'bin' / 'mono.exe'
     env = {**os.environ, 'MONO_PATH': str(staging), 'MONO_LOG_LEVEL': 'debug', 'MONO_LOG_MASK': 'type'}
     result = subprocess.run(
-        [str(mono), str(exe), str(staging), *(d.name for d in rewritten)], capture_output=True, text=True, env=env
+        [str(mono), str(exe), str(staging), *(d.name for d in rewritten)],
+        capture_output=True,
+        text=True,
+        env=env,
+        check=False,
     )
     log_path = ARTIFACTS / 'loadcheck.log'
     log_path.write_text(result.stdout + result.stderr, encoding='utf-8')
@@ -847,7 +851,7 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
         overlay.update(mesh_uv_weld_overlay(exported, overlay, platform, duplicates, hulls))
         texture_copies, renamed_references = texture_dedup_overlay(exported, overlay)
         overlay.update(renamed_references)
-        moved, renamed = addressables_overlay(exported, overlay)
+        moved, renamed = addressables_overlay(exported)
         overlay.update(moved)
         excluded.update(renamed)
         moved, renamed = name_overlay(exported, game, overlay)
@@ -978,6 +982,7 @@ def build(
                 str(log_path),
             ],
             env=env,
+            check=False,
         )
     log(f'Unity exited {result.returncode} after {time.time() - started:.0f}s; log {log_path}')
     summarize_log(log_path)
@@ -1016,7 +1021,7 @@ def check_build_output(output: Path, platform: str, started: float, log_path: Pa
     log_text = log_path.read_text(encoding='utf-8', errors='replace')
     if 'BuilderFailedException' in log_text:
         sys.exit(f'Unity reported success but IL2CPP failed; see {log_path}')
-    summary = re.findall(r'^DOWNGRADE_BUILD \w+ errors=(\d+)', log_text, re.M)
+    summary = re.findall(r'^DOWNGRADE_BUILD \w+ errors=(\d+)', log_text, re.MULTILINE)
     if not summary:
         sys.exit(f'The editor log has no DOWNGRADE_BUILD summary; see {log_path}')
     errors = int(summary[-1])
@@ -1050,7 +1055,7 @@ def check_build_output(output: Path, platform: str, started: float, log_path: Pa
 SCENE_STEP_FAILED = re.compile(
     r'^DOWNGRADE_(?:SPLIT|MERGE|PLAYER_MERGE|CROW_ENEMY_ATLAS) .* failed: .*$'
     r'|^DOWNGRADE_(?:MCS|PROBUILDER|VARIANT_BAKE) .*\bfailed=[1-9].*$',
-    re.M,
+    re.MULTILINE,
 )
 
 
@@ -1067,7 +1072,7 @@ def log_build_steps(log_path: Path):
     """The build report's steps (DowngradeBuild's DOWNGRADE_STEP lines) under Build player, and how long the
     scenes took together."""
     text = log_path.read_text(encoding='utf-8', errors='replace')
-    steps = re.findall(r'^DOWNGRADE_STEP ([\d.]+) (\d+) (.*)$', text, re.M)
+    steps = re.findall(r'^DOWNGRADE_STEP ([\d.]+) (\d+) (.*)$', text, re.MULTILINE)
     if not steps:
         return
     top = [f'{name.strip()} {float(seconds):.0f}s' for seconds, depth, name in steps if depth == '1']
@@ -1094,8 +1099,9 @@ def editor_has_open(project: Path):
         ],
         capture_output=True,
         text=True,
+        check=False,
     )
-    opened = (re.search(r'-projectPath\s+("[^"]+"|\S+)', line, re.I) for line in result.stdout.splitlines())
+    opened = (re.search(r'-projectPath\s+("[^"]+"|\S+)', line, re.IGNORECASE) for line in result.stdout.splitlines())
     return any(Path(found[1].strip('"')).resolve() == project.resolve() for found in opened if found)
 
 
@@ -1255,7 +1261,7 @@ def linker_xmls(arguments: str):
 
 def logged_arguments(log_text: str, tool: str):
     """The argument string of the editor log's last 'Invoking <tool> with arguments:' line."""
-    found = re.findall(rf'^Invoking {tool} with arguments: (.*)$', log_text, re.M)
+    found = re.findall(rf'^Invoking {tool} with arguments: (.*)$', log_text, re.MULTILINE)
     if not found:
         sys.exit(f'The PS Vita build log has no {tool} command line; build once with pipeline.py build')
     return found[-1]
@@ -1322,7 +1328,11 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
     started = time.time()
     with progress.step('UnityLinker'):
         result = subprocess.run(
-            f'"{tools / "UnityLinker.exe"}" {linker_arguments}', cwd=project, capture_output=True, text=True
+            f'"{tools / "UnityLinker.exe"}" {linker_arguments}',
+            cwd=project,
+            capture_output=True,
+            text=True,
+            check=False,
         )
     (ARTIFACTS / 'quickcode-linker.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:
@@ -1347,7 +1357,7 @@ def replay_code_steps(project, temp, output, rewritten, version, linker_argument
     native.mkdir(parents=True, exist_ok=True)
     with progress.step('IL2CPP: C++ and the module'):
         result = subprocess.run(
-            f'"{tools / "il2cpp.exe"}" {il2cpp_arguments}', cwd=native, capture_output=True, text=True
+            f'"{tools / "il2cpp.exe"}" {il2cpp_arguments}', cwd=native, capture_output=True, text=True, check=False
         )
     (ARTIFACTS / 'quickcode-il2cpp.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:
@@ -1404,7 +1414,7 @@ def native_plugins(output: Path):
     folder.mkdir(parents=True, exist_ok=True)
     for name, files in NATIVE_PLUGINS.items():
         script = HERE / 'native' / name / 'build.py'
-        if subprocess.run([sys.executable, str(script)]).returncode:
+        if subprocess.run([sys.executable, str(script)], check=False).returncode:
             sys.exit(f'Building the {name} native plugin failed ({script})')
         for file in files:
             shutil.copy2(WORK / 'native' / name / file, folder / file)
@@ -1613,7 +1623,7 @@ def patcher_usse(player: bytearray):
 
     if word(at - 4) != VITA_PATCHER_USSE_UNITY or word(at) not in (VITA_PATCHER_USSE_UNITY, VITA_PATCHER_USSE_BYTES):
         sys.exit(
-            f'The player has {word(at - 4):#x} {word(at):#x} where 2018.2.19f1 keeps the shader patcher\'s '
+            f"The player has {word(at - 4):#x} {word(at):#x} where 2018.2.19f1 keeps the shader patcher's "
             f'buffer and USSE sizes ({at - 4:#x}): another player; find g_ShaderPatcherCombinedUsseSize again'
         )
     player[at : at + 4] = VITA_PATCHER_USSE_BYTES.to_bytes(4, 'little')

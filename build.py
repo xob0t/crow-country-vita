@@ -46,7 +46,7 @@ def environment():
 
 def run(failed, command, env=None):
     """Run a command; stop with failed (what to tell the user) when it fails."""
-    code = subprocess.run([str(c) for c in command], env=env or environment()).returncode
+    code = subprocess.run([str(c) for c in command], env=env or environment(), check=False).returncode
     if code:
         progress.fail(f'\nbuild.py: {failed} (exit code {code}).')
 
@@ -160,7 +160,7 @@ def main():
     holder = 'build.py: ' + ', '.join(t for t in ('vita', 'windows', 'il2cpp') if getattr(args, t))
     rerun = [sys.executable, ROOT / 'build.py', '--locked', *sys.argv[1:]]
     command = [sys.executable, LOCK, 'run', name, holder, '--wait', str(args.wait), '--', *rerun]
-    code = subprocess.run([str(c) for c in command], env=environment()).returncode
+    code = subprocess.run([str(c) for c in command], env=environment(), check=False).returncode
     if code == LOCK_NOT_TAKEN:
         progress.fail(f'\nbuild.py: another job held the {name} lock for {args.wait:.0f} s; try again later.')
     sys.exit(code)
