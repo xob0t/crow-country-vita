@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -26,6 +27,13 @@ namespace CrowCompat
     // material) and is switched off. A box takes a scale change as a shape update,
     // without cooking. Left alone: triggers, and colliders of non-kinematic rigidbodies (their shape
     // drives the simulation).
+    // Triggers a ScaleAnimationScript scales (1 Nov, DEATHS): an enemy's death pool, `blood sfx surface`
+    // (a convex trigger for the blood footstep sound), grows from 0.6 to 1 over 7-10 s, and PhysX cooked its
+    // convex hull again at every physics step meanwhile. Station Square's fight after a Grinner's death:
+    // physics 20-34 ms a frame (12-17 ms a step) for about 8 s, 1.8 once settled; boxed, 7-12.5 with 7 enemies
+    // still fighting (5.5-8.7 without a death). Those triggers, at or
+    // below a ScaleAnimationScript's target, get a trigger box of their mesh's bounds when the scene is
+    // listed, on or off, before any of them grows (64 in the game's scenes, all enemies' death pools).
     static class ScaledColliders
     {
         const int Frames = 40, Often = 10;  // watched frames; changes that count as animated
@@ -85,7 +93,11 @@ namespace CrowCompat
             {
                 if (next < 0f || Time.realtimeSinceStartup < next) return;
                 next = Time.realtimeSinceStartup + 15f;
-                if (rescan) List();
+                if (rescan)
+                {
+                    List();
+                    if (mode == "box") SwapScaledTriggers();
+                }
                 rescan = false;
                 // The candidates that are on now; nothing allocated.
                 int on = 0;
@@ -177,6 +189,48 @@ namespace CrowCompat
             return changed;
         }
 
+        static Type scaleAnimation;
+        static System.Reflection.FieldInfo targetSelf, target;
+        static bool looked;
+
+        // The enabled trigger mesh colliders at or below a ScaleAnimationScript's target, boxed (see above).
+        static void SwapScaledTriggers()
+        {
+            if (!looked)
+            {
+                looked = true;
+                // By its full name in whichever assembly holds it (the rewritten game's isn't named Assembly-CSharp).
+                foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+                    if (scaleAnimation == null) scaleAnimation = assembly.GetType("Code.com.sfbgames.general.animation.ScaleAnimationScript");
+                if (scaleAnimation != null)
+                {
+                    targetSelf = scaleAnimation.GetField("targetSelf");
+                    target = scaleAnimation.GetField("target");
+                }
+            }
+            if (scaleAnimation == null || targetSelf == null || target == null)
+            {
+                Debug.Log("CROW_SCALED scaled triggers: no ScaleAnimationScript type");
+                return;
+            }
+            int boxed = 0;
+            foreach (UnityEngine.Object found in Resources.FindObjectsOfTypeAll(scaleAnimation))
+            {
+                var script = found as Component;
+                if (script == null || !script.gameObject.scene.IsValid()) continue;
+                object value = (bool)targetSelf.GetValue(script) ? script.transform : target.GetValue(script);
+                Transform root = value is Transform ? (Transform)value : value is GameObject ? ((GameObject)value).transform : null;
+                if (root == null) continue;
+                foreach (MeshCollider mesh in root.GetComponentsInChildren<MeshCollider>(true))
+                {
+                    if (!mesh.isTrigger || !mesh.enabled || mesh.sharedMesh == null || swapped.ContainsKey(mesh)) continue;
+                    Swap(mesh);
+                    boxed++;
+                }
+            }
+            if (boxed > 0) Debug.Log("CROW_SCALED scaled triggers boxed=" + boxed + " total=" + swapped.Count);
+        }
+
         static void Swap(MeshCollider mesh)
         {
             Bounds bounds = mesh.sharedMesh.bounds;
@@ -184,6 +238,7 @@ namespace CrowCompat
             box.center = bounds.center;
             box.size = Vector3.Max(bounds.size, new Vector3(0.001f, 0.001f, 0.001f));
             box.sharedMaterial = mesh.sharedMaterial;
+            box.isTrigger = mesh.isTrigger;
             box.contactOffset = mesh.contactOffset;
             mesh.enabled = false;
             swapped[mesh] = box;
