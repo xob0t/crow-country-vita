@@ -185,6 +185,7 @@ These environment variables change what a stage writes, for experiments and meas
 | `CROW_MCS_BAKE`, `CROW_MCS_STRIP` | build | `on`, `off` (`on`, `off`; the strip as the bake) | MeshCombineStudio's run-time combining done at build time (in Pool, first each rock placing's triangles hidden inside another rock culled), and the combined sources left out (`unity/MeshCombineBake.cs`). |
 | `CROW_STRIP` | build | `on`, `off` (`on`, `off`) | The scripts that do nothing in the player left out of the scenes (`unity/StripScenes.cs`). |
 | `CROW_STACK_FOLD` | build | `on`, `off` (`on`, `off`) | See-through layers stacked at one place (one mesh and material, scales within 2.5%) drawn once, with the stack's alpha (`unity/StackedLayers.cs`). |
+| `CROW_BACKING` | build | `on`, `off` (`on`, `off`) | Opaque faces of the game's other shaders lying just behind a depth-layered CrowVita/Lit face, facing its way (the Dungeon's black wall backing), moved 3 cm further back so the layer doesn't put them in front (`unity/BackingFaces.cs`). |
 | `CROW_LIT_BAKE` | project | `on`, `off` (`on`; PS Vita only) | The materials saved with CrowVita/Lit; `off` leaves the swap to run time. |
 | `CROW_FSM_COMPILE` | code | `on`, `off` (`off`) | The FSMs' compiled bodies only, without the originals beside them (`rewriter/FsmCompile.cs`). |
 | `CROW_ACTION_PROFILE` | code | `0`, `1` (`0`) | PlayMaker's actions and the behaviours timed, for `-crow-action-profile` ([vita.md](vita.md)). |
