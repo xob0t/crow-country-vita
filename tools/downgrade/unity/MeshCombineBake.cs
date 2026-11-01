@@ -120,9 +120,10 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
 
     // Pool's rock floor (31 Oct, POOLROCKS): asset_rules.mesh_hull_overlay makes the rock, placed 1,056 times, a
     // convex hull, and the rocks overlap. Here, before the scene's combine, each placing loses the triangles with
-    // every corner more than 1 cm inside one other placing of a hull: closed, convex and opaque, so its inside is
-    // never seen. Each placing that loses any gets a copy of the mesh, which the combine then reads. In HiddenAreas,
-    // for meshes placed HiddenMinUses times or more (asset_rules.HULL_AREAS, HULL_MIN_USES).
+    // every corner more than 1 cm inside one other placing of a hull: closed (each edge, by position, two
+    // triangles'), convex and opaque, so its inside is never seen. Each placing that loses any gets a copy of the
+    // mesh, which the combine then reads; one that loses all has its renderer switched off, which the combine leaves
+    // out. In HiddenAreas, for meshes placed HiddenMinUses times or more (asset_rules.HULL_AREAS, HULL_MIN_USES).
     static readonly string[] HiddenAreas = { "Pool" };
     const int HiddenMinUses = 1000;
     const float Cell = 2f, Inside = 0.01f;
@@ -145,7 +146,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
         // As placed, before any placing gets its copy below.
         Dictionary<MeshFilter, Mesh> meshOf = placings.ToDictionary(f => f, f => f.sharedMesh);
         Dictionary<MeshFilter, Bounds> boundsOf = placings.ToDictionary(f => f, f => f.GetComponent<MeshRenderer>().bounds);
-        // Each repeated mesh's faces as planes (a point, an outward normal), when it is convex.
+        // Each repeated mesh's faces as planes (a point, an outward normal), when it is closed and convex.
         var planes = new Dictionary<Mesh, KeyValuePair<Vector3, Vector3>[]>();
         foreach (Mesh mesh in placings.Select(f => f.sharedMesh).Distinct())
         {
@@ -159,7 +160,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 if (normal.sqrMagnitude > 1e-12f) faces.Add(new KeyValuePair<Vector3, Vector3>(a, normal.normalized));
             }
             bool convex = vertices.All(v => faces.All(f => Vector3.Dot(f.Value, v - f.Key) <= 1e-4f));
-            if (convex) planes[mesh] = faces.ToArray();
+            if (convex && Closed(vertices, triangles)) planes[mesh] = faces.ToArray();
         }
         // The placings by 2 m cells of x, z.
         var near = new Dictionary<long, List<MeshFilter>>();
@@ -173,7 +174,7 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
                 list.Add(filter);
             }
         }
-        int cut = 0, before = 0, after = 0, verticesBefore = 0, verticesAfter = 0;
+        int cut = 0, off = 0, before = 0, after = 0, verticesBefore = 0, verticesAfter = 0;
         foreach (MeshFilter filter in placings)
         {
             Mesh mesh = meshOf[filter];
@@ -221,6 +222,12 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
             verticesAfter += count;
             if (keep.Count == triangles.Length) continue;
             cut++;
+            if (keep.Count == 0)
+            {
+                filter.GetComponent<MeshRenderer>().enabled = false;
+                off++;
+                continue;
+            }
             var remap = new int[vertices.Length];
             for (int i = 0, next = 0; i < vertices.Length; i++) remap[i] = used[i] ? next++ : -1;
             var copy = new Mesh { name = mesh.name };
@@ -241,8 +248,26 @@ class CrowMeshCombineBake : UnityEditor.Build.IProcessSceneWithReport
             copy.RecalculateBounds();
             filter.sharedMesh = copy;
         }
-        Debug.Log("DOWNGRADE_MCS " + scene.name + " hidden: placings=" + placings.Count + " convex=" + planes.Count + " cut=" + cut +
+        Debug.Log("DOWNGRADE_MCS " + scene.name + " hidden: placings=" + placings.Count + " hulls=" + planes.Count + " cut=" + cut + " off=" + off +
                   " triangles=" + before + "->" + after + " vertices=" + verticesBefore + "->" + verticesAfter + " ms=" + clock.ElapsedMilliseconds);
+    }
+
+    // Whether each edge of the triangles, by vertex position, is two triangles'.
+    static bool Closed(Vector3[] vertices, int[] triangles)
+    {
+        var positions = new Dictionary<Vector3, int>();
+        var id = new int[vertices.Length];
+        for (int i = 0; i < vertices.Length; i++)
+            if (!positions.TryGetValue(vertices[i], out id[i])) positions[vertices[i]] = id[i] = positions.Count;
+        var edges = new Dictionary<long, int>();
+        for (int t = 0; t + 2 < triangles.Length; t += 3)
+            for (int k = 0; k < 3; k++)
+            {
+                int a = id[triangles[t + k]], b = id[triangles[t + (k + 1) % 3]], n;
+                long key = ((long)Math.Min(a, b) << 32) | (uint)Math.Max(a, b);
+                edges[key] = (edges.TryGetValue(key, out n) ? n : 0) + 1;
+            }
+        return edges.Count > 0 && edges.Values.All(n => n == 2);
     }
 
     static IEnumerable<long> Cells(float x0, float x1, float z0, float z1)

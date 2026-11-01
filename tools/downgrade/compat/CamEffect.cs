@@ -95,14 +95,16 @@ namespace CrowCompat
 
         static readonly System.Collections.Generic.List<Component> effects = new System.Collections.Generic.List<Component>();
 
-        // -crow-ab and -crow-cycle's camera=<width>: every half-size effect's camera picture at that size.
-        internal static void SetCameraWidth(int width)
+        // -crow-ab and -crow-cycle's camera=<width>: every half-size effect's camera picture at that size; false for a
+        // width it doesn't take.
+        internal static bool SetCameraWidth(int width)
         {
-            if (!Allowed(width)) return;
+            if (!Allowed(width)) return false;
             cameraWidth = width;
             effects.RemoveAll(e => e == null);
             foreach (Component effect in effects) CameraTarget(effect, effect.GetType());
             Debug.Log("CROW_CAMERA picture " + width + " wide on " + effects.Count + " camera effects");
+            return true;
         }
 
         static void CameraTarget(Component effect, Type type)

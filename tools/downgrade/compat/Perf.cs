@@ -84,22 +84,26 @@ namespace CrowCompat
                     Merge.Set(value);
                     return true;
                 case "iter":
-                    if (numeric && number >= 1f) Physics.defaultSolverIterations = (int)number;
+                    if (!(numeric && number >= 1f)) return Bad(key, value);
+                    Physics.defaultSolverIterations = (int)number;
                     break;
                 case "sync":
                     Physics.autoSyncTransforms = value == "1";
                     break;
                 case "gpu":
-                    if (numeric) Clock.SetGpu((int)number);
+                    if (!(numeric && number >= 0f)) return Bad(key, value);
+                    Clock.SetGpu((int)number);
                     break;
                 case "time":
-                    if (numeric && number >= 0f) Time.timeScale = number;
+                    if (!(numeric && number >= 0f)) return Bad(key, value);
+                    Time.timeScale = number;
                     break;
                 case "camera":
-                    if (numeric) CamEffect.SetCameraWidth((int)number);
+                    if (!(numeric && CamEffect.SetCameraWidth((int)number))) return Bad(key, value);
                     return true;
                 case "vsync":
-                    if (numeric) QualitySettings.vSyncCount = (int)number;
+                    if (!(numeric && number >= 0f && number <= 4f)) return Bad(key, value);
+                    QualitySettings.vSyncCount = (int)number;
                     break;
                 case "mappan":
                     MapPan.Set(value == "on");
@@ -131,6 +135,13 @@ namespace CrowCompat
             Debug.Log("CROW_PERF " + key + "=" + value + " (fixed=" + Time.fixedDeltaTime.ToString("R", CultureInfo.InvariantCulture) +
                       " maxdt=" + Time.maximumDeltaTime.ToString("R", CultureInfo.InvariantCulture) + " iter=" + Physics.defaultSolverIterations +
                       " sync=" + (Physics.autoSyncTransforms ? 1 : 0) + " vsync=" + QualitySettings.vSyncCount + " clocks=" + (Clock.Describe() ?? "?") + ")");
+            return true;
+        }
+
+        // A value its key doesn't take: logged, nothing changed (the key known all the same).
+        static bool Bad(string key, string value)
+        {
+            Debug.Log("CROW_PERF " + key + "=" + value + ": not a value it takes, nothing changed");
             return true;
         }
     }

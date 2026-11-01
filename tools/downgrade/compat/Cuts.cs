@@ -821,7 +821,7 @@ namespace CrowCompat
                 Debug.Log("CROW_CUTS rewired joysticks failed: " + exception);
             }
         }
-        // The most derived public property (or field) of that name, null when there is none (ByName, ProbeFiles.cs).
+        // The most derived public property (or field) of that name, null when there is none (ByName, Helpers.cs).
         static object Get(object target, string name)
         {
             return ByName.GetOrNull(target, name);

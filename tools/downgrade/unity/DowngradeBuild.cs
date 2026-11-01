@@ -142,7 +142,7 @@ public static class DowngradeBuild
 
     // The player prefab (CharacterCameraPrefab: the player, the camera and every menu, 10,000
     // GameObjects) goes in a scene of its own instead, as an inactive instance named as
-    // Object.Instantiate names a clone. CrowCompat (compat/Loading.cs, MaraScene) loads it in the
+    // Object.Instantiate names a clone. CrowCompat (compat/SceneFlow.cs, MaraScene) loads it in the
     // background once the title has loaded and gives the instance to MaraLoader, where the game
     // cloned the prefab in its first area (a third of that load at the PS Vita's speed), and the
     // prefab no longer stays in memory for good among the preloaded assets.

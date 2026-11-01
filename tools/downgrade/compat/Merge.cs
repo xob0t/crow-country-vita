@@ -67,7 +67,9 @@ using UnityEngine.SceneManagement;
 //                               renderers out); on: merge at run time as the build does; off: the
 //                               build's merged renderers off and their parts on (a build made with
 //                               CROW_MERGE=ab, which keeps the parts' meshes), with the enemies'
-//                               MeshCombineStudio combiners back on; merged: back (not the combiners).
+//                               MeshCombineStudio combiners back on (not the animation scripts the build
+//                               switched off for secondary motion: no record of them is kept); merged:
+//                               back (not the combiners).
 //                               -crow-cycle takes merge=<value> (now, in the loaded scenes).
 //   -crow-merge-cell <m>, -crow-merge-max-vertices <n>, -crow-merge-max-kb <n>, -crow-merge-drop
 //                               the run-time merge's cell, part size, memory budget, and Drop
@@ -200,7 +202,7 @@ namespace CrowCompat
             });
         }
 
-        // -crow-cycle merge=on|off|report: now, in every loaded scene.
+        // -crow-cycle merge=on|off|merged|report: now, in every loaded scene.
         internal static void Set(string value)
         {
             for (int i = 0; i < SceneManager.sceneCount; i++)
@@ -214,7 +216,7 @@ namespace CrowCompat
         {
             try
             {
-                if (value == "off" || value == "back") Switch(scene, false);
+                if (value == "off") Switch(scene, false);
                 else if (value == "merged") Switch(scene, true);
                 else if (value == "report" || value == "on")
                 {
@@ -228,7 +230,7 @@ namespace CrowCompat
             }
         }
 
-        // The build's merged renderers off and their parts on (or back).
+        // The build's merged renderers off and their parts on (or back). Secondary's animation scripts stay off.
         static void Switch(Scene scene, bool merged)
         {
             int groups = 0, parts = 0;
@@ -340,7 +342,8 @@ namespace CrowCompat
                 return EnemyOf(t) != null;
             }
 
-            // Whether an anchor's reason moves, turns or scales it (switching it, destroying it or a rigidbody's physics don't).
+            // Whether an anchor's reason moves, turns or scales it (switching it, destroying it or a rigidbody's physics don't;
+            // nor do the animation scripts, which Secondary judges before they are anchors).
             static bool Motion(string reason)
             {
                 if (reason.StartsWith("DOTweenTransform", StringComparison.Ordinal) || reason.StartsWith("DOTweenRigidbody", StringComparison.Ordinal))
@@ -357,7 +360,7 @@ namespace CrowCompat
             {
                 "SetPosition", "SetRotation", "SetScale", "Rotate", "LookAt", "SmoothLookAt", "SmoothLookAt2d", "SmoothLookAtDirection",
                 "SmoothLookAtWithLimit", "MoveTowards", "SetRandomRotation", "SpinGameObject", "SetRotationEveryFrame", "RotateAroundAxis",
-                "TransformLock", "RotationAnimationScript", "ScaleAnimationScript", "PositionAnimationScript",
+                "TransformLock",
             };
 
             // An enemy's or a body's (Secondary): merged the enemies' way.
@@ -622,14 +625,15 @@ namespace CrowCompat
         }
 
         // Secondary motion (30 Oct, BOSS): with bake (the PS Vita build), an animation script (Rotation, Scale, Position)
-        // whose target is in a rigidbody that isn't an enemy's root (their merge has rules of its own), below something
-        // that moves, turns or scales it there (a DOTween move, SetPosition, LookAt...; not a switch or a destroy), and that
-        // holds only small parts (meshes of at most MaxPartVertices), is switched off for good, as PlatformSpecificAnimation
-        // does for the crows' skin blobs on the Switch, so its parts merge (the PS Vita draws each renderer for 35-45 us of
-        // the main thread). Pool's boss: its hair, pustules, splat balls and fingers wobble on hundreds of scripts, each its
-        // own renderer. The rigidbody then merges as an enemy does: per anchor across materials, its see-through parts too,
-        // in the enemies' budget (the boss's parts, about 2 MB, lost to Pool's level in the level's). The player's are left
-        // (PlayerMerge's rules). The other animation scripts are anchors.
+        // whose target is below a rigidbody (not the rigidbody itself) that isn't an enemy's or in one (their merge has
+        // rules of its own), below something in the rigidbody (or the rigidbody) that moves, turns or scales it there (a
+        // DOTween move, SetPosition, LookAt...; not a switch, a destroy, another animation script or a mover outside the
+        // rigidbody), and that holds only small parts (meshes of at most MaxPartVertices), is switched off for good, as
+        // PlatformSpecificAnimation does for the crows' skin blobs on the Switch, so its parts merge (the PS Vita draws each
+        // renderer for 35-45 us of the main thread). Pool's boss: its hair, pustules, splat balls and fingers wobble on
+        // hundreds of scripts, each its own renderer. The rigidbody then merges as an enemy does: per anchor across materials,
+        // its see-through parts too, in the enemies' budget (the boss's parts, about 2 MB, lost to Pool's level in the
+        // level's). The player's are left (PlayerMerge's rules). The other animation scripts are anchors.
         static void Secondary(Analysis analysis, bool bake)
         {
             var still = new List<KeyValuePair<Component, Transform>>();
@@ -638,7 +642,7 @@ namespace CrowCompat
                 if (!bake || playerRules || analysis.stateDriven.Contains(animation.Key) || !Small(animation.Value)) continue;
                 Transform body = animation.Value;
                 while (body != null && body.GetComponent<Rigidbody>() == null) body = body.parent;
-                if (body == null || EnemyNames.Named(body.name) || !Moved(animation.Value.parent, body, analysis)) continue;
+                if (body == null || body == animation.Value || EnemyNames.RootOf(body) != null || !Moved(animation.Value.parent, body, analysis)) continue;
                 still.Add(animation);
                 analysis.bodies.Add(body);
             }
@@ -648,7 +652,7 @@ namespace CrowCompat
             analysis.secondary = still.Count;
         }
 
-        // Whether something moves, turns or scales t or one of its parents up to the body.
+        // Whether something moves, turns or scales t or one of its parents up to the body (t is in the body).
         static bool Moved(Transform t, Transform body, Analysis analysis)
         {
             for (; t != null; t = t.parent)

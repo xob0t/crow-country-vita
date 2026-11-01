@@ -83,7 +83,7 @@ namespace CrowCompat
             Guard("FixedStep", FixedStep.Install);  // -crow-fixed-dt: the physics step
             Guard("EnemySplit", EnemySplit.Install);  // the enemies' death debris out (EnemySplit.cs, EnemyRebuild.cs)
             Guard("FastPaths", FastPaths.Install);  // -crow-fast-property, -crow-lit-camera (FastPaths.cs)
-            Guard("Decor", Decor.Install);  // decoration off screen, -crow-motion-report (Decor.cs)
+            Guard("Decor", Decor.Install);  // decoration off screen (Decor.cs)
             Guard("Cuts", Cuts.Install);  // the fights' cuts (Cuts.cs; PS Vita defaults), after Decor
             Guard("Tweens", TweenProbe.Install);  // -crow-tween-log: DOTween's update timed (Tweens.cs)
             Guard("Pad", Pad.Install);  // the PS Vita's pad without Rewired's updates (Pad.cs; PS Vita default)
@@ -196,7 +196,7 @@ namespace CrowCompat
         static float lastUpdateAt = -1f;
         static Diag probe;
 
-        // A screenshot of the frame as shown (-crow-shot, -crow-pad-press's shot). On the PS Vita
+        // A screenshot of the frame as shown (-crow-shot, -crow-pad-press's shot, -crow-ab). On the PS Vita
         // ScreenCapture writes nothing (and vitacompanion's screenshot can run out of memory), so there the
         // frame is read back at its end and saved as a PNG (960x544 RGB, about 1.5 MB while it is made).
         internal static void Shot(string path)
@@ -247,13 +247,13 @@ namespace CrowCompat
             bool titleUp = sceneToLoad != null && !sceneRequested && now - lastLoad >= 2f && SceneManager.GetActiveScene().name == Scenes.Title;
             if (sceneToLoad != null && !sceneRequested && (titleUp || now - started >= 180f))
             {
-                MaraScene.Request();  // the player's scene, which the title would have loaded (Loading.cs)
+                MaraScene.Request();  // the player's scene, which the title would have loaded (SceneFlow.cs)
                 if (MaraScene.Settled)
                 {
                     sceneRequested = true;
                     Debug.Log("CROW_DIAG loading " + sceneToLoad);
                     Fight.BeforeLoad();  // the globals the area's FSMs read as it starts
-                    if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (Loading.cs)
+                    if (!SceneGap.Load(sceneToLoad, LoadSceneMode.Single)) SceneManager.LoadScene(sceneToLoad);  // as the game's loads (SceneFlow.cs)
                 }
                 else if (!waitLogged)
                 {

@@ -19,6 +19,7 @@ from common import (
     WORK,
     YAML_FILES,
     build_switches,
+    code_digest,
     expect,
     folder_meta,
     game_data,
@@ -1063,6 +1064,16 @@ def mesh_guids(assets: Path):
     )
 
 
+def asset_guids(assets: Path):
+    """{<path>.meta: the GUID of the asset or folder} for everything outside Mesh/ (mesh_guids has those)."""
+    return scan(
+        'asset-guids',
+        assets,
+        lambda relative: relative.suffix == '.meta' and relative.parts[0] != 'Mesh',
+        meta_guid,
+    )
+
+
 def mesh_readable_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict | None = None):
     """duplicates: mesh_duplicates' {copy's GUID: the GUID the scenes name instead}."""
     if platform != 'vita':
@@ -1276,6 +1287,22 @@ def weld_count(path: Path):
     return [int(WELD_VERTEX_COUNT.search(data).group(1)), int(WELD_VERTEX_COUNT.search(welded).group(1))]
 
 
+def cached_output(cache: Path, path: Path, data: bytes, make):
+    """cache / path holding make(data), or None when make gives None. The mark beside it has data's SHA-1 and
+    code_digest(make) (make, the tools' functions it calls and the constants they read), so a change to the code
+    makes it again too (1 Nov: keyed by the input alone, meshes welded before cache_order were kept without it)."""
+    cached, mark = cache / path, cache / path.with_suffix('.sha1')
+    key = f'{hashlib.sha1(data).hexdigest()} {code_digest(make)}'
+    if not (cached.exists() and mark.exists() and mark.read_text() == key):
+        made = make(data)
+        if made is None:
+            return None
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        cached.write_bytes(made)
+        mark.write_text(key)
+    return cached
+
+
 def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
     """weld_mesh on every mesh asset with duplicate vertices, as the rules before left it (cached in MESH_WELD_CACHE)."""
     if platform != 'vita':
@@ -1287,16 +1314,9 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
         if not count:
             continue
         path = Path('Assets') / relative
-        data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = MESH_WELD_CACHE / path, MESH_WELD_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            welded = weld_mesh(data)
-            if welded is None:
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(welded)
-            mark.write_text(digest)
+        cached = cached_output(MESH_WELD_CACHE, path, current_bytes(exported, overlay, path), weld_mesh)
+        if cached is None:
+            continue
         result[path] = cached
         before, after = before + count[0], after + count[1]
     log(f'{platform}: {len(result)} meshes welded, their vertices {before} -> {after}')
@@ -1306,17 +1326,20 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
 # Repeated meshes made simpler where the GPU can't keep up (31 Oct, POOLROCKS), PS Vita. Pool before the boss: looking
 # at the pool's centre the frame was 63.5 ms (vsync 2: the GPU a few ms over 33), and with only the rock floor hidden
 # 33.2 (`work/scratch/poolgpu`): its rock, 48 vertices placed 1,056 times, is 50,700 vertices that the lit vertex
-# program runs for. In HULL_AREAS a mesh placed HULL_MIN_USES times or more becomes the convex hull of the
-# HULL_KEEP share of its positions that shape it most (the others dropped one at a time, the one whose loss takes
-# least of the hull's volume first), one vertex per position: its normal kept, the UVs projected along the normal's
-# largest axis (the rock's texture is a seamless grunge). Pool's rock: 48 vertices, 48 triangles -> 18, 32. A mesh
-# that isn't nearly convex (a position more than 10% of its size inside the hull), or isn't one stream of float
-# positions, normals and UVs, is left alone. unity/MeshCombineBake.cs culls the hulls' buried triangles.
+# program runs for. In HULL_AREAS a mesh placed (by MeshFilters) HULL_MIN_USES times or more becomes the convex hull
+# of the HULL_KEEP share of its positions that shape it most (the others dropped one at a time, the one whose loss
+# takes least of the hull's volume first), one vertex per position: its normal kept, the UVs projected along the
+# normal's largest axis (the rock's texture is a seamless grunge). Pool's rock: 48 vertices, 48 triangles -> 18, 32.
+# Only meshes no other scene, prefab or asset names (meshes_named_elsewhere). A mesh that isn't convex (a position
+# inside the hull, or four on one of its faces: hull_faces wants every position a corner of triangular faces, as all
+# the rock's are), or isn't one stream of float positions, normals and UVs, is left alone. unity/MeshCombineBake.cs
+# culls the hulls' buried triangles.
 HULL_AREAS = ('Pool',)
 HULL_MIN_USES = 1000
 HULL_KEEP = 0.7
 HULL_CACHE = WORK / 'hull-meshes'
 MESH_FILTER_MESH = re.compile(rb'^  m_Mesh: \{fileID: 4300000, guid: ([0-9a-f]{32})', re.M)
+SCENE_DOCUMENT_BYTES = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n(.*?)(?=^--- |\Z)', re.M | re.S)
 
 
 def hull_normal(points: list, a: int, b: int, c: int):
@@ -1378,18 +1401,8 @@ def hull_mesh(data: bytes):
         row = struct.unpack_from('<8f', raw, i * 32)
         normal_at.setdefault(row[:3], row[3:6])
     positions = list(normal_at)
-    faces = hull_faces(positions)
-    if faces is None:
+    if hull_faces(positions) is None:  # convex: every position a corner of the hull
         return None
-    size = max(max(p[k] for p in positions) - min(p[k] for p in positions) for k in range(3))
-    for p in positions:  # nearly convex: every position on or near the hull
-        depth = min(
-            -sum(normal[m] * (p[m] - positions[a][m]) for m in range(3)) / (sum(x * x for x in normal) ** 0.5)
-            for a, b, c in faces
-            for normal in [hull_normal(positions, a, b, c)]
-        )
-        if depth > 0.1 * size:
-            return None
     keep = list(range(len(positions)))
     while len(keep) > max(4, round(HULL_KEEP * len(positions))):
         best = None
@@ -1433,38 +1446,66 @@ def hull_mesh(data: bytes):
     return out.replace(vertices[0], data_line, 1)
 
 
+def scene_mesh_filters(text: bytes):
+    """[(mesh GUID, the material GUIDs its renderer draws it with)] for each MeshFilter of a scene."""
+    mesh_of, materials_of = {}, collections.defaultdict(set)
+    for kind, _, body in SCENE_DOCUMENT_BYTES.findall(text):
+        owner = re.search(rb'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)
+        if not owner:
+            continue
+        if kind == b'33':
+            mesh = MESH_FILTER_MESH.search(body)
+            if mesh:
+                mesh_of[owner[1]] = mesh[1].decode()
+        elif kind in (b'23', b'137') and b'\n  m_Materials:\n' in body:
+            listed = body.split(b'\n  m_Materials:\n', 1)[1].split(b'\n  m_', 1)[0]
+            materials_of[owner[1]].update(g.decode() for g in re.findall(rb'guid: ([0-9a-f]{32})', listed))
+    return [(mesh, materials_of[owner]) for owner, mesh in mesh_of.items()]
+
+
+def area_mesh_filters(exported: Path, overlay: dict, duplicates: dict):
+    """{HULL_AREAS scene: its scene_mesh_filters, each mesh as its mesh_duplicates group's}."""
+    found = {}
+    for relative, stat in listing(exported / 'Assets' / 'Scenes').items():
+        if stat is not None and relative.suffix == '.unity' and relative.stem in HULL_AREAS:
+            text = current_bytes(exported, overlay, Path('Assets') / 'Scenes' / relative)
+            found[relative.stem] = [(duplicates.get(m, m), materials) for m, materials in scene_mesh_filters(text)]
+    return found
+
+
+def meshes_named_elsewhere(assets: Path, duplicates: dict):
+    """The meshes (as their mesh_duplicates group's) that a scene other than HULL_AREAS', a prefab or an asset names:
+    the HULL_AREAS rules leave them alone, as elsewhere they may be drawn otherwise."""
+    named = set()
+    for found, users in scene_mesh_scan(assets).items():
+        if found.stem not in HULL_AREAS:
+            named.update(duplicates.get(g, g) for guids in users for g in guids)
+    for guids in mesh_references_elsewhere(assets).values():
+        named.update(duplicates.get(g, g) for g in guids)
+    return named
+
+
 def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict):
     """hull_mesh on the meshes placed HULL_MIN_USES times or more in a HULL_AREAS scene (cached in HULL_CACHE).
     ProBuilder saved a copy of the mesh for each placing, so the uses are counted by mesh_duplicates' groups
-    (scene_dedup_overlay later points the scene at the group's mesh)."""
+    (scene_dedup_overlay later points the scene at the group's mesh). Not meshes_named_elsewhere."""
     if platform != 'vita':
         return {}
     assets = exported / 'Assets'
     guids = {}
-    for relative, stat in listing(assets / 'Scenes').items():
-        if stat is not None and relative.suffix == '.unity' and relative.stem in HULL_AREAS:
-            text = current_bytes(exported, overlay, Path('Assets') / 'Scenes' / relative)
-            uses = collections.Counter(duplicates.get(g.decode(), g.decode()) for g in MESH_FILTER_MESH.findall(text))
-            guids.update({guid: relative.stem for guid, n in uses.items() if n >= HULL_MIN_USES})
-    meshes = {}
-    for relative, stat in listing(assets / 'Mesh').items():
-        if stat is not None and relative.suffix == '.meta':
-            found = re.search(r'guid: ([0-9a-f]{32})', (assets / 'Mesh' / relative).read_text(encoding='utf-8'))
-            if found and found[1] in guids:
-                meshes[found[1]] = Path('Assets') / 'Mesh' / relative.with_suffix('')
+    for area, filters in area_mesh_filters(exported, overlay, duplicates).items():
+        uses = collections.Counter(mesh for mesh, _ in filters)
+        guids.update({guid: area for guid, n in uses.items() if n >= HULL_MIN_USES})
+    for guid in meshes_named_elsewhere(assets, duplicates):
+        guids.pop(guid, None)
+    meshes = {guid: Path('Assets') / meta.with_suffix('') for meta, guid in mesh_guids(assets).items() if guid in guids}
     result = {}
     for guid, path in sorted(meshes.items()):
         data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = HULL_CACHE / path, HULL_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            hulled = hull_mesh(data)
-            if hulled is None:
-                log(f'{platform}: {guids[guid]}: {path.name} left as it is (not a simple hull)')
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(hulled)
-            mark.write_text(digest)
+        cached = cached_output(HULL_CACHE, path, data, hull_mesh)
+        if cached is None:
+            log(f'{platform}: {guids[guid]}: {path.name} left as it is (not a simple hull)')
+            continue
         result[path] = cached
         before, after = (WELD_VERTEX_COUNT.search(d)[1].decode() for d in (data, cached.read_bytes()))
         log(f'{platform}: {guids[guid]}: {path.name} as a hull, {before} -> {after} vertices')
@@ -1478,10 +1519,9 @@ def mesh_hull_overlay(exported: Path, overlay: dict, platform: str, duplicates: 
 # texture's name: SFB's Subtle-Grunge-Texture-N-Seamless) or that have none gets UVs projected from its position along
 # its normal's largest axis (as hull_mesh's), so the vertices that differed only in UVs become equal and weld_mesh
 # makes them one: the shape and lighting are the same, the grunge lies a little differently. Only meshes no other
-# scene, prefab or asset names.
+# scene, prefab or asset names, and not mesh_hull_overlay's hulls (Pool's rock), one vertex per position already.
 SEAMLESS = re.compile(r'seamless', re.I)
 UV_WELD_CACHE = WORK / 'uv-welded-meshes'
-SCENE_DOCUMENT_BYTES = re.compile(rb'^--- !u!(\d+) &(-?\d+)[^\n]*\n(.*?)(?=^--- |\Z)', re.M | re.S)
 CHANNEL = re.compile(rb'    - stream: (\d+)\n      offset: (\d+)\n      format: (\d+)\n      dimension: (\d+)\n')
 
 
@@ -1511,39 +1551,20 @@ def project_uvs(data: bytes):
     return data.replace(vertices[2], bytes(raw).hex().encode(), 1)
 
 
-def scene_mesh_materials(text: bytes):
-    """{mesh GUID: material GUIDs drawn with it} for the MeshFilters of a scene."""
-    mesh_of, materials_of = {}, collections.defaultdict(set)
-    for kind, _, body in SCENE_DOCUMENT_BYTES.findall(text):
-        owner = re.search(rb'^  m_GameObject: \{fileID: (-?\d+)\}', body, re.M)
-        if not owner:
-            continue
-        if kind == b'33':
-            mesh = MESH_FILTER_MESH.search(body)
-            if mesh:
-                mesh_of[owner[1]] = mesh[1].decode()
-        elif kind in (b'23', b'137') and b'\n  m_Materials:\n' in body:
-            listed = body.split(b'\n  m_Materials:\n', 1)[1].split(b'\n  m_', 1)[0]
-            materials_of[owner[1]].update(g.decode() for g in re.findall(rb'guid: ([0-9a-f]{32})', listed))
-    result = collections.defaultdict(set)
-    for owner, mesh in mesh_of.items():
-        result[mesh].update(materials_of.get(owner, ()))
-    return result
+def uv_weld_mesh(data: bytes):
+    """project_uvs, then weld_mesh; None when project_uvs can't read the layout or welding changes nothing."""
+    projected = project_uvs(data)
+    return weld_mesh(projected) if projected else None
 
 
-def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict):
-    """project_uvs, then weld_mesh, on the HULL_AREAS scenes' meshes drawn only with seamless or untextured materials
-    (cached in UV_WELD_CACHE)."""
+def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicates: dict, hulls: dict):
+    """uv_weld_mesh on the HULL_AREAS scenes' meshes drawn only with seamless or untextured materials (cached in
+    UV_WELD_CACHE). hulls: mesh_hull_overlay's result, meshes left as it made them (already one vertex per position)."""
     if platform != 'vita':
         return {}
     assets = exported / 'Assets'
-    guid_path = {}
-    for folder in ('Mesh', 'Material', 'Texture2D'):
-        for relative, stat in listing(assets / folder).items():
-            if stat is not None and relative.suffix == '.meta':
-                found = re.search(r'guid: ([0-9a-f]{32})', (assets / folder / relative).read_text(encoding='utf-8'))
-                if found:
-                    guid_path[found[1]] = Path('Assets') / folder / relative.with_suffix('')
+    metas = asset_guids(assets) | mesh_guids(assets)
+    guid_path = {guid: Path('Assets') / meta.with_suffix('') for meta, guid in metas.items() if guid}
     seamless = {}
 
     def plain(material: str):
@@ -1556,35 +1577,22 @@ def mesh_uv_weld_overlay(exported: Path, overlay: dict, platform: str, duplicate
             )
         return seamless[material]
 
-    meshes = set()
-    for relative, stat in listing(assets / 'Scenes').items():
-        if stat is not None and relative.suffix == '.unity' and relative.stem in HULL_AREAS:
-            text = current_bytes(exported, overlay, Path('Assets') / 'Scenes' / relative)
-            for mesh, materials in scene_mesh_materials(text).items():
-                if materials and all(plain(m) for m in materials):
-                    meshes.add(duplicates.get(mesh, mesh))
-    # Only meshes no other scene, prefab or asset names: elsewhere a material may need their UVs.
-    for found, users in scene_mesh_scan(assets).items():
-        if found.stem not in HULL_AREAS:
-            meshes.difference_update(duplicates.get(g, g) for guids in users for g in guids)
-    for guids in mesh_references_elsewhere(assets).values():
-        meshes.difference_update(duplicates.get(g, g) for g in guids)
+    # By the group's mesh, which every copy's placing draws after scene_dedup_overlay: all their materials.
+    drawn_with = collections.defaultdict(set)
+    for filters in area_mesh_filters(exported, overlay, duplicates).values():
+        for mesh, materials in filters:
+            drawn_with[mesh] |= materials
+    meshes = {mesh for mesh, materials in drawn_with.items() if materials and all(plain(m) for m in materials)}
+    meshes -= meshes_named_elsewhere(assets, duplicates)  # elsewhere a material may need their UVs
     result, before, after = {}, 0, 0
     for guid in sorted(meshes):
         path = guid_path.get(guid)
-        if path is None or path.suffix != '.asset':
+        if path is None or path.suffix != '.asset' or path in hulls:
             continue
         data = current_bytes(exported, overlay, path)
-        digest = hashlib.sha1(data).hexdigest()
-        cached, mark = UV_WELD_CACHE / path, UV_WELD_CACHE / path.with_suffix('.sha1')
-        if not (cached.exists() and mark.exists() and mark.read_text() == digest):
-            projected = project_uvs(data)
-            welded = weld_mesh(projected) if projected else None
-            if welded is None:
-                continue
-            cached.parent.mkdir(parents=True, exist_ok=True)
-            cached.write_bytes(welded)
-            mark.write_text(digest)
+        cached = cached_output(UV_WELD_CACHE, path, data, uv_weld_mesh)
+        if cached is None:
+            continue
         result[path] = cached
         before += int(WELD_VERTEX_COUNT.search(data)[1])
         after += int(WELD_VERTEX_COUNT.search(cached.read_bytes())[1])
@@ -1837,13 +1845,7 @@ def resident_guids(assets: Path):
         lambda path: sorted({g.decode() for g in ANY_GUID.findall(path.read_bytes())}),
         version=ANY_GUID.pattern.decode(),
     )
-    paths = scan(
-        'asset-guids',
-        assets,
-        lambda relative: relative.suffix == '.meta' and relative.parts[0] != 'Mesh',
-        meta_guid,
-    )
-    by_guid = {guid: meta.with_suffix('') for meta, guid in paths.items() if guid}
+    by_guid = {guid: meta.with_suffix('') for meta, guid in asset_guids(assets).items() if guid}
     seen, todo = set(), [root.relative_to('Assets') for root in ADDRESSABLE_ASSETS.values()]
     while todo:
         for guid in references.get(todo.pop(), []):

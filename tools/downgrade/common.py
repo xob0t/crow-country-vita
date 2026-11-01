@@ -540,6 +540,12 @@ def code_fingerprint(function, seen=None):
     return ' '.join(parts)
 
 
+@functools.cache
+def code_digest(function):
+    """A short hash of code_fingerprint(function), once per run, to keep beside what the function made."""
+    return hashlib.sha256(code_fingerprint(function).encode()).hexdigest()[:16]
+
+
 def plain(value):
     """A value of a plain type as text that is the same on every run (sets sorted), or None."""
     if value is None or isinstance(value, str | bytes | int | float | Path):
@@ -565,7 +571,7 @@ def scan(name: str, folder: Path, select, function, version=''):
     so a rerun reads only the files that changed. function's result must be JSON; version names what
     else it depends on (a change discards the cache). So does a change to function itself or to what
     code_fingerprint sees of it (a constant it reads, such as asset_rules.NAME_SEARCH_BYTES)."""
-    version = f'{version} code {hashlib.sha256(code_fingerprint(function).encode()).hexdigest()[:16]}'
+    version = f'{version} code {code_digest(function)}'
     cache_path = SCAN_CACHE / f'{name}.json'
     try:
         cache = json.loads(cache_path.read_text(encoding='utf-8'))

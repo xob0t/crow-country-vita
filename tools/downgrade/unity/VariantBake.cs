@@ -160,7 +160,7 @@ class CrowVariantBake : UnityEditor.Build.IProcessSceneWithReport
                             foreach (KeyValuePair<Transform, List<Transform>> pair in referrers)
                             {
                                 if (!Inside(pair.Key, root)) continue;
-                                Transform from = pair.Value.FirstOrDefault(f => !Inside(f, root));
+                                Transform from = pair.Value.FirstOrDefault(f => f != null && !Inside(f, root));  // null: dropped with an earlier variant
                                 if (from == null) continue;
                                 why = pair.Key.name + " <- " + from.name;
                                 break;
