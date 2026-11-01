@@ -6,7 +6,12 @@ There are no game files in this repository. You bring your own copy, and the pip
 
 ## Where it stands
 
-Playable on the PS Vita. [docs/status.md](docs/status.md) has the details, the measurements and the plan.
+The game is fully playable from start to finish, at 30 fps nearly everywhere.
+
+- Loading a large area takes a while, up to about 20 seconds.
+- The biggest fights can drop a little below 30 fps.
+
+Other than that there are no known issues. [docs/status.md](docs/status.md) has the measurements.
 
 ## Building
 
