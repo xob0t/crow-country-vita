@@ -31,7 +31,7 @@ SDK = Path(setting('SCE_PSP2_SDK_DIR') or r'C:\vitasdk\PSVITA\sdk')
 BIN = SDK / 'host_tools' / 'build' / 'bin'
 SOURCES = [HERE / 'clock.c', HERE / 'threads.c']
 # The functions the plugin exports: what the sources declare PRX_EXPORT.
-EXPORT = re.compile(r'^PRX_EXPORT int (\w+)\(', re.M)
+EXPORT = re.compile(r'^PRX_EXPORT int (\w+)\(', re.MULTILINE)
 
 # The SDK stub each new one is copied from, by name length.
 BASES = {
@@ -82,7 +82,7 @@ def bridge_source():
 
 
 def run(*command, cwd=OUT):
-    result = subprocess.run([str(c) for c in command], cwd=cwd, capture_output=True, text=True)
+    result = subprocess.run([str(c) for c in command], cwd=cwd, capture_output=True, text=True, check=False)
     if result.returncode:
         sys.exit(f'{Path(command[0]).name} failed ({result.returncode}):\n{result.stdout}{result.stderr}')
     return result.stdout

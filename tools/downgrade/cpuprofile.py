@@ -332,7 +332,7 @@ class SamplingDuty(vitalike.Duty):
     def paused(self):
         try:
             self.sampler.sample()
-        except Exception as error:  # one bad sample shouldn't stop the run
+        except Exception as error:  # noqa: BLE001 - one bad sample shouldn't stop the run
             self.sampler.failed += 1
             self.sampler.last_error = repr(error)
 
@@ -447,8 +447,10 @@ def run(args, flags):
         runner.join(30)
     total = sum(sampler.stacks.values())
     with open(out / 'stacks.txt', 'w', encoding='utf-8') as file:
-        for stack, count in sampler.stacks.most_common():
-            file.write(';'.join(names.get(pc, '?') for pc in reversed(stack)) + f' {count}\n')
+        file.writelines(
+            ';'.join(names.get(pc, '?') for pc in reversed(stack)) + f' {count}\n'
+            for stack, count in sampler.stacks.most_common()
+        )
     note = f'run {time.time() - started:.0f} s; {duty.report() if duty else ""}; '
     note += f'{total} samples, {sampler.failed} failed'
     if sampler.last_error:

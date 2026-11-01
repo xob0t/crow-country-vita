@@ -93,7 +93,7 @@ def holder_of(name):
 
 
 def pid_line(text):
-    found = re.search(r'^pid (\d+) (\d+)$', text or '', re.M)
+    found = re.search(r'^pid (\d+) (\d+)$', text or '', re.MULTILINE)
     return (int(found[1]), int(found[2])) if found else None
 
 
@@ -189,11 +189,12 @@ def remove(lock):
     for attempt in range(40):
         try:
             lock.unlink(missing_ok=True)
-            return
         except PermissionError:
             if attempt == 39:
                 raise
             time.sleep(0.05)
+        else:
+            return
 
 
 def other_build_locks(name):
@@ -207,7 +208,7 @@ READER = 'reader'  # the lock file's line of a reader's lock (take's reader)
 def building(name):
     """Whether name is held by anything but a reader: the other build lock as take and wait see it. A
     file just created and not written yet, or being deleted, counts as held (the next poll looks again)."""
-    return path(name).exists() and not re.search(rf'^{READER}$', text_of(name) or '', re.M)
+    return path(name).exists() and not re.search(rf'^{READER}$', text_of(name) or '', re.MULTILINE)
 
 
 def holding(name):
@@ -335,10 +336,11 @@ def run_to_end(command, env):
     while True:
         try:
             code = process.wait()
-            return INTERRUPTED if interrupted else code
         except KeyboardInterrupt:
             interrupted = True
             print('lock.py: waiting for the command to end (Ctrl+Break stops both at once)', flush=True)
+        else:
+            return INTERRUPTED if interrupted else code
 
 
 def join_job_ending_with_this_process():

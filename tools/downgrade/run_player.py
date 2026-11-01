@@ -221,7 +221,7 @@ def run(exe: Path, log: Path, arguments, timeout=None, on_start=None):
         waited = kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF if timeout is None else int(timeout * 1000))
         if waited == WAIT_TIMEOUT:
             # The player and anything it started (a crash handler).
-            subprocess.run(['taskkill', '/T', '/F', '/PID', str(info.dwProcessId)], capture_output=True)
+            subprocess.run(['taskkill', '/T', '/F', '/PID', str(info.dwProcessId)], capture_output=True, check=False)
             return TIMED_OUT
         code = wt.DWORD()
         kernel32.GetExitCodeProcess(info.hProcess, ctypes.byref(code))

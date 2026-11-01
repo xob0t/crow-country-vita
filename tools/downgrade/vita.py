@@ -264,7 +264,7 @@ def transferring(what):
         return
     caught = []
 
-    def held(number, frame):
+    def held(number, _frame):
         caught.append(number)
         if len(caught) > 1:
             raise KeyboardInterrupt
@@ -541,7 +541,7 @@ def addr2line(binary: Path, addresses):
     for i in range(0, len(addresses), ADDR2LINE_BATCH):
         batch = ','.join(hex(a) for a in addresses[i : i + ADDR2LINE_BATCH])
         output = subprocess.run(
-            [str(psp2bin), '-i', str(binary), '--addr2line=' + batch], capture_output=True, text=True
+            [str(psp2bin), '-i', str(binary), '--addr2line=' + batch], capture_output=True, text=True, check=False
         ).stdout
         for block in output.split('Address:')[1:]:
             found = re.search(r'Symbol:[ \t]*(.*)', block)
@@ -601,12 +601,13 @@ def function_starts(data: bytes, base: int, start: int = 0):
         if word & 0x80000000 or not 0 <= prel31(word, base + k) < 0x10:
             continue
         starts = []
-        while k + 8 <= len(data):
-            address = prel31(int.from_bytes(data[k : k + 4], 'little'), base + k)
+        at = k
+        while at + 8 <= len(data):
+            address = prel31(int.from_bytes(data[at : at + 4], 'little'), base + at)
             if starts and address <= starts[-1]:
                 break
             starts.append(address)
-            k += 8
+            at += 8
         if len(starts) > 1000:
             return starts
     return None
@@ -705,15 +706,15 @@ def symbolize(dump: Path, build: Path, thread_name: str | None = None):
     for k in range(STACK_WORDS):
         try:
             value = int.from_bytes(core.read_vaddr(sp + 4 * k, 4), 'little')
-        except Exception:
+        except Exception:  # noqa: BLE001 - vita-parse-core raises plain Exceptions past the dump's memory
             break
         name, link = locate(value)
         if name and value & 1:  # Thumb return addresses
             frames.append((f'sp+{4 * k:x}', name, link))
     names = {}
-    for name in symbols:
+    for name, binary in symbols.items():
         wanted = sorted({link & ~1 for _, n, link in frames if n == name and link is not None})
-        for address, symbol in addr2line(symbols[name], wanted).items():
+        for address, symbol in addr2line(binary, wanted).items():
             names[name, address] = symbol
     for where, name, link in frames:
         if name:

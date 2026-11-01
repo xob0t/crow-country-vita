@@ -5,7 +5,7 @@ import re
 
 from common import number
 
-HEARTBEAT = re.compile(r'^HEARTBEAT (.*)$', re.M)
+HEARTBEAT = re.compile(r'^HEARTBEAT (.*)$', re.MULTILINE)
 
 
 def fields(text):

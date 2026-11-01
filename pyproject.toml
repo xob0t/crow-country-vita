@@ -53,5 +53,40 @@ select = [
     "PIE",     # unnecessary code
     "PERF",    # performance anti-patterns
     "RUF",     # ruff's own rules
+    "A",       # shadowed builtins
+    "ARG",     # unused arguments
+    "BLE",     # blind except
+    "DTZ",     # naive datetimes
+    "ERA",     # commented-out code
+    "EXE",     # shebangs
+    "FLY",     # str.join that should be an f-string
+    "FURB",    # refurb: modern idioms
+    "G",       # logging format strings
+    "ICN",     # import conventions
+    "ISC",     # implicit string concatenation
+    "LOG",     # logging
+    "N",       # naming
+    "PGH",     # blanket noqa and type: ignore
+    "PL",      # pylint
+    "RET",     # return statements
+    "RSE",     # raise statements
+    "S",       # bandit: security
+    "SLF",     # private member access
+    "T10",     # debugger calls
+    "TID",     # tidy imports
+    "TRY",     # exception handling
+]
+ignore = [
+    "N818",     # exception names without an Error suffix (vita.Unreachable)
+    "PLC0415",  # imports inside functions: the tools import heavy modules only where they're used
+    "PLR0911", "PLR0912", "PLR0913", "PLR0915", "PLR0917",  # function size limits
+    "PLR2004",  # magic values: byte offsets and formats compared to literals
+    "PLW0603",  # global statements: the tools' module-level state (the progress display, vita.py's keep-awake)
+    "S101",     # assert
+    "S310",     # urlopen: the downloads' URLs are the tools' own
+    "S321",     # ftplib: the console's FTP server has no TLS
+    "S303", "S324",  # md5 and sha1: used as cache keys, not for security
+    "S603", "S607",  # subprocess without a shell, by command name
+    "TRY003",   # messages in exception calls
 ]
 

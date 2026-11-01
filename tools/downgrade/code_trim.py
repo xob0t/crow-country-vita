@@ -61,7 +61,7 @@ def trim_assemblies(folder: Path, version: str, references: list):
     listed = ARTIFACTS / 'used-actions.txt'
     listed.write_text('\n'.join(names) + '\n', encoding='utf-8')
     command = [WORK / 'bin' / 'TrimAssemblies.exe', folder, listed, *references]
-    result = subprocess.run([str(c) for c in command], capture_output=True, text=True)
+    result = subprocess.run([str(c) for c in command], capture_output=True, text=True, check=False)
     (ARTIFACTS / 'trim.log').write_text(result.stdout + result.stderr, encoding='utf-8')
     if result.returncode:
         raise SystemExit(f'TrimAssemblies failed ({result.returncode}); see {ARTIFACTS / "trim.log"}')

@@ -30,14 +30,17 @@ COPY = WORK / 'sweep' / 'player'
 BUILD_SETTINGS = project_folder(TARGET, 'windows') / 'ProjectSettings' / 'EditorBuildSettings.asset'
 
 KINDS = [
-    ('aot', re.compile(r'ExecutionEngineException|ahead of time|AOT code', re.I)),
-    ('missing-method', re.compile(r'Missing(Method|Field|Member)Exception|TypeLoadException', re.I)),
-    ('exception', re.compile(r'^\w[\w.`]*(Exception|Error)\b[^\n]*:|Exception:', re.M)),
-    ('missing-script', re.compile(r'referenced script.*missing|script.*could not be loaded|missing script', re.I)),
-    ('shader', re.compile(r'shader|material doesn\'t have', re.I)),
-    ('rewired', re.compile(r'Rewired', re.I)),
-    ('playmaker', re.compile(r'PlayMaker|\bFsm\w*\b|Action\b.*not found', re.I)),
-    ('error', re.compile(r'\berror\b|\bfailed\b|could not|can\'t|cannot|not found|invalid', re.I)),
+    ('aot', re.compile(r'ExecutionEngineException|ahead of time|AOT code', re.IGNORECASE)),
+    ('missing-method', re.compile(r'Missing(Method|Field|Member)Exception|TypeLoadException', re.IGNORECASE)),
+    ('exception', re.compile(r'^\w[\w.`]*(Exception|Error)\b[^\n]*:|Exception:', re.MULTILINE)),
+    (
+        'missing-script',
+        re.compile(r'referenced script.*missing|script.*could not be loaded|missing script', re.IGNORECASE),
+    ),
+    ('shader', re.compile(r'shader|material doesn\'t have', re.IGNORECASE)),
+    ('rewired', re.compile(r'Rewired', re.IGNORECASE)),
+    ('playmaker', re.compile(r'PlayMaker|\bFsm\w*\b|Action\b.*not found', re.IGNORECASE)),
+    ('error', re.compile(r'\berror\b|\bfailed\b|could not|can\'t|cannot|not found|invalid', re.IGNORECASE)),
 ]
 # A stack frame: Mono's "  at ...", Unity's "Type:Method(args)" (and " (at file:line)"), "[ line n]".
 STACK = re.compile(
@@ -100,10 +103,10 @@ def analyse(scene, log: Path, png: Path, first_scene):
     beats = list(heartbeats(text))
     last = beats[-1] if beats else {}
     groups = {}
-    for lines, stack in messages(text):
+    for message, stack in messages(text):
         # CrowCompat's lines (they report, and say "not found" or "failed" in normal cases), then noise
         # lines at the start (several Unity lines can come without a Filename trailer).
-        lines = [line for line in lines if not line.startswith('CROW_')]
+        lines = [line for line in message if not line.startswith('CROW_')]
         while lines and NOISE.match(lines[0]):
             lines.pop(0)
         if not lines:
@@ -125,7 +128,7 @@ def analyse(scene, log: Path, png: Path, first_scene):
         'visible': int(last['visible']) if isinstance(last.get('visible'), float) else None,
         'last_beat_scene': last.get('scene'),
         'messages': sorted(groups.values(), key=lambda g: (g['kind'], -g['count'])),
-        'crashed': bool(re.search(r'Crash!!!|Received signal|access violation', text, re.I)),
+        'crashed': bool(re.search(r'Crash!!!|Received signal|access violation', text, re.IGNORECASE)),
     }
 
 

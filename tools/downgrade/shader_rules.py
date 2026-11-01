@@ -61,7 +61,7 @@ def uscsandbox():
     return exe
 
 
-SHADER_LISTING = re.compile(r'^  (.+) \(path id (-?\d+)\)$', re.M)
+SHADER_LISTING = re.compile(r'^  (.+) \(path id (-?\d+)\)$', re.MULTILINE)
 
 
 def decompile_shaders(game: Path):
@@ -79,7 +79,9 @@ def decompile_shaders(game: Path):
     files = sorted(data.glob('*.assets'))
     jobs = []
     for assets in files:
-        listing = subprocess.run([str(exe), 'null', str(assets)], cwd=work, capture_output=True, text=True, env=env)
+        listing = subprocess.run(
+            [str(exe), 'null', str(assets)], cwd=work, capture_output=True, text=True, env=env, check=False
+        )
         jobs += [(assets, name, path_id) for name, path_id in SHADER_LISTING.findall(listing.stdout)]
     failures = []
     for assets, name, path_id in progress.track(jobs, 'Decompiling shaders'):
@@ -89,6 +91,7 @@ def decompile_shaders(game: Path):
             capture_output=True,
             text=True,
             env=env,
+            check=False,
         )
         if result.returncode != 0 and name not in BUILTIN_SHADERS:
             message = [line for line in result.stderr.splitlines() + result.stdout.splitlines() if line.strip()]
@@ -112,13 +115,13 @@ UNIFORM_TYPE = r'(?:float|half|fixed|int|uint|bool)\w*'
 def for_each_program(text, function):
     """text with function's result in place of each CGPROGRAM line and body, given as a match: [1] the
     CGPROGRAM line, [2] the body up to its ENDCG."""
-    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', function, text, flags=re.S)
+    return re.sub(r'(CGPROGRAM\n)(.*?)(?=ENDCG)', function, text, flags=re.DOTALL)
 
 
 def builtin_uniforms(version):
     """Uniforms that the target editor declares in includes every CGPROGRAM gets."""
     includes = editor_data(version) / 'CGIncludes'
-    declaration = re.compile(rf'^\s*(?:uniform\s+)?{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;', re.M)
+    declaration = re.compile(rf'^\s*(?:uniform\s+)?{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;', re.MULTILINE)
     names = set()
     for name in ('HLSLSupport.cginc', 'UnityShaderVariables.cginc'):
         names.update(declaration.findall((includes / name).read_text(encoding='utf-8')))
@@ -139,7 +142,7 @@ def mask_logic(text):
 
 def strip_builtin_declarations(text, builtins):
     """The decompiler declares every uniform a program reads; drop those Unity already declares."""
-    pattern = re.compile(rf'^[ \t]*{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;[^\n]*\n', re.M)
+    pattern = re.compile(rf'^[ \t]*{UNIFORM_TYPE}\s+(\w+)\s*(?:\[[^\]]*\])?\s*;[^\n]*\n', re.MULTILINE)
     return pattern.sub(lambda m: '' if m.group(1) in builtins else m.group(0), text)
 
 
@@ -158,7 +161,7 @@ def conditional_uniforms(version):
     text = path.read_text(encoding='utf-8')
     # Only names declared once and never a macro: the others have a declaration or a #define in
     # every branch (_WorldSpaceLightPos0 is half4 or float4, _WorldSpaceCameraPos a stereo array).
-    macros = set(re.findall(r'^\s*#\s*define\s+(\w+)', text, re.M))
+    macros = set(re.findall(r'^\s*#\s*define\s+(\w+)', text, re.MULTILINE))
     declared = Counter()
     stack, found, guard = [], {}, True  # the first #ifndef is the include guard
     for line in text.splitlines():
@@ -245,7 +248,7 @@ def guard_repeated_declarations(text):
     return for_each_program(text, program)
 
 
-SAMPLER_3D = re.compile(r'^(\s*)(?:sampler3D\w*\s+(\w+)\s*;|UNITY_DECLARE_TEX3D\w*\((\w+)\);).*$', re.M)
+SAMPLER_3D = re.compile(r'^(\s*)(?:sampler3D\w*\s+(\w+)\s*;|UNITY_DECLARE_TEX3D\w*\((\w+)\);).*$', re.MULTILINE)
 NO_3D_SAMPLERS = """#if defined(SHADER_API_PSP2)
 #define CROW_TEX3D(s, c) float4(1, 1, 1, 1)
 #define CROW_SAMPLE_TEX3D_SAMPLER(t, s, c) float4(0, 0, 0, 0)
@@ -288,7 +291,7 @@ def no_3d_samplers_on_psp2(text):
 # lines of the program, 1 - x, times far and max(x, 0), end at Unity's fog coordinate for the platform:
 # the same value as before on Direct3D, the clip-space z on the PS Vita and OpenGL (as Unity's own shaders
 # and CrowVita/Lit have it, which compat/Cameras.cs's NearPlane counts on).
-FOG_FEATURE = re.compile(r'^([ \t]*)#pragma shader_feature FOG_LINEAR[ \t]*$', re.M)
+FOG_FEATURE = re.compile(r'^([ \t]*)#pragma shader_feature FOG_LINEAR[ \t]*$', re.MULTILINE)
 FOG_COORDINATE = re.compile(r'^([ \t]*)(\w+\.[xyzw]) = ([\w.]+) / _ProjectionParams\.y;$')
 FOG_DEPTH = """#ifndef CROW_Z_0_FAR_FROM_CLIPSPACE
 #if defined(UNITY_REVERSED_Z) && UNITY_REVERSED_Z == 1
@@ -314,10 +317,14 @@ def linear_fog(name, text):
         # The decompiled sequence: x = z / near; y = 1.0 - x; y = y * far; y = max(y, 0.0); then y with
         # unity_FogParams. A z / near the rule doesn't know stops the conversion.
         after = '\n'.join(lines[index + 1 : index + 12])
-        step = re.search(rf'^\s*(\w+\.[xyzw]) = 1\.0 - {re.escape(target)};$', after, re.M)
-        far = step and re.search(rf'^\s*{re.escape(step[1])} = {re.escape(step[1])} \* _ProjectionParams\.z;$', after, re.M)
+        step = re.search(rf'^\s*(\w+\.[xyzw]) = 1\.0 - {re.escape(target)};$', after, re.MULTILINE)
+        far = step and re.search(
+            rf'^\s*{re.escape(step[1])} = {re.escape(step[1])} \* _ProjectionParams\.z;$', after, re.MULTILINE
+        )
         if not far or 'unity_FogParams' not in after:
-            sys.exit(f'{name}: the z / _ProjectionParams.y in line {index + 1} is not the fog sequence linear_fog knows')
+            sys.exit(
+                f'{name}: the z / _ProjectionParams.y in line {index + 1} is not the fog sequence linear_fog knows'
+            )
         lines[index] = f'{indent}{target} = 1.0 - CROW_Z_0_FAR_FROM_CLIPSPACE({depth}) * _ProjectionParams.w;'
         rewritten += 1
     text = '\n'.join(lines)
@@ -361,8 +368,10 @@ VERTEX_INPUT_FIXES = {
     'Unlit/UIPixelate': [
         (
             '                float4 texcoord1 : TEXCOORD1;\n            };\n            struct v2f\n',
-            '                float4 texcoord1 : TEXCOORD1;\n                float2 texcoord2 : TEXCOORD2;\n'
-            '            };\n            struct v2f\n',
+            (
+                '                float4 texcoord1 : TEXCOORD1;\n                float2 texcoord2 : TEXCOORD2;\n'
+                '            };\n            struct v2f\n'
+            ),
         ),
         ('o.texcoord1 = v.texcoord1;', 'o.texcoord1 = float4(v.texcoord1.xy, v.texcoord2.xy);'),
     ]

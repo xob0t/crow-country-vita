@@ -164,7 +164,7 @@ def start_guards(mask):
             guard = subprocess.Popen(
                 [interpreter, '-I', '-c', 'while True: pass'], creationflags=HIGH_PRIORITY_CLASS | CREATE_SUSPENDED
             )
-            handle = wt.HANDLE(int(guard._handle))
+            handle = wt.HANDLE(int(guard._handle))  # noqa: SLF001 - Popen has no public handle
             check(kernel32.AssignProcessToJobObject(job, handle), 'AssignProcessToJobObject(guard)')
             check(kernel32.SetProcessAffinityMask(handle, ctypes.c_size_t(1 << bit)), 'SetProcessAffinityMask')
             handles.append(handle)

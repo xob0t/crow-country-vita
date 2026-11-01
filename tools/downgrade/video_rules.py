@@ -301,8 +301,9 @@ def video_overlay(exported: Path, overlay: dict, excluded: set, platform: str):
         version=' '.join(sorted(guids)),
     )
     files, count = 0, 0
-    for found, named in names_video.items():
+    for found, listed in names_video.items():
         relative = Path('Assets') / found
+        named = listed
         if relative in overlay:
             data = current_bytes(exported, overlay, relative)
             named = any(key in data for key in keys)
