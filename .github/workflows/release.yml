@@ -1,0 +1,22 @@
+# Attach the repository as crow-country-vita.zip to each published release, so the README can link
+# to releases/latest/download/crow-country-vita.zip: one click for the newest release.
+name: Release ZIP
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+
+jobs:
+  zip:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Package
+        run: git archive --format=zip -o crow-country-vita.zip HEAD
+      - name: Upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" crow-country-vita.zip --clobber
