@@ -9,6 +9,7 @@ import struct
 import sys
 from pathlib import Path
 
+import progress
 from common import (
     BUILTIN_LEGACY_DIFFUSE,
     BUILTIN_PARTICLES_SURFACE,
@@ -1316,12 +1317,14 @@ def weld_mesh(data: bytes):
 
 
 def weld_count(path: Path):
-    """[vertices, different vertices] of a mesh asset weld_mesh would change, else None (for scan)."""
+    """[vertices, different vertices] of a mesh asset weld_mesh would change, else None (for scan). The welded mesh
+    goes into MESH_WELD_CACHE, where mesh_weld_overlay finds it unless a rule before it changed the mesh: the weld,
+    the slow part (85,799 meshes, minutes), runs once, in scan's processes."""
     data = path.read_bytes()
-    welded = weld_mesh(data)
-    if welded is None:
+    cached = cached_output(MESH_WELD_CACHE, Path(*path.parts[path.parts.index('Assets') :]), data, weld_mesh)
+    if cached is None:
         return None
-    return [int(WELD_VERTEX_COUNT.search(data).group(1)), int(WELD_VERTEX_COUNT.search(welded).group(1))]
+    return [int(WELD_VERTEX_COUNT.search(data).group(1)), int(WELD_VERTEX_COUNT.search(cached.read_bytes()).group(1))]
 
 
 def cached_output(cache: Path, path: Path, data: bytes, make):
@@ -1347,10 +1350,14 @@ def mesh_weld_overlay(exported: Path, overlay: dict, platform: str):
         return {}
     assets = exported / 'Assets'
     counts = scan(
-        'mesh-weld', assets, lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset', weld_count
+        'mesh-weld',
+        assets,
+        lambda relative: relative.parts[0] == 'Mesh' and relative.suffix == '.asset',
+        weld_count,
+        processes=True,
     )
     result, before, after = {}, 0, 0
-    for relative, count in counts.items():
+    for relative, count in progress.track(list(counts.items()), 'Welding meshes'):
         if not count:
             continue
         path = Path('Assets') / relative

@@ -699,17 +699,23 @@ PluginImporter:
 """
 
 
-def sync_tree(source: Path, destination: Path, overlay: dict, excluded: set, known: dict | None = None):
+def sync_tree(source: Path, destination: Path, overlay: dict, excluded: set, known: dict | None = None, step=None):
     """Mirror source into destination with generated files from overlay replacing or adding paths,
     and excluded source paths left out. An overlay value is the file's bytes, or a Path to copy it from.
     Unchanged files keep their timestamps so Unity's import cache stays valid between runs. A .meta
     file the editor generated (for a folder or file that has none in the source) stays, so its GUID
-    doesn't change on every run. known: copy_if_changed's record, kept by the caller between runs."""
+    doesn't change on every run. known: copy_if_changed's record, kept by the caller between runs.
+    step: a progress step, its bar set to the files to go through and advanced per file."""
     destination.mkdir(parents=True, exist_ok=True)
     present = walk(destination)  # listed once: one stat per file was most of the time
     known = {} if known is None else known
     wanted = set()
-    for relative, stat in walk(source).items():
+    files = walk(source)
+    if step:
+        step.update(0, total=len(files) + len(overlay))
+    for relative, stat in files.items():
+        if step:
+            step.advance()
         if relative in excluded or relative in overlay:
             continue
         wanted.add(relative)
@@ -720,6 +726,8 @@ def sync_tree(source: Path, destination: Path, overlay: dict, excluded: set, kno
             (destination / relative).parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / relative, destination / relative)
     for relative, content in overlay.items():
+        if step:
+            step.advance()
         if isinstance(content, Path):
             copy_if_changed(content, destination / relative, known, relative.as_posix())
         elif not (present.get(relative) and present[relative][0] == len(content)):
@@ -823,45 +831,51 @@ def asset_overlay(exported: Path, game: Path, version: str, platform: str, assem
     Returns (overlay, exported paths left out)."""
     overlay, excluded = {}, set()
     overlay.update(shader_overlay(exported, game, version))
-    with progress.step('Asset rules'):
-        overlay.update(settings_overlay(exported, platform))
+    with progress.step('Asset rules') as rules:
+
+        def run(rule, *args):
+            # The rule running, on the step's line: some take minutes on a first build.
+            rules.note(rule.__name__.removesuffix('_overlay').replace('_', ' '))
+            return rule(*args)
+
+        overlay.update(run(settings_overlay, exported, platform))
         if platform == 'windows':
-            overlay.update(native_plugin_overlay(game))
-        overlay.update(render_texture_overlay(exported))
-        overlay.update(audio_overlay(exported, platform))
-        overlay.update(compat_component_overlay(exported, overlay, platform))
-        overlay.update(scene_reference_overlay(exported, overlay))
-        overlay.update(canvas_channel_overlay(exported, overlay))
-        overlay.update(rewired_vita_overlay(exported, overlay, platform))
-        overlay.update(material_keyword_overlay(exported, game, overlay))
-        overlay.update(vita_lit_overlay(exported, overlay, platform))
+            overlay.update(run(native_plugin_overlay, game))
+        overlay.update(run(render_texture_overlay, exported))
+        overlay.update(run(audio_overlay, exported, platform))
+        overlay.update(run(compat_component_overlay, exported, overlay, platform))
+        overlay.update(run(scene_reference_overlay, exported, overlay))
+        overlay.update(run(canvas_channel_overlay, exported, overlay))
+        overlay.update(run(rewired_vita_overlay, exported, overlay, platform))
+        overlay.update(run(material_keyword_overlay, exported, game, overlay))
+        overlay.update(run(vita_lit_overlay, exported, overlay, platform))
         engine = editor_paths(version, platform).target_engine
-        overlay[Path('Assets') / 'link.xml'] = link_xml(exported, engine, assemblies, platform).encode()
+        overlay[Path('Assets') / 'link.xml'] = run(link_xml, exported, engine, assemblies, platform).encode()
         overlay[Path('Assets') / 'link.xml.meta'] = stable_meta('asset', 'link.xml', 'TextScriptImporter').encode()
-        overlay.update(texture_overlay(exported, game, platform))
-        overlay.update(npot_texture_overlay(exported, overlay, platform))
-        overlay.update(texture_cap_overlay(exported, overlay, platform))
-        overlay.update(mipmap_overlay(exported, overlay, platform))
-        overlay.update(streamed_mesh_overlay(exported, game))
-        duplicates = mesh_duplicates(exported, overlay)
-        overlay.update(mesh_readable_overlay(exported, overlay, platform, duplicates))
-        overlay.update(mesh_weld_overlay(exported, overlay, platform))
-        hulls = mesh_hull_overlay(exported, overlay, platform, duplicates)
+        overlay.update(run(texture_overlay, exported, game, platform))
+        overlay.update(run(npot_texture_overlay, exported, overlay, platform))
+        overlay.update(run(texture_cap_overlay, exported, overlay, platform))
+        overlay.update(run(mipmap_overlay, exported, overlay, platform))
+        overlay.update(run(streamed_mesh_overlay, exported, game))
+        duplicates = run(mesh_duplicates, exported, overlay)
+        overlay.update(run(mesh_readable_overlay, exported, overlay, platform, duplicates))
+        overlay.update(run(mesh_weld_overlay, exported, overlay, platform))
+        hulls = run(mesh_hull_overlay, exported, overlay, platform, duplicates)
         overlay.update(hulls)
-        overlay.update(mesh_uv_weld_overlay(exported, overlay, platform, duplicates, hulls))
-        texture_copies, renamed_references = texture_dedup_overlay(exported, overlay)
+        overlay.update(run(mesh_uv_weld_overlay, exported, overlay, platform, duplicates, hulls))
+        texture_copies, renamed_references = run(texture_dedup_overlay, exported, overlay)
         overlay.update(renamed_references)
-        moved, renamed = addressables_overlay(exported)
+        moved, renamed = run(addressables_overlay, exported)
         overlay.update(moved)
         excluded.update(renamed)
-        moved, renamed = name_overlay(exported, game, overlay)
+        moved, renamed = run(name_overlay, exported, game, overlay)
         overlay.update(moved)
         excluded.update(renamed)
-        moved, renamed = i2_font_overlay(exported, overlay, excluded)
+        moved, renamed = run(i2_font_overlay, exported, overlay, excluded)
         overlay.update(moved)
         excluded.update(renamed)
-        video_overlay(exported, overlay, excluded, platform)
-        overlay.update(scene_dedup_overlay(exported, overlay, {**duplicates, **texture_copies}, platform))
+        run(video_overlay, exported, overlay, excluded, platform)
+        overlay.update(run(scene_dedup_overlay, exported, overlay, {**duplicates, **texture_copies}, platform))
     return overlay, excluded
 
 
@@ -901,14 +915,16 @@ def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: s
         known = json.loads(record.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         known = {}
-    with progress.step(f'Synchronizing {project.name}'):
+    with progress.step(f'Synchronizing {project.name}') as step:
         for part in ('Assets', 'ProjectSettings', 'Packages'):
+            step.note(part)
             sync_tree(
                 exported / part,
                 project / part,
                 {k.relative_to(part): v for k, v in overlay.items() if k.parts[0] == part},
                 {k.relative_to(part) for k in excluded if k.parts[0] == part},
                 known.setdefault(part, {}),
+                step,
             )
     record.write_text(json.dumps(known, sort_keys=True), encoding='utf-8')
     (project / PROJECT_INPUTS).write_text(json.dumps(inputs, indent=1), encoding='utf-8')
