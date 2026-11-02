@@ -509,6 +509,11 @@ def listing(folder: Path):
 
 SCAN_CACHE = WORK / 'scan-cache'
 SCAN_THREADS = 16
+# Processes for a scan whose function is CPU work rather than reading (scan's processes=True): Python's threads run
+# one at a time. A core is left for the rest of the PC.
+SCAN_PROCESSES = max(1, min(8, (os.cpu_count() or 2) - 1))
+# A scan with at least this many files to read shows a bar.
+SCAN_BAR = 500
 
 
 def code_fingerprint(function, seen=None):
@@ -570,12 +575,14 @@ def plain(value):
     return None
 
 
-def scan(name: str, folder: Path, select, function, version=''):
+def scan(name: str, folder: Path, select, function, version='', processes=False):
     """{relative path: function(path)} for the files under folder whose relative path select() accepts.
     The results are kept in work/scan-cache/<name>.json under each file's size and modification time,
     so a rerun reads only the files that changed. function's result must be JSON; version names what
     else it depends on (a change discards the cache). So does a change to function itself or to what
-    code_fingerprint sees of it (a constant it reads, such as asset_rules.NAME_SEARCH_BYTES)."""
+    code_fingerprint sees of it (a constant it reads, such as asset_rules.NAME_SEARCH_BYTES).
+    processes: function is CPU work (a module-level function), run in SCAN_PROCESSES processes, not threads.
+    A scan with SCAN_BAR files or more to read shows a bar."""
     version = f'{version} code {code_digest(function)}'
     cache_path = SCAN_CACHE / f'{name}.json'
     try:
@@ -596,11 +603,24 @@ def scan(name: str, folder: Path, select, function, version=''):
         results[relative] = entry[2]
     # Reading many files is mostly waiting (on the disk, on the virus scanner opening each one), so
     # SCAN_THREADS read at once.
-    with concurrent.futures.ThreadPoolExecutor(SCAN_THREADS) as pool:
+    if processes and len(missing) > 1:
+        pool = concurrent.futures.ProcessPoolExecutor(min(SCAN_PROCESSES, len(missing)))
+        paths = [folder / relative for relative, _ in missing]
+        values = pool.map(function, paths, chunksize=max(1, min(64, len(paths) // (8 * SCAN_PROCESSES))))
+    else:
+        pool = concurrent.futures.ThreadPoolExecutor(SCAN_THREADS)
         values = pool.map(lambda item: function(folder / item[0]), missing)
+    with pool, contextlib.ExitStack() as bar:
+        step = (
+            bar.enter_context(progress.step(f'Scanning ({name})', total=len(missing), eta=True))
+            if len(missing) >= SCAN_BAR
+            else None
+        )
         for (relative, stat), value in zip(missing, values, strict=True):
             fresh[relative.as_posix()] = [*stat, value]
             results[relative] = value
+            if step:
+                step.advance()
     if fresh != entries:
         SCAN_CACHE.mkdir(parents=True, exist_ok=True)
         part = cache_path.with_name(f'{cache_path.name}.{os.getpid()}.part')
