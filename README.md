@@ -41,7 +41,7 @@ Every download is checked against a pinned hash, and the Unity installers must c
 2. Download [crow-country-vita.zip](https://github.com/xob0t/crow-country-vita/releases/latest/download/crow-country-vita.zip), right-click it, choose **Extract All** and change the folder to `C:\crow`.
    Keep the path short. Unity's IL2CPP can't open its own files from a folder whose path is longer than 144 characters, and with Windows' long paths off (the default) the game's deepest files need it at 70 or fewer. A folder on a OneDrive desktop can be that deep. The build checks this before it starts.
 
-3. Open the `crow-country-vita` folder in `C:\crow`, right-click in it, choose **Open in Terminal** (on Windows 10: Shift + right-click, **Open PowerShell window here**), and run:
+3. Open `C:\crow`, right-click in it, choose **Open in Terminal** (on Windows 10: Shift + right-click, **Open PowerShell window here**), and run:
 
    ```powershell
    uv run build.py
