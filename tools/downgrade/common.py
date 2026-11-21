@@ -25,6 +25,20 @@ from rich.text import Text
 truststore.inject_into_ssl()
 
 
+def no_crash_dialogs():
+    """Turn off Windows' crash dialogs for this process and the tools it starts, which inherit its error mode. A tool
+    that crashes then exits, and its error goes to its log and the build's output. Without this, il2cpp.exe's unhandled
+    exception showed "has stopped working" and the build stopped behind the dialog."""
+    if sys.platform == 'win32':
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetErrorMode(kernel32.GetErrorMode() | 0x0001 | 0x0002)  # SEM_FAILCRITICALERRORS, NOGPFAULTERRORBOX
+
+
+no_crash_dialogs()
+
+
 def registry_env(name, scope):
     """A variable as stored for the user ('user') or the machine ('machine'), or None."""
     import winreg
@@ -157,6 +171,60 @@ def editor_data(version):
 
 def editor_exe(version):
     return editor_folder(version) / 'Unity.exe'
+
+
+# Unity 2018.2's UnityLinker.exe and il2cpp.exe are .NET Framework programs held to Windows' 260-character path limit
+# (259 characters and the terminating NUL), whatever Windows' long-path setting. From a deeper folder they throw
+# PathTooLongException and Windows shows "il2cpp.exe has stopped working". The deepest file each target's IL2CPP
+# writes below the repository's folder, from the builds' own trees (Nov 2026): the PS Vita module's link result, and
+# the Windows IL2CPP player's generated C++. Measured by replaying the PS Vita build's code steps from deep folders:
+# a 144-character folder gets through IL2CPP, a 145-character one fails on the link result.
+IL2CPP_DEEPEST = {
+    'vita': r'work\crow-2018.2.19f1-vita\Library\il2cpp_cache\linkresult_' + 32 * '0' + r'\Il2CppAssemblies.suprx',
+    'il2cpp': r'builds\crow-2018.2.19f1-il2cpp\CrowCountry_BackUpThisFolder_ButDontShipItWithYourGame\il2cppOutput'
+    r'\Bulk_UnityEngine.UnityWebRequestTextureModule_0.cpp',
+}
+# With Windows' long paths off, Python and the other tools are held to the same limit, and the deepest file is the
+# game's: AssetRipper's export of its longest music clip name.
+DEEPEST = (
+    r'work\rip-2018.2.19f1\ExportedProject\Assets\AudioClip\2023-06-26 - Unwavering Hope wip2d - Beyond Forgiveness'
+    r' (Final Natalie Meet) - Beyond Forgiveness (Final Natalie Meet) LOOPED.ogg.meta'
+)
+
+
+def long_paths_enabled():
+    import winreg
+
+    try:
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r'SYSTEM\CurrentControlSet\Control\FileSystem') as handle:
+            return winreg.QueryValueEx(handle, 'LongPathsEnabled')[0] == 1
+    except OSError:
+        return False
+
+
+def max_root(targets):
+    """The longest path the repository's folder can have to build the targets ('vita', 'windows', 'il2cpp')."""
+    deepest = [IL2CPP_DEEPEST[t] for t in targets if t in IL2CPP_DEEPEST]
+    if not long_paths_enabled():
+        deepest.append(DEEPEST)
+    return 259 - len('\\' + max(deepest, key=len)) if deepest else None
+
+
+def root_too_long(targets):
+    """What to tell the user when the repository's folder is too deep to build the targets, or ''."""
+    limit = max_root(targets)
+    if limit is None or len(str(ROOT)) <= limit:
+        return ''
+    why = (
+        "Windows' long paths are off, so the tools can't open the game's deepest files from a longer path"
+        if not long_paths_enabled()
+        else "Unity's IL2CPP can't open its files from a longer path"
+    )
+    return (
+        f"This folder's path is {len(str(ROOT))} characters long:\n  {ROOT}\n"
+        f'The build needs {limit} or fewer: {why}. '
+        r'Move the whole folder to a short path such as C:\crow and run uv run build.py there.'
+    )
 
 
 def download(url, destination: Path, digest: str | None):

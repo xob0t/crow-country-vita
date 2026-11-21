@@ -39,6 +39,8 @@ from common import (
     editor_data,
     env,
     file_hash,
+    max_root,
+    root_too_long,
 )
 from rich.text import Text
 
@@ -674,6 +676,18 @@ def space_needed(targets):
     return need - shared
 
 
+def check_folder(targets):
+    """The repository's folder is short enough for IL2CPP and, with Windows' long paths off, the game's files."""
+    limit = max_root(targets)
+    return Check(
+        'Folder path',
+        not root_too_long(targets),
+        f'{len(str(ROOT))} characters; '
+        + (f'the build needs {limit} or fewer' if limit else 'no limit for these targets'),
+        r'move the folder to a short path such as C:\crow',
+    )
+
+
 def check_space(targets):
     need = space_needed(targets)
     free = free_gb(WORK)
@@ -767,6 +781,7 @@ def checks_for(targets, game: Path, license_check=False):
     version = TARGET
     vita = 'vita' in targets
     checks = [
+        check_folder(targets),
         check_python(),
         check_csc(),
         check_game(game),
