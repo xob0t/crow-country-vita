@@ -3,7 +3,7 @@
 The pipeline turns your copy of Crow Country into a Unity 2018.2 project, and the Unity editor builds a PS Vita app or a Windows player from it. The pipeline only reads the game. It writes the export and the Unity projects to `work/`, the players and the VPK to `builds/`, and the logs to `artifacts/`.
 
 You need Windows 10 or 11 on x64, and Crow Country from Steam or GOG.
-Keep the repository in a short folder such as `C:\crow\crow-country-vita`: the PS Vita build needs a path of at most 144 characters, and at most 70 with Windows' long paths off (see [`build`](#build)). With uv installed, the short version is:
+Keep the repository in a short folder such as `C:\crow`: the PS Vita build needs a path of at most 144 characters, and at most 70 with Windows' long paths off (see [`build`](#build)). With uv installed, the short version is:
 
 ```powershell
 uv run build.py                 # the PS Vita app: builds/crow-2018.2.19f1-vita.vpk
