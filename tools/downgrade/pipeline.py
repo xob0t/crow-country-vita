@@ -100,6 +100,7 @@ from common import (
     project_folder,
     replace_path,
     rewritten_folder,
+    root_too_long,
     run,
     stable_meta,
     walk,
@@ -933,6 +934,26 @@ def assemble(rip_dir: Path, project: Path, version: str, game: Path, platform: s
 # ---------------------------------------------------------------- build
 
 
+def check_il2cpp_paths(version: str, target: str):
+    """Stop with what to do before a build whose UnityLinker or IL2CPP can't open a file (common.IL2CPP_DEEPEST):
+    the repository's folder too deep for target ('vita' or 'il2cpp'), or a header of the editor's libil2cpp, which
+    il2cpp.exe hashes before it compiles, over 259 characters (an editor under a very long user folder)."""
+    if problem := root_too_long([target]):
+        sys.exit(problem)
+    data = editor_data(version)
+    trees = [
+        data / 'il2cpp',
+        *([data / 'PlaybackEngines' / 'PSP2Player' / 'Tools' / 'il2cpp'] if target == 'vita' else []),
+    ]
+    files = (p for tree in trees if tree.exists() for p in tree.rglob('*') if p.is_file())
+    longest = max(files, key=lambda p: len(str(p)), default=None)
+    if longest is not None and len(str(longest)) > 259:
+        sys.exit(
+            f"IL2CPP can't open files with a path over 259 characters, and this one has {len(str(longest))}:\n"
+            f'  {longest}\nInstall the Unity {version} editor in a shorter folder.'
+        )
+
+
 def build(
     project: Path,
     version: str,
@@ -952,6 +973,8 @@ def build(
         sys.exit(f'No Unity {version} editor at {unity}')
     if editor_has_open(project):
         sys.exit(f'A Unity editor has {project} open; close it first')
+    if platform == 'vita' or backend == 'il2cpp':
+        check_il2cpp_paths(version, platform if platform == 'vita' else 'il2cpp')
     # A Temp folder left by an editor that crashed or by quickcode: the build script's watcher would
     # take its staged assemblies for this build's (a leftover tempStrip ends its watch at once).
     shutil.rmtree(project / 'Temp', ignore_errors=True)
@@ -1330,6 +1353,7 @@ def quick_code(version: str, game: Path, force: bool = False):
 
 
 def replay_code_steps(project, temp, output, rewritten, version, linker_arguments, il2cpp_arguments):
+    check_il2cpp_paths(version, 'vita')
     shutil.copytree(CODE_STAGE, temp, ignore=shutil.ignore_patterns('linker-xml', LAYOUT, NON_CODE_INPUTS))
     managed = temp / 'StagingArea' / 'Data' / 'Managed'
     for dll in [*rewritten.glob('*.dll'), compat_path('vita')]:

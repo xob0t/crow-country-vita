@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'tools' / 'downgrade'))
 import progress  # noqa: E402
-from common import TARGET, WORK, default_game, registry_env  # noqa: E402
+from common import TARGET, WORK, default_game, registry_env, root_too_long  # noqa: E402
 
 PIPELINE = ROOT / 'tools' / 'downgrade' / 'pipeline.py'
 LOCK = ROOT / 'tools' / 'downgrade' / 'lock.py'
@@ -136,6 +136,9 @@ def main():
     args = parser.parse_args()
     if not (args.vita or args.windows or args.il2cpp):
         args.vita = True
+    # First, before setup's downloads: from a deeper folder the build fails at IL2CPP, an hour in.
+    if problem := root_too_long([t for t in ('vita', 'windows', 'il2cpp') if getattr(args, t)]):
+        progress.fail(f'build.py: {problem}')
     if args.locked or os.environ.get('CROW_LOCK'):
         build(args)
         return

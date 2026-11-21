@@ -2,7 +2,8 @@
 
 The pipeline turns your copy of Crow Country into a Unity 2018.2 project, and the Unity editor builds a PS Vita app or a Windows player from it. The pipeline only reads the game. It writes the export and the Unity projects to `work/`, the players and the VPK to `builds/`, and the logs to `artifacts/`.
 
-You need Windows 10 or 11 on x64, and Crow Country from Steam or GOG. With uv installed, the short version is:
+You need Windows 10 or 11 on x64, and Crow Country from Steam or GOG.
+Keep the repository in a short folder such as `C:\crow\crow-country-vita`: the PS Vita build needs a path of at most 144 characters, and at most 70 with Windows' long paths off (see [`build`](#build)). With uv installed, the short version is:
 
 ```powershell
 uv run build.py                 # the PS Vita app: builds/crow-2018.2.19f1-vita.vpk
@@ -320,6 +321,8 @@ If you see "AssetRipper did not start" or "AssetRipper export produced no projec
 - "A Unity editor has ... open" means an editor still has the project open. Close it.
 - "PS Vita build support is not installed for this editor" means the PS Vita module is missing. Run `uv run tools/setup.py --vita`.
 - If the editor stops at once, run `uv run tools/setup.py doctor --license`. A failed check leaves the editor's log in `work/license-check.log`.
+- "This folder's path is ... characters long": `build.py` stops before setup, and the doctor lists it as `Folder path`, when the repository's folder is too deep. Unity 2018.2's `UnityLinker.exe` and `il2cpp.exe` are .NET Framework programs held to Windows' 260-character path limit, whatever Windows' long-path setting. The deepest file the PS Vita build's IL2CPP writes is 114 characters below the folder (`Library/il2cpp_cache/linkresult_<hash>/Il2CppAssemblies.suprx`), so the folder can have 144 characters; for `--il2cpp`, 108. With Windows' long paths off (`LongPathsEnabled`), Python and the other tools have the same limit, and the game's deepest file in AssetRipper's export needs the folder at 70 or fewer. From a deeper folder the build died at IL2CPP with `PathTooLongException` behind an "il2cpp.exe has stopped working" dialog. Move the whole folder to a short path such as `C:\crow` and run `build.py` again there.
+- The pipeline turns Windows' crash dialogs off for the tools it starts (`SetErrorMode`, which they inherit; `common.no_crash_dialogs`), so a tool that crashes exits rather than waiting behind "has stopped working". Its error is in its log: IL2CPP's and UnityLinker's are in the editor's log, `artifacts/downgrade/build-<version>-<platform>.log`.
 - If IL2CPP or the PS Vita build steps fail, run `uv run tools/setup.py doctor --target vita`. If you started `pipeline.py` from a shell opened before setup, use a new shell.
 
 ### `quickcode`
