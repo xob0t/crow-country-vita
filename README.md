@@ -39,7 +39,6 @@ Every download is checked against a pinned hash, and the Unity installers must c
    ```
 
 2. Download [crow-country-vita.zip](https://github.com/xob0t/crow-country-vita/releases/latest/download/crow-country-vita.zip), right-click it, choose **Extract All** and set the folder to `C:\crow`. You can also clone this repository there.
-   The build fails if the folder's path is longer than 70 characters (144 with Windows' long paths on), and `C:\crow` keeps it well under. If the path is too long, the build says so and stops before it starts.
 
 3. Open `C:\crow`, right-click in it, choose **Open in Terminal** (on Windows 10: Shift + right-click, **Open PowerShell window here**), and run:
 
