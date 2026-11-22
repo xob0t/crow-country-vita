@@ -38,8 +38,8 @@ Every download is checked against a pinned hash, and the Unity installers must c
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
    ```
 
-2. Download [crow-country-vita.zip](https://github.com/xob0t/crow-country-vita/releases/latest/download/crow-country-vita.zip), right-click it, choose **Extract All** and change the folder to `C:\crow`.
-   Keep the path short. Unity's IL2CPP can't open its own files from a folder whose path is longer than 144 characters, and with Windows' long paths off (the default) the game's deepest files need it at 70 or fewer. A folder on a OneDrive desktop can be that deep. The build checks this before it starts.
+2. Download [crow-country-vita.zip](https://github.com/xob0t/crow-country-vita/releases/latest/download/crow-country-vita.zip), right-click it, choose **Extract All** and set the folder to `C:\crow`. You can also clone this repository there.
+   The build fails if the folder's path is longer than 70 characters (144 with Windows' long paths on), and `C:\crow` keeps it well under. If the path is too long, the build says so and stops before it starts.
 
 3. Open `C:\crow`, right-click in it, choose **Open in Terminal** (on Windows 10: Shift + right-click, **Open PowerShell window here**), and run:
 
